@@ -35,11 +35,6 @@ var DiskBTree *DiskTree
 var maxPageID uint32     // Use this to assign a pageID to new Pages.
 var FreeSpaceMap []int64 // Simplistic Free Space Map. Contains an array of offsets where data has been deleted. On real-world databases this is a B-Tree structure.
 
-// Cell Layout
-// 0		   1		    5                  9             13        + key_size      + value_size
-// +------------------------------------------------------------------------------------------------+
-// | [bytes] Flags | [int] Key Size | [int] value size | []int pageId | [bytes] key | [bytes] value |
-// +------------------------------------------------------------------------------------------------+
 type Cell struct {
 	Flags     []byte // 1 Byte
 	KeySize   int32  // 4 Bytes
@@ -62,22 +57,10 @@ type PageHeader struct {
 }
 
 type CellPointer struct {
-	Flags  []byte // Flags 1 bytes
-	offset int32  // Offset of cell 4 bytes
+	Flags   []byte // Flags 1 bytes
+	offset  int32  // Offset of cell 4 bytes
+	CellRef *Cell  // In mem reference to actual cell
 }
-
-// Page Structure(Heap Page)
-// +----------------------+  offset 0
-// | PageHeaderData       |  (fixed-size metadata)
-// +----------------------+  offset 27
-// | cell pointer         |  ↓ (one entry per tuple)
-// +----------------------+
-// | ... free space ...   |
-// +----------------------+
-// | tuple data ("cells") |  ↑ Data cells
-// +----------------------+  offset 8176
-// | special space        |  Padding 16 Bytes (rarely used in heap pages)
-// +----------------------+  offset 8192
 
 // Page 8K
 type Page struct {
@@ -186,66 +169,6 @@ func init() {
 	fmt.Println("Initialized DiskBTree....")
 }
 
-//func AssignPage() (int32, error) {
-//	fmt.Println("IN ASSIGNPAGE...")
-//	if maxPageID != 0 {
-//		return int32(maxPageID), nil
-//	}
-//	// Check the Metadata GetLastPage
-//	metadataPage := make([]byte, 20)
-//	r, err := DiskBTree.fd.Read(metadataPage)
-//
-//	if err != nil && !errors.Is(err, io.EOF) {
-//		fmt.Println("ERR reading from file: ", err.Error())
-//		log.Fatal(err)
-//	}
-//
-//	if r <= 0 {
-//		fmt.Println("Read 0 Bytes => ", r)
-//		// Set Root page
-//		binary.LittleEndian.PutUint32(metadataPage[4:8], uint32(1))
-//		for i, v := range []byte("Tree") {
-//
-//			metadataPage[8+(3-i)] = v
-//
-//		}
-//		_, err = DiskBTree.fd.Write(metadataPage)
-//
-//		if err != nil {
-//			log.Fatal(err)
-//		}
-//
-//		// Flush
-//		err = DiskBTree.fd.Sync()
-//		return 1, nil
-//	}
-//
-//	fmt.Println("CONTENT ==> ", metadataPage)
-//
-//	// read root node
-//	root := binary.LittleEndian.Uint32(metadataPage[0:4])
-//
-//	fmt.Println("Root offset => ", metadataPage[0:4], root)
-//
-//	// If root is present, traverse
-//
-//	DiskBTree = &DiskTree{
-//		RootNode:  nil,
-//		RootPage:  0,
-//		PageCount: 0,
-//	}
-//
-//	if root != 0 {
-//		// Create root node
-//		// Set DiskTree Variable
-//		// traverse
-//
-//		return int32(root), nil
-//	}
-//
-//	return 1, nil
-//}
-
 // traverse nodes and set page count, lookupID and maxPageID
 func (d *DiskTree) startupTraversal(rootOffset int32) {
 	// pgeOff := make([]byte, PAGE_SIZE_BYTES)
@@ -344,8 +267,6 @@ func (d *DiskTree) LoadPage(pageId int32) (*Page, error) {
 			offset: cellOffset,
 		}
 
-		pointers = append(pointers, cellP)
-
 		// Get cell data
 		cellFlag := pageData[cellOffset]
 		keySize := binary.LittleEndian.Uint32(pageData[cellOffset+1 : cellOffset+1+CELL_KEY_SIZE_BYTES])
@@ -381,6 +302,9 @@ func (d *DiskTree) LoadPage(pageId int32) (*Page, error) {
 			Value:     val,
 		}
 
+		cellP.CellRef = &c
+
+		pointers = append(pointers, cellP)
 		cells = append(cells, c)
 
 	}
@@ -731,6 +655,15 @@ func (p *Page) flush() (bool, error) {
 	DiskBTree.fd.Sync()
 
 	return true, nil
+}
+
+// Check wheather the page represents an internal node
+func (p *Page) IsInternal() (bool, error) {
+	if p.Header == nil {
+		return false, DiskioError{Message: "No header set for this page"}
+	}
+
+	return p.Header.isSet(7), nil
 }
 
 // Convert items in cell to byte array
