@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 
+	"github.com/oryankibandi/on_disk_btree/pkg/bp_tree"
 	"github.com/oryankibandi/on_disk_btree/pkg/disk_io"
 )
 
@@ -27,6 +28,14 @@ func sortItems(l []NodeData) []NodeData {
 
 func main() {
 	fmt.Println("Hello world")
+	btree, err := bp_tree.InitBTree[int32]()
+
+	if err != nil {
+		panic(err.Error())
+	}
+
+	log.Println("NEW BTREE => ", *btree)
+	log.Println("BTree Root => ", *btree.Root)
 
 	items := make([]NodeData, 0)
 

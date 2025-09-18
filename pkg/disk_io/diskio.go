@@ -2,7 +2,6 @@ package diskio
 
 import (
 	"bufio"
-	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -188,6 +187,9 @@ func (d *DiskTree) startupTraversal(rootOffset int32) {
 	}
 
 	fmt.Println("PAGE =+=+> ", rootPage)
+
+	// set RootNode
+	d.RootNode = rootPage
 }
 
 // Create an in-memory Page from an existing on-disk page
@@ -399,13 +401,13 @@ func (d *DiskTree) flushMetadata() {
 
 // Create a new Page. Requires at least two keys and values/pointers. Key should be sorted in a lexicographical order
 // TODO: Add Pointers
-func New[T cmp.Ordered](keys [][]byte, values *([][]byte), pageId *[]int32) (*Page, error) {
+func New(keys [][]byte, values *([][]byte), childPageIds *[]int32) (*Page, error) {
 	fmt.Println("(NEW) KEYS ==> ", keys)
 	if len(keys) < DEGREE {
 		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
 	}
 
-	if len(*values) <= 0 && len(*pageId) <= 0 {
+	if len(*values) <= 0 && len(*childPageIds) <= 0 {
 		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
 	}
 
@@ -443,7 +445,7 @@ func New[T cmp.Ordered](keys [][]byte, values *([][]byte), pageId *[]int32) (*Pa
 	return &p, nil
 
 	// Create cells and pointer
-	p.insertCells(keys, values, pageId)
+	p.insertCells(keys, values, childPageIds)
 
 	// Add page count & offset
 	if DiskBTree.RootNode == nil && DiskBTree.PageCount <= 0 {
