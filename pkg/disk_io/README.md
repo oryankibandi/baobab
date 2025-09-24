@@ -16,7 +16,7 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
  |     Page Count       |
  +----------------------+  offset 16
  | Max Page ID Assigned |
- +----------------------+  offset 24
+ +----------------------+  offset 20
  ```
 
  ### Page Layout(Heap Page)

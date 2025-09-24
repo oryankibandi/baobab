@@ -1,10 +1,14 @@
-package bp_tree
+package helpers
 
 import (
 	"bytes"
 	"cmp"
 	"encoding/binary"
 	"fmt"
+)
+
+const (
+	DEGREE = 2
 )
 
 // sorting
@@ -50,7 +54,7 @@ func LookupBinarySearch[T cmp.Ordered](sortedList []T, searchKey T, startIdx int
 	if l == 1 {
 		fmt.Println("LAST ARR => ", sortedList)
 		e := fmt.Sprintf("Key %d does not exist", searchKey)
-		return -1, BTreeError{Message: e}
+		return -1, HelperError{Message: e}
 	}
 
 	if sortedList[m] > searchKey {
@@ -104,10 +108,11 @@ func InsertToList[T any](list *[]T, idx int, val T) (*[]T, error) {
 
 	fmt.Println(fmt.Sprintf("Inserting %v at index %d to %v", val, idx, list))
 	if idx < 0 {
-		return nil, BTreeError{Message: fmt.Sprintf("(insertToList) Index %d out of bounds\n", idx)}
+		return nil, HelperError{Message: fmt.Sprintf("(insertToList) Index %d out of bounds\n", idx)}
 	}
 
 	if idx > len(*list)-1 {
+		fmt.Println("INDEX GREATER THAN WHATS AVAILABLE---> ", len(*list))
 		n := make([]T, 0)
 
 		n = append(n, *list...)
@@ -132,7 +137,7 @@ func InsertToList[T any](list *[]T, idx int, val T) (*[]T, error) {
 func RemoveEmptyValues[T any](l *[]*T, idx int) (*[]*T, error) {
 	if len(*l) <= idx+1 || (*l)[idx] != nil {
 		fmt.Println("Nothing to replace")
-		return l, BTreeError{Message: "Nothing to replace"}
+		return l, HelperError{Message: "Nothing to replace"}
 	}
 
 	childOrder := (2 * DEGREE) + 1
@@ -193,14 +198,14 @@ func Compact[T any](list []*T) []*T {
 
 func DeleteSliceKey[T cmp.Ordered](l *[]T, idx int) (*[]T, error) {
 	if len(*l) <= 0 {
-		return nil, BTreeError{Message: fmt.Sprintf("(deleteSliceKey) Slice is empty\n", idx)}
+		return nil, HelperError{Message: fmt.Sprintf("(deleteSliceKey) Slice is empty\n", idx)}
 	}
 
 	if idx < 0 || idx >= len(*l) {
 		fmt.Println("IDX < 0 => ", idx < 0)
 		fmt.Println(" idx+1 > len(*l) ==> ", idx+1 > len(*l))
 		fmt.Println("LEN(*l) => ", len(*l))
-		return nil, BTreeError{Message: fmt.Sprintf("(deleteSliceKey) Index %d out of bounds\n", idx)}
+		return nil, HelperError{Message: fmt.Sprintf("(deleteSliceKey) Index %d out of bounds\n", idx)}
 	}
 
 	n := make([]T, 0)

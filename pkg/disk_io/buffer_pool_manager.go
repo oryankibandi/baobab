@@ -1,6 +1,7 @@
 package diskio
 
 import (
+	"log"
 	"os"
 )
 
@@ -9,16 +10,32 @@ type BufferPool struct {
 	fd   *os.File
 }
 
+var BPool BufferPool
+
+func init() {
+	BPool = BufferPool{
+		pool: make(map[uint32]*Page),
+	}
+
+	log.Println("Initialized Buffer Pool: ", BPool)
+}
+
 // Gets page if in cache, otherwise read from disk(diskio)
 func (bp *BufferPool) FetchPage(pageID uint32) (*Page, error) {
 	// Check cache else read from disk
 	v, ok := bp.pool[pageID]
 
 	if ok {
+		log.Println("CACHE HIT: ", pageID)
+		log.Println("(FetchPage) PAGE KEYS: ")
+		for i, c := range v.Cells {
+			log.Printf("%d: %v\n", i, c.Key)
+		}
 		return v, nil
 	}
 
 	// cache miss
+	log.Println("CACHE MISS: ", pageID)
 	page, err := DiskBTree.LoadPage(int32(pageID))
 
 	if err != nil {
@@ -27,6 +44,7 @@ func (bp *BufferPool) FetchPage(pageID uint32) (*Page, error) {
 
 	// Add to cache
 	bp.pool[pageID] = page
+	log.Println("ADDED TO POOL ------> ", bp.pool)
 
 	return page, nil
 }
