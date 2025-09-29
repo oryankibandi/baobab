@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -25,6 +26,39 @@ func sortItems(l []NodeData) []NodeData {
 	return t
 }
 
+func NewRandomNodeData(strLen int) NodeData {
+	if strLen <= 0 {
+		strLen = 16
+	}
+	return NodeData{
+		key:   randomInt32Positive(),
+		value: randomAlphaNumBytes(strLen),
+	}
+}
+
+const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+func randomInt32Positive() int32 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // in production return an error instead of panicking
+	}
+	// mask off sign bit so result is non-negative
+	return int32(binary.BigEndian.Uint32(b[:]) & 0x7fffffff)
+}
+
+func randomAlphaNumBytes(n int) []byte {
+	out := make([]byte, n)
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		panic(err)
+	}
+	for i := 0; i < n; i++ {
+		out[i] = letters[int(buf[i])%len(letters)]
+	}
+	return out
+}
+
 func main() {
 	fmt.Println("Hello world")
 	btree, err := bp_tree.InitBTree[int32]()
@@ -44,7 +78,7 @@ func main() {
 	items = append(items, NodeData{key: 25, value: []byte("CAPETOWN systems")})
 	items = append(items, NodeData{key: 5, value: []byte("AMSTERDAN systems")})
 	items = append(items, NodeData{key: 520, value: []byte("DC systems")})
-	// items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
+	items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
 	items = append(items, NodeData{key: 45, value: []byte("Amsterdam systems")})
 
 	sorted := sortItems(items)
@@ -70,33 +104,22 @@ func main() {
 	}
 
 	fmt.Println("Page Inserted: ", inserted)
+	fmt.Println("--------------------------------------------------------------------------------------------------------------")
+	fmt.Println("--------------------------------------------------------------------------------------------------------------")
+	fmt.Println("--------------------------------------------------------------------------------------------------------------")
 
-	// second insert
-	//items = make([]NodeData, 0)
-	//items = append(items, NodeData{key: 520, value: []byte("DC systems")})
-	//items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
+	for i := range 1 {
+		r := NewRandomNodeData(12)
+		fmt.Println("Random DATA: ", r)
+		k := make([]byte, 0)
+		n := binary.LittleEndian.AppendUint32(k, uint32(r.key))
 
-	//keySlice = make([][]byte, 0)
-	//valSlice = make([][]byte, 0)
+		inserted, err := bp_tree.InsertValue([][]byte{n}, [][]byte{r.value})
 
-	//sorted = sortItems(items)
+		if err != nil {
+			panic(err)
+		}
 
-	//for _, v := range sorted {
-	//	k := make([]byte, 0)
-	//	n := binary.LittleEndian.AppendUint32(k, uint32(v.key))
-	//	fmt.Printf("(main) %d TO LITTLE ENDIAN ==> %v\n", v.key, n)
-	//	keySlice = append(keySlice, n)
-
-	//	valSlice = append(valSlice, v.value)
-	//}
-
-	//fmt.Println("INSERTING LIST -> ", keySlice, valSlice)
-	//inserted, err = bp_tree.InsertValue(keySlice, valSlice)
-
-	//if err != nil {
-	//	log.Fatal(err.Error())
-	//}
-
-	//fmt.Println("Second Insertion: ", inserted)
-
+		fmt.Printf("%d inserted -> %v\n", i, inserted)
+	}
 }

@@ -18,7 +18,7 @@ const (
 	DEGREE                   = 2
 	ORDER                    = DEGREE * 2
 	PAGE_SIZE_BYTES          = 8192
-	HEADER_SIZE_BYTES        = 27
+	HEADER_SIZE_BYTES        = 31
 	METADATA_PAGE_SIZE_BYTES = 20
 	LOWER_PADDING_BYTES      = 16
 	CELL_POINTER_SIZE_BYTE   = 5
@@ -44,7 +44,7 @@ type Cell struct {
 	Value     []byte // value_size Bytes
 }
 
-// Header 24B
+// Header 31B
 type PageHeader struct {
 	Flags       byte  // 1 Byte
 	PageId      int32 // ID of page. Possibly aligns with number of block/page number on disk
@@ -54,6 +54,7 @@ type PageHeader struct {
 	LowerOffset int32 //  Begining of free space
 	MagicNumber int32 // Magic Number 4 Bytes
 	Checksum    int16 // Checksum 2 Bytes
+	RightChild  int32 // Right most pointer for internal nodes
 }
 
 type CellPointer struct {
@@ -210,7 +211,7 @@ func (d *DiskTree) LoadPage(pageId int32) (*Page, error) {
 	}
 
 	fmt.Println("READING FROM OFFSET => ", offset)
-	fmt.Println("PAGEID DATA -*-*->", pageData)
+	// fmt.Println("PAGEID DATA -*-*->", pageData)
 	fmt.Println("PAGE DATA LEN -> ", len(pageData))
 
 	// Page Header items
@@ -226,7 +227,8 @@ func (d *DiskTree) LoadPage(pageId int32) (*Page, error) {
 	lowerOff := binary.LittleEndian.Uint32(pgeHeader[17:21])
 	freeSpace := binary.LittleEndian.Uint32(pgeHeader[9:13])
 	checksum := binary.LittleEndian.Uint32(pgeHeader[21:25])
-	magicNumber := binary.LittleEndian.Uint16(pgeHeader[25:])
+	magicNumber := binary.LittleEndian.Uint16(pgeHeader[25:27])
+	rightPtr := binary.LittleEndian.Uint32(pgeHeader[27:])
 
 	h := PageHeader{
 		Flags:       pgeHeader[0],
@@ -237,6 +239,7 @@ func (d *DiskTree) LoadPage(pageId int32) (*Page, error) {
 		LowerOffset: int32(lowerOff),
 		MagicNumber: int32(magicNumber),
 		Checksum:    int16(checksum),
+		RightChild:  int32(rightPtr),
 	}
 
 	fmt.Println("HEADER =========================> ", h)
@@ -256,6 +259,7 @@ func (d *DiskTree) LoadPage(pageId int32) (*Page, error) {
 	fmt.Println("Upper Offset => ", upperOffset)
 	fmt.Println("Lower Offset => ", lowerOff)
 	fmt.Println("CELL POINTERS => ")
+	fmt.Println("RightPointer ==> ", rightPtr)
 
 	pointers := make([]CellPointer, 0)
 	cells := make([]Cell, 0)
@@ -363,7 +367,7 @@ func (d *DiskTree) flushMetadata() {
 	_, err = wr.Write([]byte{0, 0, 0, 0})
 
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		log.Fatal(fmt.Sprintf("Unable to write root page metadata: ", err.Error()))
 	}
 	// tree height
 	_, err = wr.Write([]byte{0, 0, 0, 0})
@@ -415,7 +419,14 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
 	}
 
-	if len(*values) <= 0 && len(*childPageIds) <= 0 {
+	if values == nil && childPageIds == nil {
+		return nil, DiskioError{Message: "Insufficient input parameters: Either page IDs or values are required to create a new page."}
+	}
+
+	log.Printf("VALUES ==> %v\n", values)
+	log.Printf("CHILD PAGE IDS ==> %v\n", childPageIds)
+
+	if (values != nil && len(*values) <= 0) && len(*childPageIds) <= 0 {
 		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
 	}
 
@@ -427,6 +438,7 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 	//}
 
 	// fmt.Println("RETIEVED NEW NODE PAGE -> ", pge)
+	var rightPtr int32
 
 	h := PageHeader{
 		Flags:       byte(32), // 0010000
@@ -435,9 +447,10 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 		FreeSpace:   PAGE_SIZE_BYTES - HEADER_SIZE_BYTES,
 		UpperOffset: PAGE_SIZE_BYTES - LOWER_PADDING_BYTES,
 		LowerOffset: HEADER_SIZE_BYTES,
+		RightChild:  rightPtr,
 	}
 
-	// Check if internal node
+	// If internal node, set flag
 	if values == nil || len(*values) <= 0 {
 		h.setFlag(7)
 	}
@@ -452,9 +465,16 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 	fmt.Println("NEW PAGE ==> ", p)
 	// return &p, nil
 
+	// set right ptr
+	if childPageIds != nil && len(*childPageIds) > 0 {
+		p.Header.UpdateRightPtr((*childPageIds)[len(*childPageIds)-1])
+	}
+
 	// Create cells and pointer
 	// p.insertCells(keys, values, childPageIds)
-	p.insertNewCells(keys, values, childPageIds, 0)
+	for i, _ := range keys {
+		p.insertNewCells(keys, values, childPageIds, i)
+	}
 
 	// Add page count & offset
 	if DiskBTree.RootNode == nil && DiskBTree.PageCount <= 0 {
@@ -474,7 +494,8 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 		DiskBTree.RootNode = &p
 	}
 
-	p.flush(0, false)
+	// p.flush(0, false)
+	p.flushMany(false)
 
 	DiskBTree.PageCount += 1
 	DiskBTree.flushMetadata()
@@ -483,6 +504,22 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 	fmt.Println("ROOT PAGE ID ==> ", DiskBTree.RootPage)
 	fmt.Println("NEW PAGE PAGEID ---------------> ", p.Header.PageId)
 	return &p, nil
+}
+
+// Updates the right most pointer
+func (h *PageHeader) UpdateRightPtr(pageId int32) error {
+	if pageId == 0 {
+		return nil
+	}
+
+	// check if is internal node
+	if !h.isSet(7) {
+		return DiskioError{Message: "Invalid node: Only internal nodes can have right pointer in header."}
+	}
+
+	h.RightChild = pageId
+
+	return nil
 }
 
 func (p *Page) replaceCells(key []byte, val *[]byte, pageId *int32, idx int) error {
@@ -520,9 +557,14 @@ func (p *Page) insertNewCells(keys [][]byte, vals *[][]byte, pageIds *[]int32, i
 
 	var vLen int32
 	var pgeId int32
+	vl := make([]byte, 0)
 
 	if vals != nil && len(*vals) > 0 {
 		vLen = int32(len((*vals)[idx]))
+
+		if len(*vals)-1 >= idx {
+			vl = (*vals)[idx]
+		}
 	}
 
 	if pageIds != nil && len(*pageIds) > 0 {
@@ -534,7 +576,7 @@ func (p *Page) insertNewCells(keys [][]byte, vals *[][]byte, pageIds *[]int32, i
 		KeySize:   int32(keyLen),
 		ValueSize: vLen,
 		Key:       keys[idx],
-		Value:     (*vals)[idx],
+		Value:     vl,
 		PageId:    pgeId,
 	}
 
@@ -562,6 +604,11 @@ func (p *Page) insertNewCells(keys [][]byte, vals *[][]byte, pageIds *[]int32, i
 
 	//update item count
 	p.Header.Items += 1
+
+	// if internal node, update right most pointer
+	//if pageIds != nil && len(*pageIds) > 0 {
+	//	p.Header.RightChild = (*pageIds)[len(*pageIds)-1]
+	//}
 
 	return nil
 }
@@ -642,14 +689,32 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, idx int, repl
 	var err error
 	if replace {
 		var pgeId *int32
+		var val *[]byte
 
-		if len(pageIds) > 0 {
-			pgeId = &pageIds[idx]
+		if len(pageIds) > 0 && len(pageIds)-1 >= idx {
+			pgeId = &pageIds[idx+1]
 		}
 
-		err = p.replaceCells(keys[idx], &(vals[idx]), pgeId, idx)
+		if len(vals) > 0 && len(vals)-1 >= idx {
+			val = &vals[idx]
+		}
+
+		err = p.replaceCells(keys[idx], val, pgeId, idx)
 	} else {
 		err = p.insertNewCells(keys, &vals, &pageIds, idx)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if p.Header.isSet(7) && len(pageIds) > 0 {
+		// update right ptr
+		err := p.Header.UpdateRightPtr(pageIds[len(pageIds)-1])
+
+		if err != nil {
+			return err
+		}
 	}
 
 	if err != nil {
@@ -828,6 +893,351 @@ func (p *Page) flush(idx int, replace bool) (bool, error) {
 	return true, nil
 }
 
+func (p *Page) flushMany(replace bool) (bool, error) {
+	fmt.Println("Flushing content to page: ", p.Header.PageId)
+	fmt.Println("PAGE CONTENTS _ > ", *p)
+
+	// set flags
+	// p.Header.setFlag(5) // Should be set when updating in func insertCells
+
+	// Calculate cell offsets ((page_size * )tot_cell_size)
+	var startOffset int64
+	var firstWrite bool
+	if p.Header.isSet(6) {
+		firstWrite = false
+		// if already occupies space on disk, get offset from lookup table
+		fmt.Println("PAGE IS ALREADY ON DISK")
+		offs, err := LookupTable.GetPageOffset(int(p.Header.PageId))
+
+		if err != nil {
+			log.Fatal("Invalid offset")
+		}
+
+		fmt.Println("RETRIEVED OFFSET FRO LUT: ", offs)
+
+		if offs == 0 {
+			log.Fatal("Invalid offset")
+		}
+
+		startOffset = int64(offs)
+
+	} else {
+		// not on disk
+		// Check from free space map first
+		firstWrite = true
+
+		if len(FreeSpaceMap) > 0 {
+			// Check for empty space in Free Space Map
+			startOffset = FreeSpaceMap[(len(FreeSpaceMap) - 1)]
+			FreeSpaceMap = append(FreeSpaceMap[:len(FreeSpaceMap)-1], []int64{}...)
+		} else {
+			// Write page at end of file
+			startOffset = METADATA_PAGE_SIZE_BYTES + (int64(DiskBTree.PageCount) * PAGE_SIZE_BYTES)
+		}
+
+		// set stored in disk flag and offset to lookup table
+		p.Header.setFlag(6)
+		LookupTable.AddPageOffset(int(p.Header.PageId), uint32(startOffset))
+		// lookupTable[int(p.Header.PageId)] = uint32(startOffset)
+	}
+
+	// construct byte content
+	byteContent := make([]byte, 0)
+	// Insert header and cell offsets
+	byteContent = append(byteContent, p.Header.toBytes()...)
+	// Insert cell offsets
+	for _, v := range p.CellPointers {
+		byteContent = append(byteContent, v.toBytes()...)
+	}
+
+	var size int32
+	for _, v := range p.Cells {
+		fmt.Println("KEY SIZE ==> ", v.KeySize)
+		fmt.Println("ACTUAL KEY SIZE => ", len(v.Key))
+
+		fmt.Println("VAL SIZE ==> ", v.ValueSize)
+		fmt.Println("ACTUAL VAL SIZE => ", len(v.Value))
+		size += (13 + v.KeySize + v.ValueSize)
+	}
+
+	fmt.Println("CALCULATED SIZE TO -------> ", size)
+	fmt.Println("START OFFSET ===> ", startOffset)
+
+	// cellOffset := (int32(startOffset) + PAGE_SIZE_BYTES) - (LOWER_PADDING_BYTES + size)
+	cellOffset := int(startOffset) + int(p.CellPointers[len(p.CellPointers)-1].offset)
+	paddingOffset := (int32(startOffset) + PAGE_SIZE_BYTES) - LOWER_PADDING_BYTES
+	padding := make([]byte, LOWER_PADDING_BYTES)
+
+	// Cell slice
+	cells := make([]byte, 0)
+
+	for _, c := range p.Cells {
+		cells = append(append([]byte{}, c.toBytes()...), cells...)
+	}
+	//	for _, v := range p.Cells {
+	//		cells = append(append([]byte{}, v.toBytes()...), cells...)
+	//	}
+
+	// write to file concurrently at different offsets. Ensure no overlap
+
+	fmt.Println("BYTE CONTENT => ", byteContent)
+	fmt.Println("CELL CONTENT => ", cells)
+	fmt.Println("ALL CELLS => ", p.Cells)
+
+	DiskBTree.wg.Add(3)
+
+	go func() {
+		fmt.Println("WRITING HEADER AND CELL OFFSETS......", startOffset)
+		defer DiskBTree.wg.Done()
+		b, err := DiskBTree.fd.WriteAt(byteContent, startOffset)
+
+		if err != nil {
+			fmt.Println("Unable to write page")
+			// reset has unflushed data flag
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		fmt.Printf("Wrote %d bytes\n", b)
+
+	}()
+
+	go func() {
+		fmt.Println("WRITING CELL DATA AT OFFSET: ......", cellOffset)
+		defer DiskBTree.wg.Done()
+		b, err := DiskBTree.fd.WriteAt(cells, int64(cellOffset))
+
+		if err != nil {
+			fmt.Println("Unable to cells to page")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		fmt.Printf("Wrote %d bytes\n", b)
+	}()
+
+	go func() {
+		fmt.Println("WRITING PADDING AT .....", paddingOffset)
+		defer DiskBTree.wg.Done()
+
+		if firstWrite {
+			b, err := DiskBTree.fd.WriteAt(padding, int64(paddingOffset))
+
+			if err != nil {
+				fmt.Println("Unable to write padding to page")
+				p.Header.unsetFlag(5)
+				log.Fatal(err.Error())
+			}
+
+			fmt.Printf("Wrote %d bytes\n", b)
+		}
+
+	}()
+
+	DiskBTree.wg.Wait()
+
+	DiskBTree.fd.Sync()
+
+	return true, nil
+}
+
+// Deletes cell referenced by cell ptr at index `cellIdx` and updates cell ptr and page item count
+func (p *Page) DeleteCell(cellIdx int) error {
+	// 1. Check if cell pointer at offset exists
+	// 2. Get the offset
+	// 3. Calculate cell size
+	// 4. Delete cell - replace with zeros
+	// 5. Remove Cell Pointer and rewrite Cell Pointers
+
+	if len(p.CellPointers)-1 < cellIdx {
+		return DiskioError{Message: fmt.Sprintf("Index %d out of range: Cell to delete does not exist.", cellIdx)}
+	}
+
+	if p.CellPointers[cellIdx].CellRef == nil {
+		return DiskioError{Message: "Missing cell ref: No Cell linked to offset."}
+	}
+
+	cellsOff := p.CellPointers[cellIdx].offset
+
+	cellSize := 13 + p.CellPointers[cellIdx].CellRef.KeySize + p.CellPointers[cellIdx].CellRef.ValueSize
+	originalCellPointerSize := len(p.CellPointers) * CELL_POINTER_SIZE_BYTE
+
+	newCellContent := make([]byte, cellSize)
+	newCellPtrContent := make([]byte, originalCellPointerSize)
+
+	p.CellPointers = append(p.CellPointers[:cellIdx], p.CellPointers[cellIdx+1:]...)
+
+	pageOffs, err := LookupTable.GetPageOffset(int(p.Header.PageId))
+
+	if err != nil {
+		// log.Fatal("Invalid offset")
+		return err
+	}
+
+	for i, v := range p.CellPointers {
+		newCellPtrContent = append(newCellPtrContent[:(i*CELL_POINTER_SIZE_BYTE)], append(v.toBytes(), newCellPtrContent[(i*CELL_POINTER_SIZE_BYTE)+CELL_POINTER_SIZE_BYTE:]...)...)
+	}
+
+	// update item count
+	if p.Header.Items > 0 {
+		p.Header.Items -= 1
+	}
+
+	// rewrite cell Pointers
+	ch := make(chan int, 3)
+	go func() {
+		b, err := DiskBTree.fd.WriteAt(newCellPtrContent, int64(pageOffs+HEADER_SIZE_BYTES))
+
+		if err != nil {
+			fmt.Println("Unable to rewrite cell pointers to page")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		ch <- b
+	}()
+
+	// overwrite cell content
+	go func() {
+		b, err := DiskBTree.fd.WriteAt(newCellContent, int64(pageOffs)+int64(cellsOff))
+
+		if err != nil {
+			fmt.Println("Unable to overwrite cells to page")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		ch <- b
+
+	}()
+
+	// Update item count in header
+	go func() {
+		b, err := DiskBTree.fd.WriteAt(binary.LittleEndian.AppendUint32(make([]byte, 0), uint32(p.Header.Items)), int64(pageOffs)+5)
+
+		if err != nil {
+			fmt.Println("Unable to overwrite cells to page")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		ch <- b
+	}()
+
+	// wait for go routines to complete
+	<-ch
+	<-ch
+	<-ch
+
+	fmt.Println("************REWROTE NEW CELLS***************************")
+
+	return nil
+}
+
+// deletes cells in an internal node
+func (p *Page) DeleteInternalNodeCell(cellIdx int) error {
+	// Check if is internal node
+	if isInternal, err := p.IsInternal(); err != nil || !isInternal {
+		return DiskioError{Message: fmt.Sprintf("Invalid node operation", err.Error())}
+	}
+
+	if len(p.CellPointers)-1 < cellIdx {
+		return DiskioError{Message: fmt.Sprintf("Index %d out of range: Cell to delete does not exist.", cellIdx)}
+	}
+
+	if p.CellPointers[cellIdx].CellRef == nil {
+		return DiskioError{Message: "Missing cell ref: No Cell linked to offset."}
+	}
+
+	oldCellPageId := p.CellPointers[cellIdx].CellRef.PageId
+
+	cellsOff := p.CellPointers[cellIdx].offset
+
+	cellSize := 13 + p.CellPointers[cellIdx].CellRef.KeySize + p.CellPointers[cellIdx].CellRef.ValueSize
+	originalCellPointerSize := len(p.CellPointers) * CELL_POINTER_SIZE_BYTE
+
+	newCellContent := make([]byte, cellSize)
+	newCellPtrContent := make([]byte, originalCellPointerSize)
+
+	p.CellPointers = append(p.CellPointers[:cellIdx], p.CellPointers[cellIdx+1:]...)
+
+	pageOffs, err := LookupTable.GetPageOffset(int(p.Header.PageId))
+
+	if err != nil {
+		// log.Fatal("Invalid offset")
+		return err
+	}
+
+	for i, v := range p.CellPointers {
+		newCellPtrContent = append(newCellPtrContent[:(i*CELL_POINTER_SIZE_BYTE)], append(v.toBytes(), newCellPtrContent[(i*CELL_POINTER_SIZE_BYTE)+CELL_POINTER_SIZE_BYTE:]...)...)
+	}
+
+	// update item count
+	if p.Header.Items > 0 {
+		p.Header.Items -= 1
+	}
+
+	// Update right ptr
+	p.Header.RightChild = oldCellPageId
+
+	ch := make(chan int, 3)
+
+	go func() {
+		b, err := DiskBTree.fd.WriteAt(newCellPtrContent, int64(pageOffs+HEADER_SIZE_BYTES))
+
+		if err != nil {
+			fmt.Println("Unable to rewrite cell pointers to page")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		ch <- b
+	}()
+
+	// overwrite cell content
+	go func() {
+		b, err := DiskBTree.fd.WriteAt(newCellContent, int64(pageOffs)+int64(cellsOff))
+
+		if err != nil {
+			fmt.Println("Unable to overwrite cells to page")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		ch <- b
+
+	}()
+
+	// Update item count and right ptr in header
+	go func() {
+		b, err := DiskBTree.fd.WriteAt(binary.LittleEndian.AppendUint32(make([]byte, 0), uint32(p.Header.Items)), int64(pageOffs)+5)
+
+		if err != nil {
+			fmt.Println("Unable to overwrite cells to page")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		// Write right child
+		b, err = DiskBTree.fd.WriteAt(binary.LittleEndian.AppendUint32(make([]byte, 0), uint32(p.Header.RightChild)), int64(pageOffs)+27)
+
+		if err != nil {
+			fmt.Println("Unable to update right child")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		ch <- b
+	}()
+
+	// wait for go routines to complete
+	<-ch
+	<-ch
+	<-ch
+
+	return nil
+}
+
 // Check wheather the page represents an internal node
 func (p *Page) IsInternal() (bool, error) {
 	if p.Header == nil {
@@ -888,7 +1298,8 @@ func (h *PageHeader) toBytes() []byte {
 	binary.LittleEndian.PutUint32(headerBytes[13:17], uint32(h.UpperOffset))
 	binary.LittleEndian.PutUint32(headerBytes[17:21], uint32(h.LowerOffset))
 	binary.LittleEndian.PutUint32(headerBytes[21:25], uint32(h.MagicNumber))
-	binary.LittleEndian.PutUint16(headerBytes[25:], uint16(h.Checksum))
+	binary.LittleEndian.PutUint16(headerBytes[25:27], uint16(h.Checksum))
+	binary.LittleEndian.PutUint32(headerBytes[27:], uint32(h.RightChild))
 
 	fmt.Println("HEADER TO BYTES => ", headerBytes)
 

@@ -98,7 +98,7 @@ func createNode(separatorKeys [][]byte, isLeaf bool, isRoot bool) (*Node, error)
 	} else {
 		newNode = Node{
 			Keys:     separatorKeys,
-			Children: make([]int32, 2*DEGREE+1),
+			Children: make([]int32, 0),
 			Leaf:     isLeaf,
 		}
 	}
@@ -134,6 +134,12 @@ func loadNode(page *diskio.Page) (*Node, error) {
 	var n Node
 
 	if internalNode {
+		rightPtr := page.Header.RightChild
+
+		if rightPtr != 0 {
+			children = append(children, rightPtr)
+		}
+
 		n = Node{
 			Keys:     k,
 			Children: children,
@@ -152,9 +158,11 @@ func loadNode(page *diskio.Page) (*Node, error) {
 	return &n, nil
 }
 
-func (n *Node) split() (SplitResponse, error) {
+func (n *Node) split() (*Node, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+
+	// lenBeforeSplit := len(n.Keys)
 
 	if n.Leaf {
 		mid := len(n.Keys) / 2
@@ -173,17 +181,31 @@ func (n *Node) split() (SplitResponse, error) {
 
 		rightNode.Values = rightVals
 
-		rightNode.assignPage(false)
-		i := SplitResponse{
-			PromotedSeparatorKey: rightKeys[0],
-			NewNodeId:            uint32(rightNode.Page.Header.PageId),
-		}
+		// rightNode.assignPage(false)
 
-		return i, nil
+		//i := SplitResponse{
+		//	PromotedSeparatorKey: rightKeys[0],
+		//	NewNodeId:            uint32(rightNode.Page.Header.PageId),
+		//}
+
+		//lenAfterSplit := len(n.Keys)
+
+		//for i := range diskio.ORDER - lenAfterSplit {
+		//	// FIX: Ensure Index matches after deletion
+
+		//	err := n.Page.DeleteCell((diskio.ORDER - 1) - i)
+
+		//	if err != nil {
+		//		panic(err.Error())
+		//	}
+
+		//}
+
+		return rightNode, nil
 	} else {
 		// None leaf node split
 		mid := len(n.Keys) / 2
-		promotedKey := n.Keys[mid]
+		// promotedKey := n.Keys[mid]
 		rightKeys := n.Keys[mid+1:]
 		rightChildren := n.Children[mid+1:]
 
@@ -200,20 +222,21 @@ func (n *Node) split() (SplitResponse, error) {
 
 		rightNode.Children = rightChildren
 
-		rightNode.assignPage(false)
+		//rightNode.assignPage(false)
 
-		i := SplitResponse{
-			PromotedSeparatorKey: promotedKey,
-			NewNodeId:            uint32(rightNode.Page.Header.PageId),
-		}
+		//i := SplitResponse{
+		//	PromotedSeparatorKey: promotedKey,
+		//	NewNodeId:            uint32(rightNode.Page.Header.PageId),
+		//}
 
-		return i, nil
+		return rightNode, nil
 	}
 }
 
 // Assign a page to node
 func (n *Node) assignPage(isRoot bool) (*Node, error) {
 	if n.Page != nil {
+		log.Println("(assignPage) Page already exists")
 		return n, nil
 	}
 
@@ -226,7 +249,6 @@ func (n *Node) assignPage(isRoot bool) (*Node, error) {
 
 		n.Page = pge
 		return n, nil
-
 	} else {
 		pge, err := diskio.New(n.Keys, nil, &n.Children, isRoot)
 
@@ -241,7 +263,6 @@ func (n *Node) assignPage(isRoot bool) (*Node, error) {
 
 // Inserts key and value to node. If is internal node, return page ID of child page. If leaf node insert and return
 func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack) (int32, error) {
-	// TODO: cater for internal nodes
 	// If empty (new node), add the values
 	if len(n.Keys) <= 0 && len(n.Values) <= 0 {
 		n.Keys = append(n.Keys, key)
@@ -292,18 +313,36 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 			helpers.InsertToList[[]byte](&n.Values, idx+1, val)
 			fmt.Println("*////////////// VALS AFTER INSERT: ", n.Values)
 		}
+
 		n.mu.Unlock()
 
 		// Check overflow
 		if len(n.Keys) > (2 * DEGREE) {
-			log.Println("(insert) SPLIT DETECTED...")
-			r, err := n.split()
+			log.Println("(insert) OVERFLOW DETECTED...")
+			newRightNode, err := n.split()
 
 			if err != nil {
 				return 0, err
 			}
 
-			rp = &r
+			// persist left node
+
+			// remove old keys from left node
+			n.postSplitCleanup(idx)
+
+			// persist new right node
+			newRightNode.assignPage(false)
+
+			//			r := SplitResponse{
+			//				PromotedSeparatorKey: newRightNode.Keys[0],
+			//				NewNodeId:            uint32(newRightNode.Page.Header.PageId),
+			//			}
+			//
+			rp.PromotedSeparatorKey = newRightNode.Keys[0]
+			rp.NewNodeId = uint32(newRightNode.Page.Header.PageId)
+
+			fmt.Println("+---------------------SPLIT DONE ---------------------+")
+			//
 
 			return 0, nil
 		}
@@ -361,6 +400,50 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 			return n.Children[idx+1], nil
 		}
 	}
+}
+
+// Removes old keys, values and pageIDs in left node after split
+func (n *Node) postSplitCleanup(insertionIdx int) error {
+	lenAfterSplit := len(n.Keys)
+
+	if n.Leaf {
+		for i := range diskio.ORDER - lenAfterSplit {
+			err := n.Page.DeleteCell((diskio.ORDER - 1) - i)
+
+			if err != nil {
+				panic(err.Error())
+			}
+		}
+
+		// If inserted key is in the left node, update this value in page
+		if insertionIdx < lenAfterSplit {
+			err := n.Page.Sync(n.Keys, n.Values, n.Children, insertionIdx, true)
+
+			if err != nil {
+				return err
+			}
+		}
+
+	} else {
+		for i := range diskio.ORDER - lenAfterSplit {
+			err := n.Page.DeleteInternalNodeCell((diskio.ORDER - 1) - i)
+
+			if err != nil {
+				panic(err.Error())
+			}
+		}
+
+		// TODO: Handle replacing new cells if insertion took place in left node
+		if insertionIdx < lenAfterSplit {
+			err := n.Page.Sync(n.Keys, n.Values, n.Children, insertionIdx, true)
+
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
@@ -433,35 +516,46 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				fmt.Println("HANDLING PROPAGATING SPLITS..............")
 				// When there's a value to be promoted
 				if st.Count > 0 {
-					path, err := st.Pop()
+					parent, err := st.Pop()
 
 					if err != nil {
 						return false, err
 					}
 
-					path.n.mu.Lock()
-					_, err = helpers.InsertToList[[]byte](&path.n.Keys, int(path.idx), insertRes.PromotedSeparatorKey)
+					parent.n.mu.Lock()
+					_, err = helpers.InsertToList[[]byte](&parent.n.Keys, int(parent.idx), insertRes.PromotedSeparatorKey)
 
 					if err != nil {
 						return false, err
 					}
 
-					_, err = helpers.InsertToList[int32](&path.n.Children, int(path.idx+1), int32(insertRes.NewNodeId))
+					_, err = helpers.InsertToList[int32](&parent.n.Children, int(parent.idx+1), int32(insertRes.NewNodeId))
 
 					if err != nil {
 						return false, err
 					}
 
-					if len(path.n.Keys) > DEGREE*2 {
+					if len(parent.n.Keys) > DEGREE*2 {
 						// handle overflow
-						newRightNode, err := path.n.split()
+						newRightNode, err := parent.n.split()
 
 						if err != nil {
 							return false, err
 						}
 
+						// remove old keys from left node
+						parent.n.postSplitCleanup(int(parent.idx))
+
+						// persist new right node
+						newRightNode.assignPage(false)
+
+						r := SplitResponse{
+							PromotedSeparatorKey: newRightNode.Keys[0],
+							NewNodeId:            uint32(newRightNode.Page.Header.PageId),
+						}
+
 						// set new Insert response
-						insertRes = newRightNode
+						insertRes = r
 
 					} else {
 						// reset insertres
@@ -471,15 +565,31 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 				} else {
 					// create and assign new root node.
+					log.Println("ADDING NEW ROOT -----------------------> ")
 					newRoot, err := createNode([][]byte{insertRes.PromotedSeparatorKey}, false, true)
 
 					if err != nil {
 						return false, err
 					}
 
+					newRoot.Children = append(newRoot.Children, bTree.Root.Page.Header.PageId)
+					newRoot.Children = append(newRoot.Children, int32(insertRes.NewNodeId))
+
+					log.Println("ADDED NEW ROOT -----------------------> ", newRoot)
+					log.Println("NEW ROOT CHILDREN COUNT -----------------------> ", len(newRoot.Children))
+
+					log.Println("NEW ROOT CHILDREN -----------------------> ", newRoot.Children)
+
 					newRoot.assignPage(true)
 
+					log.Println("NEW ROOT PAGEID -----------------------> ", newRoot.Page.Header.PageId)
+					log.Println("NEW ROOT PAGE -----------------------> ", newRoot.Page)
+					log.Println("NEW ROOT PAGE HEADER -----------------------> ", newRoot.Page.Header)
+
 					bTree.Root = newRoot
+
+					// reset value
+					insertRes.NewNodeId = 0
 				}
 			}
 
