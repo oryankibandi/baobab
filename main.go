@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math/big"
 	"sort"
 
 	"github.com/oryankibandi/on_disk_btree/pkg/bp_tree"
@@ -30,8 +31,15 @@ func NewRandomNodeData(strLen int) NodeData {
 	if strLen <= 0 {
 		strLen = 16
 	}
+
+	k, err := randomInt32InRange(0, 100)
+
+	if err != nil {
+		panic(err.Error())
+	}
+
 	return NodeData{
-		key:   randomInt32Positive(),
+		key:   k,
 		value: randomAlphaNumBytes(strLen),
 	}
 }
@@ -45,6 +53,21 @@ func randomInt32Positive() int32 {
 	}
 	// mask off sign bit so result is non-negative
 	return int32(binary.BigEndian.Uint32(b[:]) & 0x7fffffff)
+}
+
+func randomInt32InRange(min, max int32) (int32, error) {
+	if min > max {
+		return 0, fmt.Errorf("min must be <= max")
+	}
+	// rangeSize fits in int64 because max-min+1 <= 2^32
+	rangeSize := int64(max) - int64(min) + 1
+	n := big.NewInt(rangeSize)
+
+	r, err := rand.Int(rand.Reader, n) // returns 0 <= r < rangeSize
+	if err != nil {
+		return 0, err
+	}
+	return int32(int64(min) + r.Int64()), nil
 }
 
 func randomAlphaNumBytes(n int) []byte {
@@ -75,11 +98,11 @@ func main() {
 
 	items := make([]NodeData, 0)
 
-	items = append(items, NodeData{key: 25, value: []byte("CAPETOWN systems")})
-	items = append(items, NodeData{key: 5, value: []byte("AMSTERDAN systems")})
-	items = append(items, NodeData{key: 520, value: []byte("DC systems")})
-	items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
-	items = append(items, NodeData{key: 45, value: []byte("Amsterdam systems")})
+	// items = append(items, NodeData{key: 25, value: []byte("CAPETOWN systems")})
+	// items = append(items, NodeData{key: 5, value: []byte("AMSTERDAN systems")})
+	// items = append(items, NodeData{key: 520, value: []byte("DC systems")})
+	// items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
+	// items = append(items, NodeData{key: 45, value: []byte("Amsterdam systems")})
 
 	sorted := sortItems(items)
 	fmt.Println("(main) SORTED ==> ", sorted)

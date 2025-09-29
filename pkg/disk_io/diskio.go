@@ -1057,6 +1057,8 @@ func (p *Page) DeleteCell(cellIdx int) error {
 		return DiskioError{Message: "Missing cell ref: No Cell linked to offset."}
 	}
 
+	isLastItem := cellIdx == len(p.CellPointers)-1
+
 	cellsOff := p.CellPointers[cellIdx].offset
 
 	cellSize := 13 + p.CellPointers[cellIdx].CellRef.KeySize + p.CellPointers[cellIdx].CellRef.ValueSize
@@ -1081,6 +1083,11 @@ func (p *Page) DeleteCell(cellIdx int) error {
 	// update item count
 	if p.Header.Items > 0 {
 		p.Header.Items -= 1
+	}
+
+	// update free space offset
+	if isLastItem {
+		p.Header.UpperOffset += cellSize
 	}
 
 	// rewrite cell Pointers
@@ -1121,6 +1128,15 @@ func (p *Page) DeleteCell(cellIdx int) error {
 			log.Fatal(err.Error())
 		}
 
+		// Update offset
+		b, err = DiskBTree.fd.WriteAt(binary.LittleEndian.AppendUint32(make([]byte, 0), uint32(p.Header.UpperOffset)), int64(pageOffs)+13)
+
+		if err != nil {
+			fmt.Println("Unable to overwrite cells to page")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
 		ch <- b
 	}()
 
@@ -1148,6 +1164,7 @@ func (p *Page) DeleteInternalNodeCell(cellIdx int) error {
 	if p.CellPointers[cellIdx].CellRef == nil {
 		return DiskioError{Message: "Missing cell ref: No Cell linked to offset."}
 	}
+	isLastItem := cellIdx == len(p.CellPointers)-1
 
 	oldCellPageId := p.CellPointers[cellIdx].CellRef.PageId
 
@@ -1175,6 +1192,11 @@ func (p *Page) DeleteInternalNodeCell(cellIdx int) error {
 	// update item count
 	if p.Header.Items > 0 {
 		p.Header.Items -= 1
+	}
+
+	// update free space offset
+	if isLastItem {
+		p.Header.UpperOffset += cellSize
 	}
 
 	// Update right ptr
@@ -1223,6 +1245,15 @@ func (p *Page) DeleteInternalNodeCell(cellIdx int) error {
 
 		if err != nil {
 			fmt.Println("Unable to update right child")
+			p.Header.unsetFlag(5)
+			log.Fatal(err.Error())
+		}
+
+		// Update offset
+		b, err = DiskBTree.fd.WriteAt(binary.LittleEndian.AppendUint32(make([]byte, 0), uint32(p.Header.UpperOffset)), int64(pageOffs)+13)
+
+		if err != nil {
+			fmt.Println("Unable to overwrite cells to page")
 			p.Header.unsetFlag(5)
 			log.Fatal(err.Error())
 		}
