@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net/http"
 	"sort"
+	"time"
 
 	"github.com/oryankibandi/on_disk_btree/pkg/bp_tree"
 )
@@ -82,7 +84,20 @@ func randomAlphaNumBytes(n int) []byte {
 	return out
 }
 
+// runServer starts a basic HTTP server on port 8080
+func runServer() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "Hello, world! Server is running on port 8080.")
+	})
+
+	fmt.Println("🚀 Server running on http://localhost:8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Println("Error starting server:", err)
+	}
+}
+
 func main() {
+	start := time.Now()
 	fmt.Println("Hello world")
 	btree, err := bp_tree.InitBTree[int32]()
 
@@ -98,11 +113,11 @@ func main() {
 
 	items := make([]NodeData, 0)
 
-	// items = append(items, NodeData{key: 25, value: []byte("CAPETOWN systems")})
-	// items = append(items, NodeData{key: 5, value: []byte("AMSTERDAN systems")})
-	// items = append(items, NodeData{key: 520, value: []byte("DC systems")})
-	// items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
-	// items = append(items, NodeData{key: 45, value: []byte("Amsterdam systems")})
+	items = append(items, NodeData{key: 25, value: []byte("CAPETOWN systems")})
+	items = append(items, NodeData{key: 5, value: []byte("AMSTERDAN systems")})
+	items = append(items, NodeData{key: 520, value: []byte("DC systems")})
+	items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
+	items = append(items, NodeData{key: 45, value: []byte("Amsterdam systems")})
 
 	sorted := sortItems(items)
 	fmt.Println("(main) SORTED ==> ", sorted)
@@ -131,18 +146,34 @@ func main() {
 	fmt.Println("--------------------------------------------------------------------------------------------------------------")
 	fmt.Println("--------------------------------------------------------------------------------------------------------------")
 
-	for i := range 1 {
-		r := NewRandomNodeData(12)
-		fmt.Println("Random DATA: ", r)
-		k := make([]byte, 0)
-		n := binary.LittleEndian.AppendUint32(k, uint32(r.key))
+	//	l := make([]NodeData, 0)
+	//
+	//	for i := range 20 {
+	//		r := NewRandomNodeData(12)
+	//		fmt.Println("Random DATA: ", r)
+	//		l = append(l, r)
+	//		k := make([]byte, 0)
+	//		n := binary.LittleEndian.AppendUint32(k, uint32(r.key))
+	//
+	//		inserted, err := bp_tree.InsertValue([][]byte{n}, [][]byte{r.value})
+	//
+	//		if err != nil {
+	//			panic(err)
+	//		}
+	//
+	//		fmt.Printf("%d inserted -> %v\n", i, inserted)
+	//	}
+	//
+	//	fmt.Println("------------------------------------------------------------------------------------------------------------------------------------------------")
+	//	fmt.Println("INSERTED DATA:")
+	//	for _, v := range l {
+	//
+	//		fmt.Printf("key: %d\tval: %s\n", v.key, v.value)
+	//	}
+	//
+	duration := time.Since(start)
+	fmt.Println()
+	fmt.Println("Done in ", duration)
 
-		inserted, err := bp_tree.InsertValue([][]byte{n}, [][]byte{r.value})
-
-		if err != nil {
-			panic(err)
-		}
-
-		fmt.Printf("%d inserted -> %v\n", i, inserted)
-	}
+	runServer()
 }

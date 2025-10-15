@@ -248,7 +248,6 @@ func (n *Node) assignPage(isRoot bool) (*Node, error) {
 		}
 
 		n.Page = pge
-		return n, nil
 	} else {
 		pge, err := diskio.New(n.Keys, nil, &n.Children, isRoot)
 
@@ -257,8 +256,12 @@ func (n *Node) assignPage(isRoot bool) (*Node, error) {
 		}
 
 		n.Page = pge
-		return n, nil
+
 	}
+
+	diskio.BPool.AddPageToCache(uint32(n.Page.Header.PageId), n.Page)
+
+	return n, nil
 }
 
 // Inserts key and value to node. If is internal node, return page ID of child page. If leaf node insert and return
@@ -362,19 +365,19 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 			return 0, err
 		}
 
-		if bytes.Compare(key, kAtIdx) == -1 {
-			err = n.Page.Persist(idx, false)
-		} else if bytes.Compare(key, kAtIdx) == 0 {
-			err = n.Page.Persist(idx, true)
-		} else {
-			err = n.Page.Persist(idx+1, false)
-		}
+		//if bytes.Compare(key, kAtIdx) == -1 {
+		//	err = n.Page.Persist(idx, false)
+		//} else if bytes.Compare(key, kAtIdx) == 0 {
+		//	err = n.Page.Persist(idx, true)
+		//} else {
+		//	err = n.Page.Persist(idx+1, false)
+		//}
 
-		fmt.Println("/////// KEYS AFTER PERSIST => ", n.Keys)
+		//fmt.Println("/////// KEYS AFTER PERSIST => ", n.Keys)
 
-		if err != nil {
-			return 0, err
-		}
+		//if err != nil {
+		//	return 0, err
+		//}
 
 		return 0, nil
 	} else {
