@@ -51,7 +51,7 @@ The page header has a **8-bit** flag representing each of the following items. F
     1. Is internal node (1 for internal,0 for leaf node)
     2. Already written on disk. 1 is has allocation, 0 if new
     3. Dirty - 1 if has unflushed data 0 if clean
-    4. To Be Determined (TBD)
+    4. Dead - 1 if page is deleted. On disk is always 0 since writes to on disk will always delete dead pages.
     5. TBD
     6. TBD
     7. TBD

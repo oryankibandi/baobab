@@ -18,7 +18,7 @@ const (
 	DEGREE                   = 2
 	ORDER                    = DEGREE * 2
 	PAGE_SIZE_BYTES          = 8192
-	HEADER_SIZE_BYTES        = 31
+	HEADER_SIZE_BYTES        = 39
 	METADATA_PAGE_SIZE_BYTES = 8192 //20
 	LOWER_PADDING_BYTES      = 16
 	CELL_POINTER_SIZE_BYTE   = 5
@@ -46,16 +46,18 @@ type Cell struct {
 
 // Header 31B
 type PageHeader struct {
-	Flags       byte  // 1 Byte
-	PageId      int32 // ID of page. Possibly aligns with number of block/page number on disk
-	Items       int32 // No of items (4 Bytes)
-	FreeSpace   int32 // Amount of free space in bytes (4 Bytes)
-	UpperOffset int32 //  End of free space
-	LowerOffset int32 //  Begining of free space
-	MagicNumber int32 // Magic Number 4 Bytes
-	Checksum    int16 // Checksum 2 Bytes
-	RightChild  int32 // Right most pointer for internal nodes
-	mu          sync.RWMutex
+	Flags        byte  // 1 Byte
+	PageId       int32 // ID of page. Possibly aligns with number of block/page number on disk
+	Items        int32 // No of items (4 Bytes)
+	FreeSpace    int32 // Amount of free space in bytes (4 Bytes)
+	UpperOffset  int32 //  End of free space
+	LowerOffset  int32 //  Begining of free space
+	MagicNumber  int32 // Magic Number 4 Bytes
+	Checksum     int16 // Checksum 2 Bytes
+	RightChild   int32 // Right most pointer for internal nodes
+	RightSibling int32 // PageId of the right sibling. 0 if none.
+	LeftSibling  int32 // PageId of the left sibling. 0 if none.
+	mu           sync.RWMutex
 }
 
 type CellPointer struct {
@@ -158,18 +160,22 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 	freeSpace := binary.LittleEndian.Uint32(pgeHeader[9:13])
 	checksum := binary.LittleEndian.Uint32(pgeHeader[21:25])
 	magicNumber := binary.LittleEndian.Uint16(pgeHeader[25:27])
-	rightPtr := binary.LittleEndian.Uint32(pgeHeader[27:])
+	rightPtr := binary.LittleEndian.Uint32(pgeHeader[27:31])
+	rightChild := binary.LittleEndian.Uint32(pgeHeader[31:35])
+	leftChild := binary.LittleEndian.Uint32(pgeHeader[35:])
 
 	h := PageHeader{
-		Flags:       pgeHeader[0],
-		PageId:      int32(pageID),
-		Items:       int32(itemCount),
-		FreeSpace:   int32(freeSpace),
-		UpperOffset: int32(upperOffset),
-		LowerOffset: int32(lowerOff),
-		MagicNumber: int32(magicNumber),
-		Checksum:    int16(checksum),
-		RightChild:  int32(rightPtr),
+		Flags:        pgeHeader[0],
+		PageId:       int32(pageID),
+		Items:        int32(itemCount),
+		FreeSpace:    int32(freeSpace),
+		UpperOffset:  int32(upperOffset),
+		LowerOffset:  int32(lowerOff),
+		MagicNumber:  int32(magicNumber),
+		Checksum:     int16(checksum),
+		RightChild:   int32(rightPtr),
+		RightSibling: int32(rightChild),
+		LeftSibling:  int32(leftChild),
 	}
 
 	fmt.Println("HEADER =========================> ", h)
@@ -715,7 +721,7 @@ func (p *Page) insertCells(keys [][]byte, vals *([][]byte), pageIds *[]int32) er
 }
 
 // Synchronizes keys, values and  page IDs in node to items in Page
-func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32) error {
+func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
 	fmt.Println("(Sync) IN SYNC ==> ")
@@ -830,6 +836,9 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32) error {
 	p.Header.updateLowerOffset(uint32(lowerOff))
 	p.Header.updateItemCount(int32(len(cellPtrs)))
 	p.Header.updateFreeSpace(int32(startOffs) - int32(lowerOff))
+	// update siblings
+	p.Header.updateRightSibling(rightSibling)
+	p.Header.updateLeftSibling(leftSibling)
 	// Mark page as dirty
 	p.Header.setFlag(5)
 
@@ -1511,7 +1520,7 @@ func (p *CellPointer) toBytes() []byte {
 	return totbytes
 }
 
-// COnvert page header to bytes
+// Convert page header to bytes
 func (h *PageHeader) toBytes() []byte {
 	headerBytes := make([]byte, HEADER_SIZE_BYTES)
 
@@ -1523,7 +1532,9 @@ func (h *PageHeader) toBytes() []byte {
 	binary.LittleEndian.PutUint32(headerBytes[17:21], uint32(h.LowerOffset))
 	binary.LittleEndian.PutUint32(headerBytes[21:25], uint32(h.MagicNumber))
 	binary.LittleEndian.PutUint16(headerBytes[25:27], uint16(h.Checksum))
-	binary.LittleEndian.PutUint32(headerBytes[27:], uint32(h.RightChild))
+	binary.LittleEndian.PutUint32(headerBytes[27:31], uint32(h.RightChild))
+	binary.LittleEndian.PutUint32(headerBytes[31:35], uint32(h.RightSibling))
+	binary.LittleEndian.PutUint32(headerBytes[35:], uint32(h.LeftSibling))
 
 	fmt.Println("HEADER TO BYTES => ", headerBytes)
 
@@ -1544,8 +1555,8 @@ func (h *PageHeader) setFlag(pos int) {
 }
 
 func (h *PageHeader) unsetFlag(pos int) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	var mask byte
 	mask = 1 << byte(pos)
 
@@ -1565,27 +1576,39 @@ func (h *PageHeader) isSet(pos int) bool {
 }
 
 func (h *PageHeader) updateUpperOffset(off uint32) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.UpperOffset = int32(off)
 }
 
 func (h *PageHeader) updateLowerOffset(off uint32) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.LowerOffset = int32(off)
 }
 
 func (h *PageHeader) updateItemCount(count int32) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.Items = count
 }
 
 func (h *PageHeader) updateFreeSpace(free int32) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.FreeSpace = free
+}
+
+func (h *PageHeader) updateRightSibling(pageId uint32) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.RightSibling = int32(pageId)
+}
+
+func (h *PageHeader) updateLeftSibling(pageId uint32) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.LeftSibling = int32(pageId)
 }
 
 func (q *JobQueue) run() {

@@ -17,14 +17,14 @@ type BTree struct {
 }
 
 type Node struct {
-	Keys     [][]byte // Keys in the Node
-	Children []int32  // Internal Node children
-	Leaf     bool     // Whether Node is leaf
-	Values   [][]byte // Values in leaf node
-	// LeftSibling  int32   // Left sibling in leaf node
-	// RightSibling int32   // right sibling in leaf node
-	Page *diskio.Page // Associated on disk page
-	mu   sync.Mutex
+	Keys         [][]byte     // Keys in the Node
+	Children     []int32      // Internal Node children
+	Leaf         bool         // Whether Node is leaf
+	Values       [][]byte     // Values in leaf node
+	LeftSibling  int32        // Left sibling in leaf node
+	RightSibling int32        // right sibling in leaf node
+	Page         *diskio.Page // Associated on disk page
+	mu           sync.Mutex
 }
 
 type NodeOpResponse struct {
@@ -148,10 +148,12 @@ func loadNode(page *diskio.Page) (*Node, error) {
 		}
 	} else {
 		n = Node{
-			Keys:   k,
-			Values: v,
-			Leaf:   !internalNode,
-			Page:   page,
+			Keys:         k,
+			Values:       v,
+			Leaf:         !internalNode,
+			Page:         page,
+			RightSibling: page.Header.RightSibling,
+			LeftSibling:  page.Header.LeftSibling,
 		}
 	}
 
@@ -248,7 +250,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 		n.Values = append(n.Values, val)
 
 		// Sync to page
-		err := n.Page.Sync(n.Keys, n.Values, n.Children)
+		err := n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 		fmt.Println("/////// KEYS AFTER INSERT => ", n.Keys)
 
 		if err != nil {
@@ -306,8 +308,32 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 			// remove old keys from left node
 			// n.postSplitCleanup(idx)
 
-			// persist new right node
+			// create  page for right node
 			newRightNode.assignPage(false)
+
+			// update sibling links
+			var oldRightSibling *Node
+			newRightNode.LeftSibling = n.Page.Header.PageId
+			newRightNode.RightSibling = n.Page.Header.RightSibling
+
+			if n.Page.Header.RightSibling != 0 {
+				// load node update sibling link
+				oldRightSiblingPage, err := diskio.BPool.FetchPage(uint32(n.Page.Header.RightSibling))
+
+				if err != nil {
+					return 0, err
+				}
+
+				oldRightSibling, err = loadNode(oldRightSiblingPage)
+
+				if err != nil {
+					return 0, err
+				}
+
+				oldRightSibling.LeftSibling = newRightNode.Page.Header.PageId
+			}
+
+			n.RightSibling = newRightNode.Page.Header.PageId
 
 			//			r := SplitResponse{
 			//				PromotedSeparatorKey: newRightNode.Keys[0],
@@ -320,8 +346,12 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 			fmt.Println("+---------------------SPLIT DONE ---------------------+")
 			//
 			// sync btreee node to page
-			n.Page.Sync(n.Keys, n.Values, n.Children)
-			newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children)
+			n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+			newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
+
+			if oldRightSibling != nil {
+				oldRightSibling.Page.Sync(oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+			}
 
 			return 0, nil
 		}
@@ -334,7 +364,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 		//		} else {
 		//			err = n.Page.Sync(n.Keys, n.Values, n.Children, idx+1, false)
 		//		}
-		err = n.Page.Sync(n.Keys, n.Values, n.Children)
+		err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 		fmt.Println("/////// KEYS AFTER INSERT => ", n.Keys)
 
@@ -538,7 +568,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						insertRes = r
 
 						// Sync new child
-						newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children)
+						newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
 
 					} else {
 						// reset insertres
@@ -547,7 +577,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					}
 
 					// sync parent
-					parent.n.Page.Sync(parent.n.Keys, parent.n.Values, parent.n.Children)
+					parent.n.Page.Sync(parent.n.Keys, parent.n.Values, parent.n.Children, uint32(parent.n.RightSibling), uint32(parent.n.LeftSibling))
 
 				} else {
 					// create and assign new root node.
