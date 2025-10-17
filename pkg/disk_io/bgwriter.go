@@ -8,7 +8,7 @@ import (
 
 const (
 	MAX_PAGES      = 100   // Max # of pages to flush in one operation
-	BGWRITER_DELAY = 10000 // // delay between BgWriter activity writes (Milliseconds)
+	BGWRITER_DELAY = 200   // // delay between BgWriter activity writes (Milliseconds)
 	BG_FLUSH_AFTER = 65536 // size after which to force flush to disk(bypass OS cache) size after which to force flush to disk(bypass OS cache (Bytes)
 )
 
@@ -33,28 +33,48 @@ func (bw *BgWriter) start() {
 				bw.writtenPages++
 				bw.mu.Unlock()
 				// write to disk
-				bw.wg.Add(1)
-				go func() {
-					defer bw.wg.Done()
-					c := make(chan int32)
-					err = DiskBTree.WriteReq(p, &c)
+				//	bw.wg.Add(1)
+				//	go func() {
+				//		defer bw.wg.Done()
+				//		fmt.Println("++++++++++++++++++++++++++++")
+				//		fmt.Println("PAGE KEYS => ", p.Cells)
+				//		c := make(chan int32)
+				//		err = DiskBTree.WriteReq(p, &c)
 
-					if err != nil {
-						panic(err.Error())
-					}
+				//		if err != nil {
+				//			panic(err.Error())
+				//		}
 
-					n := <-c
+				//		n := <-c
 
-					if n >= 0 {
-						fmt.Printf("(bgwriter) Written %d bytes.\n", n)
-						bw.mu.Lock()
-						bw.writtenBytes += uint32(n)
-						bw.mu.Unlock()
-					} else {
-						fmt.Println("(bgwriter) Unable to write to disk")
-					}
-				}()
+				//		if n >= 0 {
+				//			fmt.Printf("(bgwriter) Written %d bytes.\n", n)
+				//			bw.mu.Lock()
+				//			bw.writtenBytes += uint32(n)
+				//			bw.mu.Unlock()
+				//		} else {
+				//			fmt.Println("(bgwriter) Unable to write to disk")
+				//		}
+				//	}()
+				fmt.Println("++++++++++++++++++++++++++++")
+				fmt.Println("PAGE KEYS => ", p.Cells)
+				c := make(chan int32)
+				err = DiskBTree.WriteReq(p, &c)
 
+				if err != nil {
+					panic(err.Error())
+				}
+
+				n := <-c
+
+				if n >= 0 {
+					fmt.Printf("(bgwriter) Written %d bytes.\n", n)
+					bw.mu.Lock()
+					bw.writtenBytes += uint32(n)
+					bw.mu.Unlock()
+				} else {
+					fmt.Println("(bgwriter) Unable to write to disk")
+				}
 				// If flushed MAX_PAGES, break
 				if bw.writtenPages >= MAX_PAGES {
 					bw.mu.Lock()
@@ -65,7 +85,7 @@ func (bw *BgWriter) start() {
 			}
 		}
 
-		bw.wg.Wait()
+		// bw.wg.Wait()
 
 		DiskBTree.forceFlush()
 		fmt.Println("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")

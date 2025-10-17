@@ -90,7 +90,7 @@ func runServer() {
 		fmt.Fprintln(w, "Hello, world! Server is running on port 8080.")
 	})
 
-	fmt.Println("🚀 Server running on http://localhost:8080")
+	fmt.Println("🚀🚀🚀🚀🚀🚀🚀  Server running on http://localhost:8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		fmt.Println("Error starting server:", err)
 	}
@@ -146,31 +146,32 @@ func main() {
 	fmt.Println("--------------------------------------------------------------------------------------------------------------")
 	fmt.Println("--------------------------------------------------------------------------------------------------------------")
 
-	//	l := make([]NodeData, 0)
-	//
-	//	for i := range 20 {
-	//		r := NewRandomNodeData(12)
-	//		fmt.Println("Random DATA: ", r)
-	//		l = append(l, r)
-	//		k := make([]byte, 0)
-	//		n := binary.LittleEndian.AppendUint32(k, uint32(r.key))
-	//
-	//		inserted, err := bp_tree.InsertValue([][]byte{n}, [][]byte{r.value})
-	//
-	//		if err != nil {
-	//			panic(err)
-	//		}
-	//
-	//		fmt.Printf("%d inserted -> %v\n", i, inserted)
-	//	}
-	//
-	//	fmt.Println("------------------------------------------------------------------------------------------------------------------------------------------------")
-	//	fmt.Println("INSERTED DATA:")
-	//	for _, v := range l {
-	//
-	//		fmt.Printf("key: %d\tval: %s\n", v.key, v.value)
-	//	}
-	//
+	l := make([]NodeData, 0)
+
+	for i := range 50 {
+		r := NewRandomNodeData(12)
+		fmt.Println("Random DATA: ", r)
+		l = append(l, r)
+		k := make([]byte, 0)
+		n := binary.LittleEndian.AppendUint32(k, uint32(r.key))
+
+		inserted, err := bp_tree.InsertValue([][]byte{n}, [][]byte{r.value})
+
+		if err != nil {
+			panic(err)
+		}
+
+		//fmt.Printf("<><><><><><><><><><><><><><>><><><><><><>><><><><>><><><><><>><<><>><><><><><><><><><><><><><><><><><><><><%d inserted -> %v\n", i, inserted)
+		time.Sleep(time.Millisecond * 500)
+	}
+
+	fmt.Println("------------------------------------------------------------------------------------------------------------------------------------------------")
+	fmt.Println("INSERTED DATA:")
+	for _, v := range l {
+		fmt.Println(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+		fmt.Printf("key: %d\tval: %s\n", v.key, v.value)
+	}
+
 	duration := time.Since(start)
 	fmt.Println()
 	fmt.Println("Done in ", duration)

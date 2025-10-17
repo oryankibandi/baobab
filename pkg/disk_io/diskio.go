@@ -73,14 +73,15 @@ type Page struct {
 }
 
 type DiskTree struct {
-	RootNode  *Page
-	RootPage  int32 // Root Page ID
-	PageCount int32 // 4 bytes No. of pages TODO: Add logic to increment and decrement pageCount while creating or deleting pages
-	MaxPageId int32 // 4 bytes Max Page ID issued monotinically (starts from 1)
-	Queues    map[uint32]*JobQueue
-	fd        *os.File
-	wg        sync.WaitGroup
-	mu        sync.Mutex
+	RootNode     *Page
+	RootPage     int32 // Root Page ID
+	PageCount    int32 // 4 bytes No. of pages
+	FlushedPages int32 // No of pages flushed to disk. Default to PageCount on startup
+	MaxPageId    int32 // 4 bytes Max Page ID issued monotinically (starts from 1)
+	Queues       sync.Map
+	fd           *os.File
+	wg           sync.WaitGroup
+	mu           sync.RWMutex
 }
 
 // Disk req for reads and writes
@@ -370,19 +371,23 @@ func (d *DiskTree) WriteReq(page *Page, written *chan int32) error {
 	}
 
 	// Check queue
-	q, ok := d.Queues[uint32(page.Header.PageId)]
+	// d.mu.RLock()
+	q, ok := d.Queues.Load(uint32(page.Header.PageId))
+	// d.mu.RUnlock()
 
 	if !ok {
 		// Create queue
 		jQ := newJobQueue()
-		d.Queues[uint32(page.Header.PageId)] = jQ
+		// d.mu.Lock()
+		d.Queues.Store(uint32(page.Header.PageId), jQ)
+		// d.mu.Unlock()
 
 		jQ.addJob(writeReq)
 
 		return nil
 	}
 
-	q.addJob(writeReq)
+	q.(*JobQueue).addJob(writeReq)
 
 	return nil
 }
@@ -418,21 +423,27 @@ func (d *DiskTree) ReadReq(pageId uint32, p *chan *Page) error {
 		PageId:   pageId,
 	}
 
-	q, ok := d.Queues[pageId]
+	q, ok := d.Queues.Load(pageId)
 
 	if !ok {
 		// Create queue
 		jQ := newJobQueue()
-		d.Queues[pageId] = jQ
+		d.Queues.Store(pageId, jQ)
 
 		jQ.addJob(rReq)
 
 		return nil
 	}
 
-	q.addJob(rReq)
+	q.(*JobQueue).addJob(rReq)
 
 	return nil
+}
+
+func (d *DiskTree) incrementFlushedPages() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.FlushedPages += 1
 }
 
 // Create a new Page. Requires at least two keys and values/pointers. Key should be sorted in a lexicographical order
@@ -704,47 +715,121 @@ func (p *Page) insertCells(keys [][]byte, vals *([][]byte), pageIds *[]int32) er
 }
 
 // Synchronizes keys, values and  page IDs in node to items in Page
-// TODO: Rewrite func to replace all page keys, pageIds and values
-func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, idx int, replace bool) error {
+func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32) error {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
 	fmt.Println("(Sync) IN SYNC ==> ")
 	fmt.Println("(Sync) KEYS ==> ", keys)
 	fmt.Println("(Sync) VALS ==> ", vals)
 	fmt.Println("(Sync) IN CHILDREN ==> ", pageIds)
-	var err error
-	if replace {
-		var pgeId *int32
-		var val *[]byte
+	//	var err error
+	//	if replace {
+	//		var pgeId *int32
+	//		var val *[]byte
+	//
+	//		if len(pageIds) > 0 && len(pageIds)-1 >= idx {
+	//			pgeId = &pageIds[idx+1]
+	//		}
+	//
+	//		if len(vals) > 0 && len(vals)-1 >= idx {
+	//			val = &vals[idx]
+	//		}
+	//
+	//		err = p.replaceCells(keys[idx], val, pgeId, idx)
+	//	} else {
+	//		err = p.insertNewCells(keys, &vals, &pageIds, idx)
+	//	}
+	//
+	//	if err != nil {
+	//		return err
+	//	}
+	//
+	//	if p.Header.isSet(7) && len(pageIds) > 0 {
+	//		// update right ptr
+	//		err := p.Header.UpdateRightPtr(pageIds[len(pageIds)-1])
+	//
+	//		if err != nil {
+	//			return err
+	//		}
+	//	}
+	//
+	//	if err != nil {
+	//		return err
+	//	}
 
-		if len(pageIds) > 0 && len(pageIds)-1 >= idx {
-			pgeId = &pageIds[idx+1]
+	isInternal := len(pageIds) > 0
+
+	var ptr CellPointer
+	cells := make([]Cell, 0)
+	cellPtrs := make([]CellPointer, 0)
+	startOffs := PAGE_SIZE_BYTES - LOWER_PADDING_BYTES
+	if isInternal {
+		//
+
+		for i, k := range keys {
+			newCell := Cell{
+				Flags:     make([]byte, 1),
+				KeySize:   int32(len(k)),
+				ValueSize: int32(0),
+				Key:       k,
+				Value:     make([]byte, 0),
+				PageId:    pageIds[i],
+			}
+
+			cellSize := 13 + int32(len(k))
+			off := int32(startOffs) - cellSize
+
+			ptr = CellPointer{
+				Flags:   make([]byte, 1),
+				offset:  off,
+				CellRef: &newCell,
+			}
+
+			startOffs = int(off)
+
+			cells = append(cells, newCell)
+			cellPtrs = append(cellPtrs, ptr)
 		}
 
-		if len(vals) > 0 && len(vals)-1 >= idx {
-			val = &vals[idx]
-		}
-
-		err = p.replaceCells(keys[idx], val, pgeId, idx)
-	} else {
-		err = p.insertNewCells(keys, &vals, &pageIds, idx)
-	}
-
-	if err != nil {
-		return err
-	}
-
-	if p.Header.isSet(7) && len(pageIds) > 0 {
 		// update right ptr
-		err := p.Header.UpdateRightPtr(pageIds[len(pageIds)-1])
+		p.Header.UpdateRightPtr(pageIds[len(pageIds)-1])
+	} else {
+		// leaf node
+		for i, k := range keys {
+			newCell := Cell{
+				Flags:     make([]byte, 1),
+				KeySize:   int32(len(k)),
+				ValueSize: int32(len(vals[i])),
+				Key:       k,
+				Value:     vals[i],
+				PageId:    0,
+			}
 
-		if err != nil {
-			return err
+			cellSize := 13 + int32(len(k)) + int32(len(vals[i]))
+			off := int32(startOffs) - cellSize
+
+			ptr = CellPointer{
+				Flags:   make([]byte, 1),
+				offset:  off,
+				CellRef: &newCell,
+			}
+
+			startOffs = int(off)
+
+			cells = append(cells, newCell)
+			cellPtrs = append(cellPtrs, ptr)
 		}
 	}
 
-	if err != nil {
-		return err
-	}
+	lowerOff := HEADER_SIZE_BYTES + (CELL_POINTER_SIZE_BYTE * len(keys))
 
+	p.Cells = cells
+	p.CellPointers = cellPtrs
+
+	p.Header.updateUpperOffset(uint32(startOffs))
+	p.Header.updateLowerOffset(uint32(lowerOff))
+	p.Header.updateItemCount(int32(len(cellPtrs)))
+	p.Header.updateFreeSpace(int32(startOffs) - int32(lowerOff))
 	// Mark page as dirty
 	p.Header.setFlag(5)
 
@@ -789,13 +874,13 @@ func (p *Page) flush(idx int, replace bool) (bool, error) {
 		offs, err := LookupTable.GetPageOffset(int(p.Header.PageId))
 
 		if err != nil {
-			log.Fatal("Invalid offset")
+			log.Fatal("(flush) Invalid offset")
 		}
 
 		fmt.Println("RETRIEVED OFFSET FRO LUT: ", offs)
 
 		if offs == 0 {
-			log.Fatal("Invalid offset")
+			log.Fatal("(flush) Invalid offset")
 		}
 
 		startOffset = int64(offs)
@@ -923,8 +1008,33 @@ func (p *Page) flush(idx int, replace bool) (bool, error) {
 
 // Flush page content to disk(do not call sync())
 func (p *Page) flushPage(b chan int32) {
+	// get write offset
+	offs, err := LookupTable.GetPageOffset(int(p.Header.PageId))
+
+	if err != nil {
+		fmt.Printf("ERR: %v\n", err.Error())
+		log.Fatal("(flushPage) Invalid offset")
+	}
+
+	if offs <= 0 {
+		fmt.Errorf("OFFSET IS ZERO or less than zero\n")
+		// page not flushed before, need to get new offset
+		if len(FreeSpaceMap) > 0 {
+			// Check for empty space in Free Space Map
+			offs = int32(FreeSpaceMap[(len(FreeSpaceMap) - 1)])
+			FreeSpaceMap = append(FreeSpaceMap[:len(FreeSpaceMap)-1], []int64{}...)
+		} else {
+			offs = int32(METADATA_PAGE_SIZE_BYTES + (int64(DiskBTree.FlushedPages) * PAGE_SIZE_BYTES))
+			LookupTable.AddPageOffset(int(p.Header.PageId), uint32(offs))
+		}
+
+		// set stored in disk flag and offset to lookup table
+		DiskBTree.incrementFlushedPages()
+		p.Header.setFlag(6)
+	}
+
 	// construct data
-	data := make([]byte, PAGE_SIZE_BYTES)
+	data := make([]byte, 0)
 
 	cellPtrs := make([]byte, 0)
 
@@ -944,26 +1054,20 @@ func (p *Page) flushPage(b chan int32) {
 	// update free space offsets
 	p.Header.updateLowerOffset(uint32(lowerOff))
 	p.Header.updateUpperOffset(uint32(upperOff))
-	// Update flushed header
+	// Update dirty header
 	p.Header.unsetFlag(5)
 
 	header := p.Header.toBytes()
+	fmt.Println("HEADER ===> ", header)
 
 	data = append(data, header...)
 	data = append(data, cellPtrs...)
 	data = append(data, append(make([]byte, (upperOff-lowerOff)), cells...)...)
+	data = append(data, make([]byte, LOWER_PADDING_BYTES)...)
 
 	// write page to disk
-	offs, err := LookupTable.GetPageOffset(int(p.Header.PageId))
 
-	if err != nil {
-		log.Fatal("Invalid offset")
-	}
-
-	if offs == 0 {
-		log.Fatal("Invalid offset")
-	}
-
+	fmt.Println("WRITING TO OFFSET: ", offs)
 	n, err := DiskBTree.fd.WriteAt(data, int64(offs))
 
 	if err != nil {
@@ -991,13 +1095,13 @@ func (p *Page) flushMany(replace bool) (bool, error) {
 		offs, err := LookupTable.GetPageOffset(int(p.Header.PageId))
 
 		if err != nil {
-			log.Fatal("Invalid offset")
+			log.Fatal("(flushMany) Invalid offset")
 		}
 
 		fmt.Println("RETRIEVED OFFSET FRO LUT: ", offs)
 
 		if offs == 0 {
-			log.Fatal("Invalid offset")
+			log.Fatal("(flushMany) (Invalid offset")
 		}
 
 		startOffset = int64(offs)
@@ -1472,6 +1576,18 @@ func (h *PageHeader) updateLowerOffset(off uint32) {
 	h.LowerOffset = int32(off)
 }
 
+func (h *PageHeader) updateItemCount(count int32) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	h.Items = count
+}
+
+func (h *PageHeader) updateFreeSpace(free int32) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	h.FreeSpace = free
+}
+
 func (q *JobQueue) run() {
 	q.mu.Lock()
 	q.running = true
@@ -1537,8 +1653,8 @@ func init() {
 		RootNode:  nil,
 		RootPage:  0,
 		PageCount: 0,
-		Queues:    make(map[uint32]*JobQueue),
-		fd:        fd,
+		// Queues:    make(map[uint32]*JobQueue),
+		fd: fd,
 	}
 
 	// Calculate PageCount

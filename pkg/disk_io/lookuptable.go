@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 )
 
 const (
@@ -24,6 +25,7 @@ type TLookupTable struct {
 	count uint32
 	items map[int]*LookupItem
 	fd    *os.File
+	mu    sync.RWMutex
 }
 
 // Entry Layout
@@ -184,18 +186,20 @@ func (t *TLookupTable) loadLookupItem(offset uint32) (bool, error) {
 	return true, nil
 }
 
-func (t *TLookupTable) GetPageOffset(pageId int) (uint32, error) {
+func (t *TLookupTable) GetPageOffset(pageId int) (int32, error) {
 	if t == nil {
 		return 0, DiskioError{Message: "Lookup Table not yet initialized"}
 	}
 
+	t.mu.RLock()
 	val, ok := t.items[pageId]
+	t.mu.RUnlock()
 
 	if !ok {
-		return 0, DiskioError{Message: "Page ID does not exist."}
+		return -1, nil
 	}
 
-	return val.dataOffset, nil
+	return int32(val.dataOffset), nil
 }
 
 // Add or update item in lookup table
@@ -220,11 +224,13 @@ func (t *TLookupTable) AddPageOffset(pageId int, offset uint32) (bool, error) {
 		lookupOffset: t.size,
 	}
 
+	t.mu.Lock()
 	t.items[pageId] = &newItem
 
 	// update metadata
 	t.count += 1
 	t.size += ENTRY_SIZE_BYTES
+	t.mu.Unlock()
 
 	// Persist
 	newItem.persist()
