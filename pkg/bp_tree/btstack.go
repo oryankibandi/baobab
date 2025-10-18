@@ -72,3 +72,19 @@ func (bt *BTStack) Clear() (bool, error) {
 
 	return true, nil
 }
+
+// Returns the immediate parent.
+func (bt *BTStack) Parent() (*TraversePath, error) {
+	if bt.Count <= 0 || bt.maxId == 0 {
+		return nil, BTreeError{Message: "No items in stack"}
+	}
+
+	k := bt.maxId
+	v, ok := bt.stack[k]
+
+	if !ok {
+		return nil, BTreeError{Message: "No items in stack"}
+	}
+
+	return v, nil
+}

@@ -24,7 +24,7 @@ type Node struct {
 	LeftSibling  int32        // Left sibling in leaf node
 	RightSibling int32        // right sibling in leaf node
 	Page         *diskio.Page // Associated on disk page
-	mu           sync.Mutex
+	mu           sync.RWMutex
 }
 
 type NodeOpResponse struct {
@@ -35,6 +35,12 @@ type NodeOpResponse struct {
 type SplitResponse struct {
 	PromotedSeparatorKey []byte // Key to promote
 	NewNodeId            uint32 // Child Reference to add.
+}
+
+type MergeMetadata struct {
+	rebalanceKey []byte // new key after rebalance. Should replace the parent's separator key. Default to empty if no redistribution happened
+	rightMerge   bool   // if a merge/rebalance  happened with the right sibing
+	merged       bool   // if a merge happened.
 }
 
 type DeleteResponse struct {
@@ -412,49 +418,232 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 	}
 }
 
-// Removes old keys, values and pageIDs in left node after split
-//func (n *Node) postSplitCleanup(insertionIdx int) error {
-//	lenAfterSplit := len(n.Keys)
-//
-//	if n.Leaf {
-//		for i := range diskio.ORDER - lenAfterSplit {
-//			err := n.Page.DeleteCell((diskio.ORDER - 1) - i)
-//
-//			if err != nil {
-//				panic(err.Error())
-//			}
-//		}
-//
-//		// If inserted key is in the left node, update this value in page
-//		if insertionIdx < lenAfterSplit {
-//			err := n.Page.Sync(n.Keys, n.Values, n.Children, insertionIdx, true)
-//
-//			if err != nil {
-//				return err
-//			}
-//		}
-//
-//	} else {
-//		for i := range diskio.ORDER - lenAfterSplit {
-//			err := n.Page.DeleteInternalNodeCell((diskio.ORDER - 1) - i)
-//
-//			if err != nil {
-//				panic(err.Error())
-//			}
-//		}
-//
-//		// TODO: Handle replacing new cells if insertion took place in left node
-//		if insertionIdx < lenAfterSplit {
-//			err := n.Page.Sync(n.Keys, n.Values, n.Children, insertionIdx, true)
-//
-//			if err != nil {
-//				return err
-//			}
-//		}
-//	}
-//
-//	return nil
-//}
+// Deletes key and associated value from BTree. If n is an internal node, returns pageID of child to follow, -1 if error and 0 if delete was successful or key doesn't exist.
+func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata) (int32, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if len(n.Keys) <= 0 || (len(n.Values) <= len(n.Children)) {
+		return -1, nil
+	}
+
+	idx, err := helpers.InsertBinarySearch(n.Keys, key, 0)
+
+	if err != nil {
+		return -1, err
+	}
+
+	kAtIdx := n.Keys[idx]
+
+	if n.Leaf {
+		if bytes.Compare(key, kAtIdx) != 0 {
+			// item not in leaf/btree
+			return -1, nil
+		}
+
+		// delete Item
+		n.Keys = append(n.Keys[:idx], n.Keys[idx+1:]...)
+		n.Values = append(n.Values[:idx], n.Values[idx+1:]...)
+
+		// Check for underflow
+		if len(n.Keys) < DEGREE {
+			var mergeSibling *Node
+			var rightMerge bool
+			// Load sibling node and check if redistribution is possible
+			path, err := stack.Parent()
+
+			if err != nil || path == nil || (path != nil && path.n == nil) {
+				if bTree.Root.Page.Header.PageId != n.Page.Header.PageId {
+					// none root without parent
+					return -1, err
+				}
+
+				// is root node. return
+				return 1, nil
+			}
+
+			// check if is the right most child
+			path.n.mu.RLock()
+			if int(path.idx) >= len(path.n.Children)-1 || n.RightSibling <= 0 {
+				// merge with left sibling
+				p, err := diskio.BPool.FetchPage(uint32(n.LeftSibling))
+
+				if err != nil {
+					return -1, err
+				}
+
+				mergeSibling, err = loadNode(p)
+
+				if err != nil {
+					return -1, err
+				}
+
+				rightMerge = false
+			} else {
+				// merge with right sibling
+				p, err := diskio.BPool.FetchPage(uint32(n.LeftSibling))
+
+				if err != nil {
+					return -1, err
+				}
+
+				mergeSibling, err = loadNode(p)
+
+				if err != nil {
+					return -1, err
+				}
+
+				rightMerge = true
+			}
+			path.n.mu.RUnlock()
+
+			mergeSibling.mu.Lock()
+			if len(n.Keys)+len(mergeSibling.Keys) >= DEGREE {
+				// redistribute/borrow keys
+				totKeys := make([][]byte, 0)
+				totVals := make([][]byte, 0)
+
+				if rightMerge {
+					totKeys = append(n.Keys, mergeSibling.Keys...)
+					totVals = append(n.Values, mergeSibling.Values...)
+
+					mid := len(totKeys) / 2
+
+					n.Keys = totKeys[:mid]
+					n.Values = totVals[:mid]
+
+					mergeSibling.Keys = totKeys[mid:]
+					mergeSibling.Values = totVals[mid:]
+
+					// set rebalance key
+					mr.rebalanceKey = mergeSibling.Keys[0]
+					// update separator key in parent
+					//path.n.mu.Lock()
+					//if bytes.Compare(key, path.n.Keys[path.idx]) == -1 {
+					//	path.n.Keys[path.idx] = mergeSibling.Keys[0]
+					//} else {
+					//	path.n.Keys[path.idx-1] = mergeSibling.Keys[0]
+					//}
+					//path.n.mu.Unlock()
+				} else {
+					totKeys = append(mergeSibling.Keys, n.Keys...)
+					totVals = append(mergeSibling.Values, n.Values...)
+
+					mid := len(totKeys) / 2
+
+					mergeSibling.Keys = totKeys[:mid]
+					mergeSibling.Values = totVals[:mid]
+
+					n.Keys = totKeys[mid:]
+					n.Values = totVals[mid:]
+
+					// set rebalance key
+					mr.rebalanceKey = n.Keys[0]
+				}
+
+				// Clear
+				totKeys = nil
+				totVals = nil
+
+				n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+				mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+				mergeSibling.mu.Unlock()
+			} else {
+				// merge
+				if rightMerge {
+					mergeSibling.Keys = append(n.Keys, mergeSibling.Keys...)
+					mergeSibling.Values = append(n.Values, mergeSibling.Values...)
+
+					// update sibling links
+					if n.LeftSibling > 0 {
+						// get left sibling
+						pge, err := diskio.BPool.FetchPage(uint32(n.LeftSibling))
+
+						if err != nil {
+							return -1, err
+						}
+
+						leftSib, err := loadNode(pge)
+
+						if err != nil {
+							return -1, err
+						}
+
+						leftSib.mu.Lock()
+						leftSib.RightSibling = n.RightSibling
+						mergeSibling.LeftSibling = n.LeftSibling
+						leftSib.mu.Unlock()
+
+						leftSib.Page.Sync(leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
+					}
+				} else {
+					mergeSibling.Keys = append(mergeSibling.Keys, n.Keys...)
+					mergeSibling.Values = append(mergeSibling.Values, n.Values...)
+
+					// update sibling links
+					if n.RightSibling > 0 {
+						// get left sibling
+						pge, err := diskio.BPool.FetchPage(uint32(n.RightSibling))
+
+						if err != nil {
+							return -1, err
+						}
+
+						rightSib, err := loadNode(pge)
+
+						if err != nil {
+							return -1, err
+						}
+
+						rightSib.mu.Lock()
+						rightSib.LeftSibling = n.LeftSibling
+						mergeSibling.RightSibling = n.RightSibling
+						rightSib.mu.Unlock()
+
+						rightSib.Page.Sync(rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
+					}
+				}
+
+				mr.merged = true
+				// update siblings
+
+				// Sync to page
+				n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+				mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+				mergeSibling.mu.Unlock()
+			}
+
+			mr.rightMerge = rightMerge
+
+			return 1, nil
+		}
+
+		return 1, nil
+	} else {
+		// internal node
+		if bytes.Compare(key, n.Keys[idx]) == -1 {
+			// Add to BTStack
+			tn := TraversePath{
+				n:   n,
+				idx: uint32(idx),
+			}
+			stack.Add(&tn)
+
+			// return page ID of child to follow
+			return n.Children[idx], nil
+		} else {
+			// Add to BTStack
+			tn := TraversePath{
+				n:   n,
+				idx: uint32(idx + 1),
+			}
+			stack.Add(&tn)
+
+			return n.Children[idx+1], nil
+		}
+	}
+}
 
 func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 	for i, _ := range keys {
@@ -616,6 +805,57 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				st.Clear()
 			}
 		}
+	}
+
+	return true, nil
+}
+
+func DeleteValue(keys [][]byte) (bool, error) {
+	for i, _ := range keys {
+		st := BTStack{
+			stack: make(map[int]*TraversePath),
+		}
+
+		mergeMetadata := MergeMetadata{}
+
+		var nodePageId int32
+
+		if bTree.Root == nil {
+			return false, BTreeError{Message: "BTree not initialized."}
+		}
+
+		nodePageId = bTree.Root.Page.Header.PageId
+
+		for nodePageId > 0 {
+			// construct node
+			pge, err := diskio.BPool.FetchPage(uint32(nodePageId))
+
+			if err != nil {
+				return false, err
+			}
+
+			// create node
+			node, err := loadNode(pge)
+
+			fmt.Println("NODE KEYS *************> ", node.Keys)
+
+			if err != nil {
+				return false, err
+			}
+
+			// delete
+			fmt.Printf("(%d) DELETING KEY: %v\n", nodePageId, keys[i])
+
+			nodePageId, err = node.deleteValue(keys[i], &st, &mergeMetadata)
+
+			if err != nil {
+				return false, err
+			}
+		}
+
+		//TODO: Handle propagating merges and updating parent keys
+
+		return true, nil
 	}
 
 	return true, nil

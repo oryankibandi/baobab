@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -22,7 +23,15 @@ func sortItems(l []NodeData) []NodeData {
 	t := make([]NodeData, 0)
 	t = append(t, l...)
 
-	sortFunc := func(a, b int) bool { return t[a].key < t[b].key }
+	sortFunc := func(a, b int) bool {
+		aByte := make([]byte, 4)
+		bByte := make([]byte, 4)
+		binary.LittleEndian.PutUint32(aByte, uint32(t[a].key))
+		binary.LittleEndian.PutUint32(bByte, uint32(t[b].key))
+
+		return bytes.Compare(aByte, bByte) == -1
+		// return t[a].key < t[b].key
+	}
 
 	sort.Slice(t, sortFunc)
 
