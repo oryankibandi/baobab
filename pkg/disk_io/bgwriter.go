@@ -69,6 +69,12 @@ func (bw *BgWriter) start() {
 
 				if n >= 0 {
 					fmt.Printf("(bgwriter) Written %d bytes.\n", n)
+
+					if p.Header.isSet(4) {
+						// remove from buffer pool
+						BPool.Delete(uint32(p.Header.PageId))
+					}
+
 					bw.mu.Lock()
 					bw.writtenBytes += uint32(n)
 					bw.mu.Unlock()

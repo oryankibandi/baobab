@@ -720,6 +720,23 @@ func (p *Page) insertCells(keys [][]byte, vals *([][]byte), pageIds *[]int32) er
 	return nil
 }
 
+// marks a page as dead, prepares it for deletion
+func (p *Page) MarkAsDead() error {
+	// Add offset to Free Space Map
+	off, err := LookupTable.GetPageOffset(int(p.Header.PageId))
+
+	if err != nil {
+		return err
+	}
+
+	FreeSpaceMap = append(FreeSpaceMap, int64(off))
+	// set deleted header
+	p.Header.setFlag(4)
+
+	return nil
+
+}
+
 // Synchronizes keys, values and  page IDs in node to items in Page
 func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
 	p.rmu.Lock()
@@ -728,40 +745,14 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 	fmt.Println("(Sync) KEYS ==> ", keys)
 	fmt.Println("(Sync) VALS ==> ", vals)
 	fmt.Println("(Sync) IN CHILDREN ==> ", pageIds)
-	//	var err error
-	//	if replace {
-	//		var pgeId *int32
-	//		var val *[]byte
-	//
-	//		if len(pageIds) > 0 && len(pageIds)-1 >= idx {
-	//			pgeId = &pageIds[idx+1]
-	//		}
-	//
-	//		if len(vals) > 0 && len(vals)-1 >= idx {
-	//			val = &vals[idx]
-	//		}
-	//
-	//		err = p.replaceCells(keys[idx], val, pgeId, idx)
-	//	} else {
-	//		err = p.insertNewCells(keys, &vals, &pageIds, idx)
-	//	}
-	//
-	//	if err != nil {
-	//		return err
-	//	}
-	//
-	//	if p.Header.isSet(7) && len(pageIds) > 0 {
-	//		// update right ptr
-	//		err := p.Header.UpdateRightPtr(pageIds[len(pageIds)-1])
-	//
-	//		if err != nil {
-	//			return err
-	//		}
-	//	}
-	//
-	//	if err != nil {
-	//		return err
-	//	}
+
+	if p.Header.isSet(4) {
+		// Dead page, scheduled for deletion
+		fmt.Println("DEAD PAGE, SCHEDULED FOR DELETION.....")
+		// Mark page as dirty
+		p.Header.setFlag(5)
+		return nil
+	}
 
 	isInternal := len(pageIds) > 0
 
@@ -1025,6 +1016,36 @@ func (p *Page) flushPage(b chan int32) {
 		log.Fatal("(flushPage) Invalid offset")
 	}
 
+	if p.Header.isSet(4) {
+		if offs <= 0 {
+			log.Println("Zero offset on deleted page.")
+			b <- int32(0)
+			return
+		}
+		// page marked for deletion, overwrite with 0s
+		data := make([]byte, PAGE_SIZE_BYTES)
+
+		n, err := DiskBTree.fd.WriteAt(data, int64(offs))
+
+		if err != nil {
+			panic("Could not write page")
+		}
+
+		// delete from LUT
+		err = LookupTable.DeletePageOffset(int(p.Header.PageId))
+
+		if err != nil {
+			panic("Could not clear page from LUT")
+		}
+
+		fmt.Println("CLEARED PAGE ", p.Header.PageId)
+
+		// send to channel
+		b <- int32(n)
+
+		return
+	}
+
 	if offs <= 0 {
 		fmt.Errorf("OFFSET IS ZERO or less than zero\n")
 		// page not flushed before, need to get new offset
@@ -1083,6 +1104,7 @@ func (p *Page) flushPage(b chan int32) {
 		panic("Could not write page")
 	}
 
+	fmt.Println("flushed page:=> ", p.Header.PageId)
 	// send to channel
 	b <- int32(n)
 }
@@ -1609,6 +1631,12 @@ func (h *PageHeader) updateLeftSibling(pageId uint32) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.LeftSibling = int32(pageId)
+}
+
+func (h *PageHeader) markAsDead(pageId uint32) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.setFlag(4)
 }
 
 func (q *JobQueue) run() {
