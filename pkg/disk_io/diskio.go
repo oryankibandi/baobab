@@ -139,7 +139,7 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 	_, err = d.fd.ReadAt(pageData, int64(offset))
 
 	if err != nil && !errors.Is(err, io.EOF) {
-		log.Fatal(fmt.Sprintf("Unable to read offset %d: %v", offset, err.Error()))
+		panic(fmt.Sprintf("Unable to read offset %d: %v", offset, err.Error()))
 	}
 
 	fmt.Println("READING FROM OFFSET => ", offset)
@@ -213,8 +213,8 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 	var kO int32
 	var vO int32
 
-	for i := 0; i < int(itemCount); i++ {
-		startOff = HEADER_SIZE_BYTES + (i * CELL_POINTER_SIZE_BYTE)
+	for i := range itemCount {
+		startOff = HEADER_SIZE_BYTES + (int(i) * CELL_POINTER_SIZE_BYTE)
 		endOff = startOff + CELL_POINTER_SIZE_BYTE
 		cellPointerData = pageData[startOff:endOff]
 		log.Println("CURR ITERATION: ", i)
@@ -251,7 +251,8 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 		// Read key and value
 		key = pageData[kO : kO+int32(keySize)]
 		log.Println("KEY DATA ===> ", key)
-		fmt.Println("KEY-=-=-==-=-=-=-=-=-=--=-=-=-> ", binary.LittleEndian.Uint32(key))
+		//fmt.Println("KEY-=-=-==-=-=-=-=-=-=--=-=-=-> ", binary.LittleEndian.Uint32(key))
+		fmt.Println("KEY-=-=-==-=-=-=-=-=-=--=-=-=-> ", key)
 
 		val = pageData[vO : vO+int32(valSize)]
 		fmt.Println("VAL-=-=-==-=-=-=-=-=-=--=-=-=-> ", string(val))
@@ -1074,7 +1075,7 @@ func (p *Page) flushPage(b chan int32) {
 
 	cells := make([]byte, 0)
 	for _, c := range p.Cells {
-		cells = append(cells, c.toBytes()...)
+		cells = append(c.toBytes(), cells...)
 	}
 
 	// calculate free space upper offset
@@ -1709,7 +1710,7 @@ func init() {
 	}
 
 	// Calculate PageCount
-	metadataPage := make([]byte, 20)
+	metadataPage := make([]byte, METADATA_PAGE_SIZE_BYTES)
 	r, err := DiskBTree.fd.Read(metadataPage)
 
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -1730,7 +1731,7 @@ func init() {
 		binary.LittleEndian.PutUint32(metadataPage[12:16], uint32(0))
 		// Max page ID
 		binary.LittleEndian.PutUint32(metadataPage[16:], uint32(0))
-		fmt.Println("METADATA PAGE => ", metadataPage)
+		//fmt.Println("METADATA PAGE => ", metadataPage)
 
 		_, err = DiskBTree.fd.Write(metadataPage)
 

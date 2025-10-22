@@ -3,3 +3,6 @@ data_lt
 
 # binaries
 bin/
+
+# trace files
+trace.out

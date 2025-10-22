@@ -20,6 +20,8 @@ type BgWriter struct {
 }
 
 func (bw *BgWriter) start() {
+	// Give time for other processes to initialize
+	time.Sleep(time.Second * 5)
 	for {
 		for _, p := range BPool.pool {
 			dirty, err := p.isDirty()
@@ -94,10 +96,12 @@ func (bw *BgWriter) start() {
 		// bw.wg.Wait()
 
 		DiskBTree.forceFlush()
-		fmt.Println("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
-		fmt.Printf("(bgwriter) Flushed %d page(s)\n", bw.writtenPages)
-		fmt.Printf("(bgwriter) Written %d bytes\n", bw.writtenBytes)
-		fmt.Println("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+		if bw.writtenPages > 0 {
+			fmt.Println("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+			fmt.Printf("(bgwriter) Flushed %d page(s)\n", bw.writtenPages)
+			fmt.Printf("(bgwriter) Written %d bytes\n", bw.writtenBytes)
+			fmt.Println("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
+		}
 
 		DiskBTree.forceFlush()
 

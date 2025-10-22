@@ -70,11 +70,14 @@ func InitLookupTable() {
 	}
 
 	itemsCount := LookupTable.count
+	fmt.Println("ITEM COUNT => ", itemsCount)
 	// Load items
-	for i := uint32(0); i < itemsCount; i++ {
+	for i := range itemsCount {
+		fmt.Println("ITERATION: ", i)
 		loaded, err := LookupTable.loadLookupItem(uint32(METADATA_SIZE_BYTE) + uint32(ENTRY_SIZE_BYTES*i))
 
 		// If encounters empty spot, do not count this iteration
+		// TODO: Rewrite to defragment file
 		if !loaded {
 			itemsCount++
 		}
@@ -96,7 +99,7 @@ func (t *TLookupTable) flushMetadata() error {
 	metadata := make([]byte, METADATA_SIZE_BYTE)
 
 	metadata[0] = byte(0)
-	binary.LittleEndian.PutUint32(metadata[1:], t.count)
+	binary.LittleEndian.PutUint32(metadata[1:5], t.count)
 
 	_, err := LookupTable.fd.WriteAt(metadata, 0)
 
@@ -164,11 +167,12 @@ func (t *TLookupTable) loadLookupItem(offset uint32) (bool, error) {
 	_, err := t.fd.ReadAt(i, int64(offset))
 
 	if err != nil {
-		return false, DiskioError{Message: fmt.Sprintf("Unable to read item at offset %d: s", err.Error())}
+		return false, DiskioError{Message: fmt.Sprintf("Unable to read item at offset %d: %s", offset, err.Error())}
 	}
 
 	pageId := binary.LittleEndian.Uint32(i[:4])
-	pageOff := binary.LittleEndian.Uint32(i[4:8])
+	pageOff := binary.LittleEndian.Uint32(i[4:])
+	fmt.Println("READ DATA AT LOOKUP FILE ==> ", i)
 
 	// 0 filled space indicates deleted item(not yet vaccumed)
 	if pageId == 0 || pageOff == 0 {
@@ -273,6 +277,13 @@ func (l *LookupItem) persist() {
 
 	binary.LittleEndian.PutUint32(entry[:4], l.pageID)
 	binary.LittleEndian.PutUint32(entry[4:], l.dataOffset)
+
+	fmt.Println("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+	fmt.Println("(LUT PERSIST) PAGE ID => ", l.pageID)
+	fmt.Println("(LUT PERSIST) DATA OFFSET => ", l.dataOffset)
+	fmt.Println("(LUT PERSIST) WRITE OFFSET => ", l.lookupOffset)
+	fmt.Println("(LUT PERSIST) WRITE ARRAY => ", entry)
+	fmt.Println("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
 
 	_, err := LookupTable.fd.WriteAt(entry, int64(l.lookupOffset))
 

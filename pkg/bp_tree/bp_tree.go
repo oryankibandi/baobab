@@ -166,10 +166,8 @@ func loadNode(page *diskio.Page) (*Node, error) {
 	return &n, nil
 }
 
-func (n *Node) split() (*Node, error) {
-	//n.mu.Lock()
-	//defer n.mu.Unlock()
-
+// Splits the given node and returns the new created node, promoted key if `n` is an internal node and error
+func (n *Node) split() (*Node, []byte, error) {
 	fmt.Println("KEYS B4 SPLIT => ", n.Keys)
 	if n.Leaf {
 		mid := len(n.Keys) / 2
@@ -189,11 +187,11 @@ func (n *Node) split() (*Node, error) {
 		rightNode.Values = rightVals
 
 		fmt.Println("KEYS AFTER SPLIT => ", n.Keys)
-		return rightNode, nil
+		return rightNode, nil, nil
 	} else {
 		// None leaf node split
 		mid := len(n.Keys) / 2
-		// promotedKey := n.Keys[mid]
+		promotedKey := n.Keys[mid]
 		rightKeys := n.Keys[mid+1:]
 		rightChildren := n.Children[mid+1:]
 
@@ -211,7 +209,7 @@ func (n *Node) split() (*Node, error) {
 		rightNode.Children = rightChildren
 
 		fmt.Println("KEYS AFTER SPLIT => ", n.Keys)
-		return rightNode, nil
+		return rightNode, promotedKey, nil
 	}
 }
 
@@ -303,7 +301,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 		// Check overflow
 		if len(n.Keys) > (2 * DEGREE) {
 			log.Println("(insert) OVERFLOW DETECTED...")
-			newRightNode, err := n.split()
+			newRightNode, _, err := n.split()
 
 			if err != nil {
 				return 0, err
@@ -316,7 +314,8 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 
 			// create  page for right node
 			newRightNode.assignPage(false)
-
+			newRightNode.mu.Lock()
+			defer newRightNode.mu.Unlock()
 			// update sibling links
 			var oldRightSibling *Node
 			newRightNode.LeftSibling = n.Page.Header.PageId
@@ -324,18 +323,13 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 
 			if n.Page.Header.RightSibling != 0 {
 				// load node update sibling link
-				oldRightSiblingPage, err := diskio.BPool.FetchPage(uint32(n.Page.Header.RightSibling))
+				oldRightSibling, err = buildPage(uint32(n.Page.Header.PageId))
 
 				if err != nil {
 					return 0, err
 				}
 
-				oldRightSibling, err = loadNode(oldRightSiblingPage)
-
-				if err != nil {
-					return 0, err
-				}
-
+				oldRightSibling.mu.Lock()
 				oldRightSibling.LeftSibling = newRightNode.Page.Header.PageId
 			}
 
@@ -357,6 +351,8 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 
 			if oldRightSibling != nil {
 				oldRightSibling.Page.Sync(oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+
+				oldRightSibling.mu.Unlock()
 			}
 
 			return 0, nil
@@ -393,6 +389,53 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 
 			return n.Children[idx+1], nil
 		}
+	}
+}
+
+func (n *Node) search(key []byte, nextNodeId *int32) ([]byte, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	fmt.Println("--------------------------------------------------")
+	fmt.Printf("SEARCH: %v\n", key)
+	fmt.Println("KEYS: ", n.Keys)
+	if n.Leaf {
+		fmt.Println("VALS: ", n.Values)
+	} else {
+		fmt.Println("CHILDREN: ", n.Children)
+	}
+	fmt.Println("--------------------------------------------------")
+
+	if len(n.Keys) <= 0 || (len(n.Values) <= 0 && len(n.Children) <= 0) {
+		return nil, nil
+	}
+
+	idx, err := helpers.InsertBinarySearch(n.Keys, key, 0)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if n.Leaf {
+		if bytes.Compare(key, n.Keys[idx]) == 0 {
+			*nextNodeId = 0
+			// return value
+			return n.Values[idx], nil
+		} else {
+			*nextNodeId = 0
+			return nil, BTreeError{Message: "Key not found"}
+		}
+	} else {
+		// internal node
+		if bytes.Compare(key, n.Keys[idx]) == -1 {
+			*nextNodeId = n.Children[idx]
+		} else {
+
+			*nextNodeId = n.Children[idx+1]
+		}
+		fmt.Println("FOLLOW ---> ", *nextNodeId)
+
+		return nil, nil
 	}
 }
 
@@ -804,7 +847,12 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 
 func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 	for i, _ := range keys {
-		log.Printf("%d Inserting {%v:%v} .................................................................\n", i, binary.LittleEndian.Uint32(keys[i]), string(vals[i]))
+		if len(keys[i]) >= 4 {
+			log.Printf("%d Inserting {%v:%v} .................................................................\n", i, binary.LittleEndian.Uint32(keys[i]), string(vals[i]))
+		} else {
+			log.Printf("%d Inserting {%v:%v} .................................................................\n", i, keys[i], string(vals[i]))
+
+		}
 		// Get root page and retrieve/create node
 
 		// stack
@@ -892,8 +940,8 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					}
 
 					if len(parent.n.Keys) > DEGREE*2 {
-						// handle overflow
-						newRightNode, err := parent.n.split()
+						// handle overflow(internal node)
+						newRightNode, promoted, err := parent.n.split()
 
 						if err != nil {
 							return false, err
@@ -925,7 +973,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						parent.n.RightSibling = newRightNode.Page.Header.PageId
 
 						r := SplitResponse{
-							PromotedSeparatorKey: newRightNode.Keys[0],
+							PromotedSeparatorKey: promoted,
 							NewNodeId:            uint32(newRightNode.Page.Header.PageId),
 						}
 
@@ -1074,9 +1122,16 @@ func DeleteValue(keys [][]byte) (bool, error) {
 			mergeMetadata.rebalanceKey = make([]byte, 0)
 
 			// check underflow
-			if len(path.n.Keys) < DEGREE {
+			if len(path.n.Keys) < DEGREE && bTree.Root.Page.Header.PageId != path.n.Page.Header.PageId {
 				// merge and set metadata
 				err = path.n.handleInternalUnderflow(&mergeMetadata, &st)
+
+				if err != nil {
+					return false, nil
+				}
+			} else {
+				// Sync
+				err = path.n.Page.Sync(path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
 
 				if err != nil {
 					return false, nil
@@ -1107,4 +1162,32 @@ func buildPage(pageId uint32) (*Node, error) {
 	}
 
 	return node, nil
+}
+
+// Retrieves value with key
+func Get(key []byte) ([]byte, error) {
+	var nodePageId int32
+	var val []byte
+
+	if bTree.Root == nil {
+		return nil, BTreeError{"Key Value store not initialized"}
+	}
+
+	nodePageId = bTree.Root.Page.Header.PageId
+
+	for nodePageId > 0 {
+		pge, err := buildPage(uint32(nodePageId))
+
+		if err != nil {
+			return nil, err
+		}
+
+		val, err = pge.search(key, &nodePageId)
+
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return val, nil
 }

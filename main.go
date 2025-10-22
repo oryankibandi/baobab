@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
 	"net/http"
+	"os"
+	"runtime/trace"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/oryankibandi/on_disk_btree/pkg/bp_tree"
@@ -17,6 +21,16 @@ import (
 type NodeData struct {
 	key   int32
 	value []byte
+}
+
+type KV struct {
+	Key string `json:"key"`
+	Val string `json:"val"`
+}
+
+// simple JSON error response
+type ErrResp struct {
+	Error string `json:"error"`
 }
 
 func sortItems(l []NodeData) []NodeData {
@@ -93,11 +107,104 @@ func randomAlphaNumBytes(n int) []byte {
 	return out
 }
 
+// writeJSON helps send JSON responses
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func getKey() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
+			return
+		}
+
+		key := strings.TrimPrefix(r.URL.Path, "/kv/")
+
+		if key == "" || strings.Contains(key, "/") {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: "invalid key in path"})
+			return
+		}
+
+		val, err := bp_tree.Get([]byte(key))
+
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, KV{Key: key, Val: string(val)})
+	}
+}
+
+func addKey() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
+			return
+		}
+
+		// honour cancellations
+		select {
+		case <-r.Context().Done():
+			writeJSON(w, http.StatusRequestTimeout, ErrResp{Error: "request cancelled"})
+			return
+		default:
+		}
+
+		var payload KV
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&payload); err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: "invalid JSON: " + err.Error()})
+			return
+		}
+		if payload.Key == "" {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: "key is required"})
+			return
+		}
+
+		fmt.Printf("Key: %v\nVal: %v\n", payload.Key, payload.Val)
+		bp_tree.InsertValue([][]byte{[]byte(payload.Key)}, [][]byte{[]byte(payload.Val)})
+		writeJSON(w, http.StatusOK, payload)
+	}
+}
+
+func setKey() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
+			return
+		}
+
+		key := strings.TrimPrefix(r.URL.Path, "/kv/")
+
+		if key == "" || strings.Contains(key, "/") {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: "invalid key in path"})
+			return
+		}
+
+		val, err := bp_tree.Get([]byte(key))
+
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
+		}
+
+		writeJSON(w, http.StatusOK, KV{Key: key, Val: string(val)})
+	}
+}
+
 // runServer starts a basic HTTP server on port 8080
 func runServer() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "Hello, world! Server is running on port 8080.")
 	})
+
+	http.HandleFunc("/kv/", getKey())
+
+	http.HandleFunc("/kv", addKey())
 
 	fmt.Println("🚀🚀🚀🚀🚀🚀🚀  Server running on http://localhost:8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
@@ -106,6 +213,10 @@ func runServer() {
 }
 
 func main() {
+	f, _ := os.Create("trace.out")
+	defer f.Close()
+	trace.Start(f)
+	defer trace.Stop()
 	start := time.Now()
 	fmt.Println("Hello world")
 	btree, err := bp_tree.InitBTree[int32]()
@@ -127,7 +238,7 @@ func main() {
 	items = append(items, NodeData{key: 520, value: []byte("DC systems")})
 	items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
 	items = append(items, NodeData{key: 45, value: []byte("Amsterdam systems")})
-	items = append(items, NodeData{key: 65, value: []byte("Seattle systems")})
+	items = append(items, NodeData{key: 65, value: []byte("Portland systems")})
 	items = append(items, NodeData{key: 55, value: []byte("San Francisco systems")})
 	items = append(items, NodeData{key: 67, value: []byte("Austin systems")})
 	items = append(items, NodeData{key: 70, value: []byte("NBO systems")})
@@ -152,7 +263,13 @@ func main() {
 	inserted, err := bp_tree.InsertValue(keySlice, valSlice)
 
 	if err != nil {
-		log.Fatal(err.Error())
+		panic(err.Error())
+	}
+
+	inserted, err = bp_tree.InsertValue([][]byte{[]byte("city")}, [][]byte{[]byte("cupertino")})
+
+	if err != nil {
+		panic(err.Error())
 	}
 
 	fmt.Println("Page Inserted: ", inserted)
@@ -190,21 +307,22 @@ func main() {
 	fmt.Println()
 	fmt.Println("Done in ", duration)
 
-	go func() {
+	//	go func() {
+	//
+	//		time.Sleep(time.Second * 5)
+	//		fmt.Println("DELETING........")
+	//		time.Sleep(time.Second * 1)
+	//		k := make([]byte, 0)
+	//		n := binary.LittleEndian.AppendUint32(k, uint32(45))
+	//		deleted, err := bp_tree.DeleteValue([][]byte{n})
+	//
+	//		if err != nil {
+	//			panic(err.Error())
+	//		}
+	//
+	//		fmt.Println("DELETED: --> ", deleted)
+	//
+	//	}()
 
-		time.Sleep(time.Second * 5)
-		fmt.Println("DELETING........")
-		time.Sleep(time.Second * 1)
-		k := make([]byte, 0)
-		n := binary.LittleEndian.AppendUint32(k, uint32(45))
-		deleted, err := bp_tree.DeleteValue([][]byte{n})
-
-		if err != nil {
-			panic(err.Error())
-		}
-
-		fmt.Println("DELETED: --> ", deleted)
-
-	}()
 	runServer()
 }
