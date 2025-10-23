@@ -1,2 +1,5 @@
 run:
-	@go run main.go
+	@./bin/btree
+build:
+	@go build -o bin/btree
+

@@ -88,8 +88,13 @@ func InitBTree[K cmp.Ordered]() (*BTree, error) {
 
 // Create new node - does not include associated page
 func createNode(separatorKeys [][]byte, isLeaf bool, isRoot bool) (*Node, error) {
-	if (len(separatorKeys) > (DEGREE*2) || len(separatorKeys) < DEGREE) && !isLeaf && !isRoot {
-		msg := fmt.Sprintf("Keys must be from %d to %d", DEGREE, 2*DEGREE)
+	if !isLeaf && (len(separatorKeys) < diskio.DEGREE-1 && len(separatorKeys) > diskio.ORDER-1) {
+		msg := fmt.Sprintf("Keys must be between %d to %d", diskio.DEGREE-1, diskio.ORDER-1)
+		return nil, BTreeError{Message: msg}
+	}
+
+	if isLeaf && (len(separatorKeys) < diskio.DEGREE && len(separatorKeys) > diskio.ORDER) {
+		msg := fmt.Sprintf("Keys must be from %d to %d", diskio.DEGREE, diskio.ORDER)
 		return nil, BTreeError{Message: msg}
 	}
 
@@ -299,7 +304,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 		}
 
 		// Check overflow
-		if len(n.Keys) > (2 * DEGREE) {
+		if len(n.Keys) > diskio.ORDER {
 			log.Println("(insert) OVERFLOW DETECTED...")
 			newRightNode, _, err := n.split()
 
@@ -323,7 +328,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 
 			if n.Page.Header.RightSibling != 0 {
 				// load node update sibling link
-				oldRightSibling, err = buildPage(uint32(n.Page.Header.PageId))
+				oldRightSibling, err = buildPage(uint32(n.Page.Header.RightSibling))
 
 				if err != nil {
 					return 0, err
@@ -350,6 +355,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 			newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
 
 			if oldRightSibling != nil {
+				fmt.Println("SYNCING OLD RIGHT SIBLING...")
 				oldRightSibling.Page.Sync(oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
 
 				oldRightSibling.mu.Unlock()
@@ -939,7 +945,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						return false, err
 					}
 
-					if len(parent.n.Keys) > DEGREE*2 {
+					if len(parent.n.Keys) > diskio.ORDER-1 {
 						// handle overflow(internal node)
 						newRightNode, promoted, err := parent.n.split()
 
@@ -948,7 +954,11 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						}
 
 						// persist new right node
-						newRightNode.assignPage(false)
+						_, err = newRightNode.assignPage(false)
+
+						if err != nil {
+							return false, err
+						}
 
 						// update sibling pointers
 						var oldRightSibling *Node
@@ -970,6 +980,9 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 							oldRightSibling.mu.Unlock()
 						}
 
+						fmt.Println("NEW RIGHT NODE ====> ", newRightNode)
+						fmt.Println("NEW RIGHT NODE PAGE ====> ", newRightNode.Page)
+						fmt.Println("NEW RIGHT NODE PAGE HEADER ====> ", newRightNode.Page.Header)
 						parent.n.RightSibling = newRightNode.Page.Header.PageId
 
 						r := SplitResponse{

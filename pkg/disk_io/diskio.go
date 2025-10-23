@@ -287,6 +287,8 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 }
 
 func (d *DiskTree) flushMetadata() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	// only use as fixed size buffer - default is 4K which is too much
 	wr := bufio.NewWriterSize(d.fd, METADATA_PAGE_SIZE_BYTES)
 
@@ -311,34 +313,34 @@ func (d *DiskTree) flushMetadata() {
 	_, err := wr.Write(rootPageId)
 
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
 	}
 
 	// Version
 	_, err = wr.Write([]byte{0, 0, 0, 0})
 
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Unable to write root page metadata: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadata: ", err.Error()))
 	}
 	// tree height
 	_, err = wr.Write([]byte{0, 0, 0, 0})
 
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
 	}
 
 	// No or pages
 	_, err = wr.Write(pageCount)
 
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
 	}
 
 	// Max page Id
 	_, err = wr.Write(maxPageId)
 
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
 	}
 
 	//	if d.RootNode != nil {
@@ -355,11 +357,11 @@ func (d *DiskTree) flushMetadata() {
 	err = wr.Flush()
 
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Unable to flush metadata buffer: ", err.Error()))
+		panic(fmt.Sprintf("Unable to flush metadata buffer: ", err.Error()))
 	}
 
 	if err = d.fd.Sync(); err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 }
 
@@ -456,7 +458,11 @@ func (d *DiskTree) incrementFlushedPages() {
 // Create a new Page. Requires at least two keys and values/pointers. Key should be sorted in a lexicographical order
 func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Page, error) {
 	fmt.Println("(NEW) KEYS ==> ", keys)
-	if len(keys) < DEGREE && !setAsRoot {
+	if ((values == nil || len(*values) <= 0) && (len(keys) < DEGREE-1 || len(keys) > ORDER-1)) && !setAsRoot {
+		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
+	}
+
+	if ((childPageIds == nil || len(*childPageIds) <= 0) && (len(keys) < DEGREE || len(keys) > ORDER)) && !setAsRoot {
 		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
 	}
 
@@ -481,9 +487,12 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 	// fmt.Println("RETIEVED NEW NODE PAGE -> ", pge)
 	var rightPtr int32
 
+	DiskBTree.mu.Lock()
+
+	newPageId := DiskBTree.MaxPageId + 1
 	h := PageHeader{
 		Flags:       byte(32), // 0010000
-		PageId:      DiskBTree.MaxPageId + 1,
+		PageId:      newPageId,
 		Items:       0,
 		FreeSpace:   PAGE_SIZE_BYTES - HEADER_SIZE_BYTES,
 		UpperOffset: PAGE_SIZE_BYTES - LOWER_PADDING_BYTES,
@@ -539,6 +548,7 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 	// p.flushMany(false)
 
 	DiskBTree.PageCount += 1
+	DiskBTree.mu.Unlock()
 	DiskBTree.flushMetadata()
 	fmt.Println("PAGE COUNT --------> ", DiskBTree.PageCount)
 	fmt.Println("MAX PAGE ID ----------> ", DiskBTree.MaxPageId)
