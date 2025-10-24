@@ -49,6 +49,11 @@ type DeleteResponse struct {
 	newParent *Node
 }
 
+type RangeItem struct {
+	Key []byte
+	Val []byte
+}
+
 //
 //type InsertResponse struct {
 //	NewNodeId            uint32
@@ -442,6 +447,67 @@ func (n *Node) search(key []byte, nextNodeId *int32) ([]byte, error) {
 		fmt.Println("FOLLOW ---> ", *nextNodeId)
 
 		return nil, nil
+	}
+}
+
+// Retrieves node with key, and returns values in the node greater than key, right sibling page id and error if any
+func (n *Node) rangeSearch(key []byte, nextNodeId *int32) ([]RangeItem, int32, error) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
+	fmt.Println("--------------------------------------------------")
+	fmt.Printf("SEARCH: %v\n", key)
+	fmt.Println("KEYS: ", n.Keys)
+	if n.Leaf {
+		fmt.Println("VALS: ", n.Values)
+	} else {
+		fmt.Println("CHILDREN: ", n.Children)
+	}
+	fmt.Println("--------------------------------------------------")
+
+	if len(n.Keys) <= 0 || (len(n.Values) <= 0 && len(n.Children) <= 0) {
+		return nil, 0, nil
+	}
+
+	idx, err := helpers.InsertBinarySearch(n.Keys, key, 0)
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if n.Leaf {
+		if bytes.Compare(key, n.Keys[idx]) == 0 {
+			*nextNodeId = 0
+			// return value
+			items := make([]RangeItem, 0)
+			tempVals := n.Values[idx:]
+			var ri RangeItem
+
+			for i, k := range n.Keys[idx:] {
+				ri = RangeItem{
+					Key: k,
+					Val: tempVals[i],
+				}
+
+				items = append(items, ri)
+			}
+
+			return items, n.RightSibling, nil
+		} else {
+			*nextNodeId = 0
+			return nil, 0, BTreeError{Message: "Key not found"}
+		}
+	} else {
+		// internal node
+		if bytes.Compare(key, n.Keys[idx]) == -1 {
+			*nextNodeId = n.Children[idx]
+		} else {
+
+			*nextNodeId = n.Children[idx+1]
+		}
+		fmt.Println("FOLLOW ---> ", *nextNodeId)
+
+		return nil, 0, nil
 	}
 }
 
@@ -1203,4 +1269,96 @@ func Get(key []byte) ([]byte, error) {
 	}
 
 	return val, nil
+}
+
+// Retrieves value with key
+func RangeSearch(minKey []byte, maxKey []byte, count int32) ([]RangeItem, error) {
+	var nodePageId int32
+	var items []RangeItem
+	var rightSibId int32
+
+	if bTree.Root == nil {
+		return nil, BTreeError{"Key Value store not initialized"}
+	}
+
+	nodePageId = bTree.Root.Page.Header.PageId
+	var pge *Node
+	var err error
+
+	for nodePageId > 0 {
+		pge, err = buildPage(uint32(nodePageId))
+
+		if err != nil {
+			return nil, err
+		}
+
+		items, rightSibId, err = pge.rangeSearch(minKey, &nodePageId)
+
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	pge.mu.RLock()
+	var rightSib *Node
+	// get range
+RangeLoop:
+	for rightSibId > 0 {
+		// 1. Get right child
+		// 2. For each key, check if is more than max key
+		// 3. Increment count
+		// 4. Add key to val
+		rightSib, err := buildPage(uint32(rightSibId))
+
+		if err != nil {
+			return nil, err
+		}
+
+		if !rightSib.Leaf {
+			return nil, BTreeError{Message: "Encountered internal node during range scan."}
+		}
+
+		// unloack prev node afte acquiring a lock on it's right sibling
+		rightSib.mu.RLock()
+		pge.mu.RUnlock()
+
+		var ri RangeItem
+		for i, k := range rightSib.Keys {
+			if len(maxKey) > 0 && bytes.Compare(maxKey, k) == 1 {
+				// key greater than max key, break
+				rightSib.mu.RUnlock()
+				break RangeLoop
+			}
+
+			ri = RangeItem{
+				Key: k,
+				Val: rightSib.Values[i],
+			}
+
+			items = append(items, ri)
+
+			if len(items) >= int(count) {
+				rightSib.mu.RUnlock()
+				break RangeLoop
+			}
+
+		}
+
+		rightSibId = rightSib.RightSibling
+
+		pge = rightSib
+
+	}
+
+	// Unlock right sibling
+	if rightSib != nil {
+		rightSib.mu.RUnlock()
+	}
+
+	return items, nil
+}
+
+// shutdown
+func Shutdown() {
+	diskio.DiskBTree.Close()
 }

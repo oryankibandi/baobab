@@ -73,7 +73,7 @@ func InitLookupTable() {
 	fmt.Println("ITEM COUNT => ", itemsCount)
 	// Load items
 	for i := range itemsCount {
-		fmt.Println("ITERATION: ", i)
+		//fmt.Println("ITERATION: ", i)
 		loaded, err := LookupTable.loadLookupItem(uint32(METADATA_SIZE_BYTE) + uint32(ENTRY_SIZE_BYTES*i))
 
 		// If encounters empty spot, do not count this iteration
@@ -87,7 +87,7 @@ func InitLookupTable() {
 		}
 	}
 
-	log.Println("Loaded item to lookup table: ", LookupTable)
+	// log.Println("Loaded item to lookup table: ", LookupTable)
 
 }
 
@@ -172,7 +172,7 @@ func (t *TLookupTable) loadLookupItem(offset uint32) (bool, error) {
 
 	pageId := binary.LittleEndian.Uint32(i[:4])
 	pageOff := binary.LittleEndian.Uint32(i[4:])
-	fmt.Println("READ DATA AT LOOKUP FILE ==> ", i)
+	//fmt.Println("READ DATA AT LOOKUP FILE ==> ", i)
 
 	// 0 filled space indicates deleted item(not yet vaccumed)
 	if pageId == 0 || pageOff == 0 {
@@ -268,6 +268,16 @@ func (t *TLookupTable) DeletePageOffset(pageId int) error {
 	// TODO: Flush updated metadata
 
 	return nil
+}
+
+func (t *TLookupTable) Close() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	err := t.fd.Close()
+
+	if err != nil {
+		panic(err.Error())
+	}
 }
 
 // Persists a lookup Item at its offset on lookup table

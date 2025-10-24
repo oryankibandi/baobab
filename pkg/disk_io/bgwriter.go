@@ -8,7 +8,7 @@ import (
 
 const (
 	MAX_PAGES      = 100   // Max # of pages to flush in one operation
-	BGWRITER_DELAY = 5000  // // delay between BgWriter activity writes (Milliseconds)
+	BGWRITER_DELAY = 200   // // delay between BgWriter activity writes (Milliseconds)
 	BG_FLUSH_AFTER = 65536 // size after which to force flush to disk(bypass OS cache) size after which to force flush to disk(bypass OS cache (Bytes)
 )
 
@@ -23,6 +23,7 @@ func (bw *BgWriter) start() {
 	// Give time for other processes to initialize
 	time.Sleep(time.Second * 5)
 	for {
+		BPool.mu.RLock()
 		for _, p := range BPool.pool {
 			dirty, err := p.isDirty()
 
@@ -94,6 +95,7 @@ func (bw *BgWriter) start() {
 		}
 
 		// bw.wg.Wait()
+		BPool.mu.RUnlock()
 
 		DiskBTree.forceFlush()
 		if bw.writtenPages > 0 {

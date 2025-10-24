@@ -120,14 +120,23 @@ func (d *DiskTree) startupTraversal(rootPageId int32) {
 		log.Fatal(err.Error())
 	}
 
+	fmt.Println("LOADED PAGE ========================> ", rootPage)
+	fmt.Println("LOADED PAGE HEADER =====================> ", rootPage.Header)
+
 	fmt.Println("PAGE =+=+> ", rootPage)
 
 	// set RootNode
 	d.RootNode = rootPage
+	d.RootPage = rootPage.Header.PageId
 }
 
 // Create an in-memory Page from an existing on-disk page. Can be run as a goroutine
 func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
+	fmt.Println("(loadPage) ROOT NODE ==> ", d.RootNode)
+	if d.RootNode != nil {
+		fmt.Println("ROOT NODE HEADER==> ", d.RootNode.Header)
+	}
+
 	offset, err := LookupTable.GetPageOffset(int(pageId))
 
 	if err != nil {
@@ -189,7 +198,7 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 		maxPageID = pageID
 	}
 
-	fmt.Println("LOOKUP TABLE => ", LookupTable)
+	//fmt.Println("LOOKUP TABLE => ", LookupTable)
 	fmt.Println("MAX PAGE ID => ", maxPageID)
 	fmt.Println("ITEM COUNT => ", itemCount)
 	fmt.Println("Upper Offset => ", upperOffset)
@@ -228,7 +237,7 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 
 		log.Println("CELL OFFSET -> ", cellP)
 
-		log.Println("******** CELL DATA => ", pageData[cellOffset:(cellOffset+32)])
+		//log.Println("******** CELL DATA => ", pageData[cellOffset:(cellOffset+32)])
 		log.Println("******** EXPECTED CELL DATA=> ", pageData[cellOffset:])
 		// Get cell data
 		cellFlag = pageData[cellOffset]
@@ -303,11 +312,15 @@ func (d *DiskTree) flushMetadata() {
 	binary.LittleEndian.PutUint32(maxPageId, uint32(d.MaxPageId))
 
 	if d.RootNode != nil {
+		fmt.Println("(flushMetadata) ROOT NODE PAGE ID ==--------------------> ", d.RootNode.Header)
+		fmt.Println("(flushMetadata) ROOT PAGE ID -=-=-=___________--> ", d.RootPage)
 		binary.LittleEndian.PutUint32(rootPageId, uint32(d.RootPage))
+	} else {
+		fmt.Println("(flushMetadata) ROOTNODE IS NULL ==> ", d.RootNode)
 	}
 
-	fmt.Println("ROOT PAGE ID =---------------------> ", rootPageId)
-	fmt.Println("MAX PAGE ID =----------------------+> ", maxPageId)
+	fmt.Println("(flushMetadata) ROOT PAGE ID =---------------------> ", rootPageId)
+	fmt.Println("(flushMetadata) MAX PAGE ID =----------------------+> ", maxPageId)
 	// write
 	//  root page ID
 	_, err := wr.Write(rootPageId)
@@ -455,6 +468,19 @@ func (d *DiskTree) incrementFlushedPages() {
 	d.FlushedPages += 1
 }
 
+// safely close file descriptors
+func (d *DiskTree) Close() {
+	LookupTable.Close()
+	d.mu.Lock()
+	err := d.fd.Close()
+
+	if err != nil {
+		panic(err.Error())
+	}
+
+	d.mu.Unlock()
+}
+
 // Create a new Page. Requires at least two keys and values/pointers. Key should be sorted in a lexicographical order
 func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Page, error) {
 	fmt.Println("(NEW) KEYS ==> ", keys)
@@ -488,6 +514,11 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 	var rightPtr int32
 
 	DiskBTree.mu.Lock()
+	fmt.Println("(NEW) ROOT NODE ==> ", DiskBTree.RootNode)
+
+	if DiskBTree.RootNode != nil {
+		fmt.Println("(NEW) ROOT NODE PAGE ID ==> ", DiskBTree.RootNode.Header.PageId)
+	}
 
 	newPageId := DiskBTree.MaxPageId + 1
 	h := PageHeader{
@@ -513,6 +544,7 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 	}
 
 	fmt.Println("NEW PAGE ==> ", p)
+	fmt.Println("NEW PAGE HEADER ==> ", p.Header)
 	// return &p, nil
 
 	// set right ptr
@@ -535,6 +567,9 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 
 	// Update max page ID
 	if p.Header.PageId > DiskBTree.MaxPageId {
+		fmt.Println("UPDATING MAX PAGE ID +>")
+		fmt.Println("CURREMT MAX PAGE ID => ", DiskBTree.MaxPageId)
+		fmt.Println("MAX PAGE ID to set => ", p.Header.PageId)
 		DiskBTree.MaxPageId = p.Header.PageId
 	}
 
@@ -1778,6 +1813,7 @@ func init() {
 		return
 	}
 
+	fmt.Println("DISKBTREE ROOT NODE => ", DiskBTree.RootNode)
 	fmt.Println("Initialized DiskBTree....")
 }
 

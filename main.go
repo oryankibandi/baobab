@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -9,10 +10,14 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
+	"os/signal"
 	"runtime/trace"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/oryankibandi/on_disk_btree/pkg/bp_tree"
@@ -26,6 +31,17 @@ type NodeData struct {
 type KV struct {
 	Key string `json:"key"`
 	Val string `json:"val"`
+}
+
+type RangeRes struct {
+	Status  string `json:"status"`
+	Count   int    `json:"count"`
+	Results []KV   `json:"results"`
+}
+
+type DelResp struct {
+	Status  string `json:"status"`
+	Deleted bool   `json:"deleted"`
 }
 
 // simple JSON error response
@@ -111,7 +127,13 @@ func randomAlphaNumBytes(n int) []byte {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	err := json.NewEncoder(w).Encode(v)
+
+	if err != nil {
+		log.Println("JSON ENCODE ERR: ", err.Error())
+	}
+
+	w.Write([]byte{})
 }
 
 func getKey() http.HandlerFunc {
@@ -136,6 +158,61 @@ func getKey() http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, KV{Key: key, Val: string(val)})
+	}
+}
+
+func getRange() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
+			return
+		}
+
+		query := r.URL.Query()
+
+		start := query.Get("start")
+		end := query.Get("end")
+		limitStr := query.Get("limit")
+
+		if start == "" {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: "invalid start query parameter"})
+			return
+		}
+
+		// Default limit if not provided
+		limit := 10
+		if limitStr != "" {
+			var err error
+			limit, err = strconv.Atoi(limitStr)
+			if err != nil {
+				http.Error(w, "invalid limit parameter", http.StatusBadRequest)
+				return
+			}
+		}
+
+		log.Printf("start: %s , end: %s , limit: %v\n", start, end, limit)
+
+		results, err := bp_tree.RangeSearch([]byte(start), []byte(end), int32(limit))
+
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
+			return
+		}
+
+		rangeRes := RangeRes{
+			Status:  "success",
+			Count:   len(results),
+			Results: make([]KV, 0),
+		}
+
+		for _, r := range results {
+			rangeRes.Results = append(rangeRes.Results, KV{
+				Key: string(r.Key),
+				Val: string(r.Val),
+			})
+		}
+
+		writeJSON(w, http.StatusOK, rangeRes)
 	}
 }
 
@@ -172,6 +249,31 @@ func addKey() http.HandlerFunc {
 	}
 }
 
+func removeKey() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
+			return
+		}
+
+		key := strings.TrimPrefix(r.URL.Path, "/kv/remove/")
+
+		if key == "" || strings.Contains(key, "/") {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: "invalid key in path"})
+			return
+		}
+
+		del, err := bp_tree.DeleteValue([][]byte{[]byte(key)})
+
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, DelResp{Status: "success", Deleted: del})
+	}
+}
+
 func setKey() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -196,8 +298,18 @@ func setKey() http.HandlerFunc {
 	}
 }
 
+func runProfiler() {
+	profSrv := &http.Server{Addr: ":8020"}
+
+	go func() {
+		log.Println("📈📈 Running profiler on port :8020...")
+		log.Println(profSrv.ListenAndServe())
+	}()
+}
+
 // runServer starts a basic HTTP server on port 8080
 func runServer() {
+	srv := &http.Server{Addr: ":8080"}
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "Hello, world! Server is running on port 8080.")
 	})
@@ -206,10 +318,34 @@ func runServer() {
 
 	http.HandleFunc("/kv", addKey())
 
-	fmt.Println("🚀🚀🚀🚀🚀🚀🚀  Server running on http://localhost:8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		fmt.Println("Error starting server:", err)
+	http.HandleFunc("/kv/range", getRange())
+
+	http.HandleFunc("/kv/remove/", removeKey())
+
+	go func() {
+		fmt.Println("🚀🚀🚀🚀🚀🚀🚀  Server running on http://localhost:8080")
+		if err := srv.ListenAndServe(); err != nil {
+			fmt.Println("Error starting server:", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	<-stop
+
+	fmt.Println("Shutting down BTree...")
+	bp_tree.Shutdown()
+
+	fmt.Println("Gracefully shutting down...")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		fmt.Println("Forced shutdown:", err)
 	}
+
+	fmt.Println("Done.")
 }
 
 func main() {
@@ -260,19 +396,19 @@ func main() {
 	}
 
 	fmt.Println("(main) => KEYS ", keySlice)
-	inserted, err := bp_tree.InsertValue(keySlice, valSlice)
+	//inserted, err := bp_tree.InsertValue(keySlice, valSlice)
 
-	if err != nil {
-		panic(err.Error())
-	}
+	//if err != nil {
+	//	panic(err.Error())
+	//}
 
-	inserted, err = bp_tree.InsertValue([][]byte{[]byte("city")}, [][]byte{[]byte("cupertino")})
+	//inserted, err = bp_tree.InsertValue([][]byte{[]byte("city")}, [][]byte{[]byte("cupertino")})
 
-	if err != nil {
-		panic(err.Error())
-	}
+	//if err != nil {
+	//	panic(err.Error())
+	//}
 
-	fmt.Println("Page Inserted: ", inserted)
+	//fmt.Println("Page Inserted: ", inserted)
 	fmt.Println("--------------------------------------------------------------------------------------------------------------")
 	fmt.Println("--------------------------------------------------------------------------------------------------------------")
 	fmt.Println("--------------------------------------------------------------------------------------------------------------")
@@ -324,5 +460,6 @@ func main() {
 	//
 	//	}()
 
+	runProfiler()
 	runServer()
 }

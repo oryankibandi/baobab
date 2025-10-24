@@ -3,11 +3,13 @@ package diskio
 import (
 	"log"
 	"os"
+	"sync"
 )
 
 type BufferPool struct {
 	pool map[uint32]*Page
 	fd   *os.File
+	mu   sync.RWMutex
 }
 
 var BPool BufferPool
@@ -27,6 +29,7 @@ func init() {
 
 // Gets page if in cache, otherwise read from disk(diskio)
 func (bp *BufferPool) FetchPage(pageID uint32) (*Page, error) {
+	bp.mu.RLock()
 	// Check cache else read from disk
 	v, ok := bp.pool[pageID]
 
@@ -36,9 +39,11 @@ func (bp *BufferPool) FetchPage(pageID uint32) (*Page, error) {
 		for i, c := range v.Cells {
 			log.Printf("%d: %v\n", i, c.Key)
 		}
+		bp.mu.RUnlock()
 		return v, nil
 	}
 
+	bp.mu.RUnlock()
 	// cache miss
 	log.Println("CACHE MISS: ", pageID)
 	c := make(chan *Page)
@@ -51,7 +56,9 @@ func (bp *BufferPool) FetchPage(pageID uint32) (*Page, error) {
 
 	pge := <-c
 	// Add to cache
+	bp.mu.Lock()
 	bp.pool[pageID] = pge
+	bp.mu.Unlock()
 	log.Println("ADDED TO POOL ------> ", bp.pool)
 
 	return pge, nil
@@ -59,6 +66,8 @@ func (bp *BufferPool) FetchPage(pageID uint32) (*Page, error) {
 
 // Delete a page from pool
 func (bp *BufferPool) Delete(pageID uint32) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
 	_, ok := bp.pool[pageID]
 
 	if !ok {
@@ -70,6 +79,8 @@ func (bp *BufferPool) Delete(pageID uint32) {
 
 // Add page to cache
 func (bp *BufferPool) AddPageToCache(pageId uint32, page *Page) (bool, error) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
 	bp.pool[pageId] = page
 
 	return true, nil
@@ -77,6 +88,8 @@ func (bp *BufferPool) AddPageToCache(pageId uint32, page *Page) (bool, error) {
 
 // Clear buffer pool
 func (bp *BufferPool) Clear() {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
 	bp.pool = make(map[uint32]*Page)
 }
 

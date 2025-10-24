@@ -5,4 +5,10 @@ data_lt
 bin/
 
 # trace files
-trace.out
+*.out
+
+# profile files
+*.prof
+
+# test bash scripts
+*.sh
