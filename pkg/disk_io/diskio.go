@@ -425,7 +425,7 @@ func (d *DiskTree) forceFlush() {
 	err := d.fd.Sync()
 
 	if err != nil {
-		fmt.Println("Unable to flush to disk")
+		panic(fmt.Sprintf("Unable to flush to disk: %s", err.Error()))
 	}
 }
 
@@ -1100,8 +1100,10 @@ func (p *Page) flushPage(b chan int32) {
 			offs = int32(FreeSpaceMap[(len(FreeSpaceMap) - 1)])
 			FreeSpaceMap = append(FreeSpaceMap[:len(FreeSpaceMap)-1], []int64{}...)
 		} else {
+			DiskBTree.mu.RLock()
 			offs = int32(METADATA_PAGE_SIZE_BYTES + (int64(DiskBTree.FlushedPages) * PAGE_SIZE_BYTES))
 			LookupTable.AddPageOffset(int(p.Header.PageId), uint32(offs))
+			DiskBTree.mu.RUnlock()
 		}
 
 		// set stored in disk flag and offset to lookup table

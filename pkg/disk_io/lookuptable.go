@@ -211,6 +211,7 @@ func (t *TLookupTable) AddPageOffset(pageId int, offset uint32) (bool, error) {
 	if t == nil {
 		return false, DiskioError{Message: "Lookup Table not yet initialized"}
 	}
+	t.mu.RLock()
 
 	_, ok := t.items[pageId]
 
@@ -227,7 +228,9 @@ func (t *TLookupTable) AddPageOffset(pageId int, offset uint32) (bool, error) {
 		dataOffset:   offset,
 		lookupOffset: t.size,
 	}
+	t.mu.RUnlock()
 
+	// upgrade to exclusive lock
 	t.mu.Lock()
 	t.items[pageId] = &newItem
 

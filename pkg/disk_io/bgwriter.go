@@ -36,6 +36,8 @@ func (bw *BgWriter) start() {
 				bw.writtenPages++
 				bw.mu.Unlock()
 				// write to disk
+
+				// concurrent write
 				//	bw.wg.Add(1)
 				//	go func() {
 				//		defer bw.wg.Done()
@@ -52,6 +54,12 @@ func (bw *BgWriter) start() {
 
 				//		if n >= 0 {
 				//			fmt.Printf("(bgwriter) Written %d bytes.\n", n)
+
+				//			if p.Header.isSet(4) {
+				//				// remove from buffer pool
+				//				BPool.Delete(uint32(p.Header.PageId))
+				//			}
+
 				//			bw.mu.Lock()
 				//			bw.writtenBytes += uint32(n)
 				//			bw.mu.Unlock()
@@ -59,6 +67,8 @@ func (bw *BgWriter) start() {
 				//			fmt.Println("(bgwriter) Unable to write to disk")
 				//		}
 				//	}()
+
+				// Sequential write
 				fmt.Println("++++++++++++++++++++++++++++")
 				fmt.Println("PAGE KEYS => ", p.Cells)
 				c := make(chan int32)
@@ -84,6 +94,8 @@ func (bw *BgWriter) start() {
 				} else {
 					fmt.Println("(bgwriter) Unable to write to disk")
 				}
+
+				DiskBTree.forceFlush()
 				// If flushed MAX_PAGES, break
 				if bw.writtenPages >= MAX_PAGES {
 					bw.mu.Lock()
@@ -94,10 +106,10 @@ func (bw *BgWriter) start() {
 			}
 		}
 
-		// bw.wg.Wait()
 		BPool.mu.RUnlock()
+		// bw.wg.Wait()
 
-		DiskBTree.forceFlush()
+		// DiskBTree.forceFlush()
 		if bw.writtenPages > 0 {
 			fmt.Println("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
 			fmt.Printf("(bgwriter) Flushed %d page(s)\n", bw.writtenPages)
@@ -105,7 +117,7 @@ func (bw *BgWriter) start() {
 			fmt.Println("+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+")
 		}
 
-		DiskBTree.forceFlush()
+		//  DiskBTree.forceFlush()
 
 		if bw.writtenPages > 0 {
 			bw.mu.Lock()

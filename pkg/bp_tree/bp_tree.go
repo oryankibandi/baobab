@@ -14,6 +14,7 @@ import (
 
 type BTree struct {
 	Root *Node
+	mu   sync.RWMutex
 }
 
 type Node struct {
@@ -935,7 +936,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 		insertRes := SplitResponse{}
 		var nodePageId int32
 
-		fmt.Println("(InsertValue) ROOT => ", bTree.Root)
+		// fmt.Println("(InsertValue) ROOT => ", bTree.Root)
 		if bTree.Root == nil {
 			fmt.Println("(InsertValue) NO ROOT NODE. SETTING...")
 			rootNode := Node{
@@ -944,16 +945,20 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				Values: [][]byte{vals[i]},
 			}
 
+			bTree.mu.Lock()
 			bTree.Root = &rootNode
 
 			// Assign page & persist
 			bTree.Root.assignPage(true)
+			bTree.mu.Unlock()
 
 			//return true, nil
 		} else {
 			fmt.Println("(InsertValue) ROOT NODE FOUND...")
 
+			bTree.mu.RLock()
 			nodePageId = bTree.Root.Page.Header.PageId
+			bTree.mu.RUnlock()
 
 			// handle insertion
 			for nodePageId != 0 {
@@ -974,9 +979,11 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				}
 
 				// update root ptr
+				bTree.mu.Lock()
 				if nodePageId == bTree.Root.Page.Header.PageId {
 					bTree.Root = node
 				}
+				bTree.mu.Unlock()
 
 				// insert
 				fmt.Printf("(%d)********INSERTING KEY: %v\nINSERTING VAL:%v\n", nodePageId, keys[i], vals[i])
@@ -1095,7 +1102,9 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					log.Println("NEW ROOT PAGE -----------------------> ", newRoot.Page)
 					log.Println("NEW ROOT PAGE HEADER -----------------------> ", newRoot.Page.Header)
 
+					bTree.mu.Lock()
 					bTree.Root = newRoot
+					bTree.mu.Unlock()
 
 					// sync
 					// newRoot.Page.Sync(newRoot.Keys, newRoot.Values, newRoot.Children)

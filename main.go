@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -133,7 +134,6 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 		log.Println("JSON ENCODE ERR: ", err.Error())
 	}
 
-	w.Write([]byte{})
 }
 
 func getKey() http.HandlerFunc {
@@ -158,6 +158,8 @@ func getKey() http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, KV{Key: key, Val: string(val)})
+
+		return
 	}
 }
 
@@ -231,6 +233,10 @@ func addKey() http.HandlerFunc {
 		default:
 		}
 
+		const maxBodyBytes = 10 << 20 // 10 MiB
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		defer r.Body.Close()
+
 		var payload KV
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
@@ -246,6 +252,8 @@ func addKey() http.HandlerFunc {
 		fmt.Printf("Key: %v\nVal: %v\n", payload.Key, payload.Val)
 		bp_tree.InsertValue([][]byte{[]byte(payload.Key)}, [][]byte{[]byte(payload.Val)})
 		writeJSON(w, http.StatusOK, payload)
+
+		return
 	}
 }
 
@@ -309,18 +317,30 @@ func runProfiler() {
 
 // runServer starts a basic HTTP server on port 8080
 func runServer() {
-	srv := &http.Server{Addr: ":8080"}
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "Hello, world! Server is running on port 8080.")
 	})
 
-	http.HandleFunc("/kv/", getKey())
+	mux.HandleFunc("/kv/", getKey())
 
-	http.HandleFunc("/kv", addKey())
+	mux.HandleFunc("/kv", addKey())
 
-	http.HandleFunc("/kv/range", getRange())
+	mux.HandleFunc("/kv/range", getRange())
 
-	http.HandleFunc("/kv/remove/", removeKey())
+	mux.HandleFunc("/kv/remove/", removeKey())
+
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ConnState: func(c net.Conn, state http.ConnState) {
+			log.Printf("conn %v -> %v", c.RemoteAddr(), state)
+		},
+	}
 
 	go func() {
 		fmt.Println("🚀🚀🚀🚀🚀🚀🚀  Server running on http://localhost:8080")
