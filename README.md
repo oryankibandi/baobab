@@ -65,7 +65,7 @@ ubuntu@ubuntu:~$ curl http://127.0.0.1:8080/kv/data:item_1
 - [x] Disk Manager
 - [x] Background writer
 - [x] B+ Tree Algorithm - Splits and merges
-- ⏳ Buffer Management
+- ⏳ Buffer Management - W-TinyLFU
 - [ ] Recovery - WAL, Checkpointing
 - [ ] Transactions
 - [ ] Replication - raft
