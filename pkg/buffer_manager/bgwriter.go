@@ -41,47 +41,12 @@ func (bw *BgWriter) Start() {
 
 			if dirty {
 				dirtyList = append(dirtyList, f)
-				// write to disk
-
-				// concurrent write
-				//	bw.wg.Add(1)
-				//	go func() {
-				//		defer bw.wg.Done()
-				//		fmt.Println("++++++++++++++++++++++++++++")
-				//		fmt.Println("PAGE KEYS => ", p.Cells)
-				//		c := make(chan int32)
-				//		err = DiskBTree.WriteReq(p, &c)
-
-				//		if err != nil {
-				//			panic(err.Error())
-				//		}
-
-				//		n := <-c
-
-				//		if n >= 0 {
-				//			fmt.Printf("(bgwriter) Written %d bytes.\n", n)
-
-				//			if p.Header.isSet(4) {
-				//				// remove from buffer pool
-				//				BCache.Delete(uint32(p.Header.PageId))
-				//			}
-
-				//			bw.mu.Lock()
-				//			bw.writtenBytes += uint32(n)
-				//			bw.mu.Unlock()
-				//		} else {
-				//			fmt.Println("(bgwriter) Unable to write to disk")
-				//		}
-				//	}()
-
-				// Sequential write
-
 			}
 
 		}
 
 		BCache.rmu.Unlock()
-
+		fmt.Println("DIRTY LIST COUNT => ", len(dirtyList))
 		// check dirty list and flush dirty frames
 		for _, f := range dirtyList {
 			err := f.PinFrame()
@@ -122,7 +87,7 @@ func (bw *BgWriter) Start() {
 					// release shared reader lock temporarily  to gain exclusive lock in BCache.Delete()
 					// BCache.rmu.RUnlock()
 					// remove from buffer pool
-					BCache.Delete(uint32(f.Page.Header.PageId))
+					BCache.Delete(uint32(f.Page.Header.PageId), false)
 					// BCache.rmu.RLock()
 				}
 

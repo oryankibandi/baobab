@@ -888,9 +888,11 @@ func (p *Page) flushPage(b chan int32) {
 		//	return
 		//}
 		// page marked for deletion, overwrite with 0s
+		var isRoot bool
 		p.pgeData = [PAGE_SIZE_BYTES]byte{}
 
 		DiskBTree.mu.RLock()
+		isRoot = DiskBTree.RootNode.Header.PageId == p.Header.PageId
 		n, err := DiskBTree.fd.WriteAt(p.pgeData[:], int64(p.Header.PageId*PAGE_SIZE_BYTES))
 
 		if err != nil {
@@ -900,6 +902,12 @@ func (p *Page) flushPage(b chan int32) {
 		DiskBTree.mu.RUnlock()
 
 		DiskBTree.mu.Lock()
+
+		if isRoot && DiskBTree.PageCount == 1 {
+			DiskBTree.RootPage = 0
+			DiskBTree.RootNode = nil
+		}
+
 		if DiskBTree.PageCount > 0 {
 			DiskBTree.PageCount -= 1
 		}

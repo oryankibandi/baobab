@@ -438,8 +438,8 @@ func (c *Cache) ReleaseFrame(f *lru.Frame) error {
 //	log.Println("-------------------------------------------------------------------------------------------")
 //}
 
-// 3. Delete an item from cache
-func (c *Cache) Delete(key uint32) error {
+// Delete an item from cache. flush parameter is set to true if it's a direct request from client. If bgwriter, it is false since the page is already flushed.
+func (c *Cache) Delete(key uint32, flush bool) error {
 	// c.rmu.Lock()
 	// defer c.rmu.Unlock()
 	// fKey := toKey(key)
@@ -465,7 +465,9 @@ func (c *Cache) Delete(key uint32) error {
 		c.windowCache.Delete(val)
 	}
 
-	val.PrepareForEviction()
+	if flush {
+		val.PrepareForEviction()
+	}
 	delete(c.CacheMap, key)
 
 	c.freeFrames++

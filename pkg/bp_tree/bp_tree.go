@@ -14,6 +14,7 @@ import (
 	"github.com/oryankibandi/on_disk_btree/pkg/helpers"
 )
 
+// TODO: Store root page ID instead of pointer to node
 type BTree struct {
 	Root *Node
 	mu   sync.RWMutex
@@ -602,6 +603,13 @@ func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata) (int32
 			fmt.Println("KEYS AFTER DELETION => ", n.Keys)
 			fmt.Println("VALS AFTER DELETION => ", n.Values)
 
+			// sync
+			// err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+			// if err != nil {
+			// 	return -1, err
+			// }
+
 			return -1, nil
 		}
 
@@ -653,6 +661,7 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 
 	// determing sibling to merge with, default to right sibling
 	if n.RightSibling > 0 {
+		fmt.Println("RIGHT MERGE")
 		mergeSibling, err = buildPage(uint32(n.RightSibling))
 
 		if err != nil {
@@ -661,6 +670,7 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 
 		rightMerge = true
 	} else if n.LeftSibling > 0 {
+		fmt.Println("LEFT MERGE")
 		mergeSibling, err = buildPage(uint32(n.LeftSibling))
 
 		if err != nil {
@@ -669,13 +679,42 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 
 		rightMerge = false
 	} else {
-
+		fmt.Println("NO SIBLINGS....")
+		bTree.mu.Lock()
 		if bTree.Root.Page.Header.PageId == n.Page.Header.PageId {
+			fmt.Println("IS ROOT NODE....")
 			// Node is root, underflow Invariant allowed
+			if len(n.Keys) <= 0 {
+				// root node is empty, delete page
+				fmt.Println("MARKING PAGE AS DEAD...")
+				err = n.Page.MarkAsDead()
+
+				if err != nil {
+					return err
+				}
+
+				// clear
+				fmt.Println("RESETTING ROOT NODE ==> ")
+				bTree.Root.PageId = 0
+				bTree.Root.Page = nil
+				bTree.Root = nil
+			}
+
 			mr.merged = false
 			mr.rebalanceKey = make([]byte, 0)
+
+			err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+			if err != nil {
+				return err
+			}
+
+			bTree.mu.Unlock()
 			return nil
+		} else {
+			fmt.Println("NOT ROOT NODE...")
 		}
+		bTree.mu.Unlock()
 
 		// TODO: If not root, collapse into parent
 		return BTreeError{Message: "No sibling to merge/borrow leaf node"}
@@ -1274,11 +1313,13 @@ func DeleteValue(keys [][]byte) (bool, error) {
 
 		var nodePageId int32
 
+		bTree.mu.RLock()
 		if bTree.Root == nil {
 			return false, BTreeError{Message: "BTree not initialized."}
 		}
 
 		nodePageId = bTree.Root.Page.Header.PageId
+		bTree.mu.RUnlock()
 		var oldFrame *lrulist.Frame
 
 		for nodePageId > 0 {
@@ -1361,7 +1402,9 @@ func DeleteValue(keys [][]byte) (bool, error) {
 			// handle redistribution
 			if len(mergeMetadata.rebalanceKey) > 0 {
 				// replace separator key with new one
-				if mergeMetadata.rightMerge {
+				if len(path.n.Keys) == 1 {
+					path.n.Keys[keyIdx] = mergeMetadata.rebalanceKey
+				} else if mergeMetadata.rightMerge {
 					path.n.Keys = append(path.n.Keys[:keyIdx], append([][]byte{mergeMetadata.rebalanceKey}, path.n.Keys[keyIdx:]...)...)
 				} else {
 					path.n.Keys = append(path.n.Keys[:keyIdx-1], append([][]byte{mergeMetadata.rebalanceKey}, path.n.Keys[keyIdx-1:]...)...)
@@ -1391,6 +1434,25 @@ func DeleteValue(keys [][]byte) (bool, error) {
 					fmt.Println("ERR HANDLING INTERNAL UNDERFLOW ==> ", err)
 					return false, err
 				}
+			} else if len(path.n.Keys) < DEGREE-1 && bTree.Root.PageId == path.n.PageId && len(path.n.Children) == 1 {
+				// collapse node and set new root
+				node, err := buildPage(uint32(path.n.Children[0]))
+
+				if err != nil {
+					panic(err.Error())
+				}
+
+				bTree.mu.Lock()
+				bTree.Root = node
+				node.Page.SetAsRoot()
+				path.n.Page.MarkAsDead()
+				err = path.n.Page.Sync(path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
+
+				if err != nil {
+					fmt.Println("ERR SYNCING...")
+					return false, err
+				}
+				bTree.mu.Unlock()
 			} else {
 				// Sync
 				err = path.n.Page.Sync(path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
