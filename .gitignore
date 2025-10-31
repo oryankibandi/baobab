@@ -1,5 +1,7 @@
+# data files
 data
 data_lt
+data_fl
 
 # binaries
 bin/
@@ -12,3 +14,6 @@ bin/
 
 # test bash scripts
 *.sh
+
+# log files
+*.log
