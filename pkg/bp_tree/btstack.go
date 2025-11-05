@@ -6,7 +6,7 @@ import (
 
 // BTStack stores the path used to traverse the BTree so that incase of splits
 // and merges that propagate from child nodes the parent can be retrieved
-// from the stack. Without this we would reuire recursion, which may increase
+// from the stack. Without this we would require recursion, which may increase
 // stack memory usage.
 // This is also implemented by PostgreQSL -> https://github.com/postgres/postgres/blob/REL_12_STABLE/src/include/access/nbtree.h#L405-L425
 

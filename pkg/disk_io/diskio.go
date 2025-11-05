@@ -125,7 +125,7 @@ func (d *DiskTree) startupTraversal(rootPageId int32) {
 	//	fmt.Println("LOADED PAGE ========================> ", rootPage)
 	//	fmt.Println("LOADED PAGE HEADER =====================> ", rootPage.Header)
 
-	fmt.Println("PAGE =+=+> ", rootPage)
+	// fmt.Println("PAGE =+=+> ", rootPage)
 
 	// set RootNode
 	d.RootNode = rootPage
@@ -293,7 +293,7 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 		// Cells:        cells,
 	}
 
-	fmt.Println("NEW PAGE => ", p)
+	// fmt.Println("NEW PAGE => ", p)
 	pageData = nil
 
 	return &p, nil
@@ -556,8 +556,8 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 		pgeData: [PAGE_SIZE_BYTES]byte{},
 	}
 
-	fmt.Println("NEW PAGE ==> ", p)
-	fmt.Println("NEW PAGE HEADER ==> ", p.Header)
+	// fmt.Println("NEW PAGE ==> ", p)
+	// fmt.Println("NEW PAGE HEADER ==> ", p.Header)
 	// return &p, nil
 
 	// set right ptr
@@ -1318,7 +1318,7 @@ func init() {
 		return
 	}
 
-	fmt.Println("CONTENT ==> ", metadataPage)
+	// fmt.Println("CONTENT ==> ", metadataPage)
 
 	// read root node Page ID
 	rootPgeID := binary.LittleEndian.Uint32(metadataPage[0:4])

@@ -46,19 +46,20 @@ func (bw *BgWriter) Start() {
 		}
 
 		BCache.rmu.Unlock()
-		fmt.Println("DIRTY LIST COUNT => ", len(dirtyList))
+
+		if len(dirtyList) > 0 {
+			fmt.Println("DIRTY LIST COUNT => ", len(dirtyList))
+		}
 		// check dirty list and flush dirty frames
 		for _, f := range dirtyList {
-			err := f.PinFrame()
+			// remove frame from LRU
+			err := BCache.RemoveItemFromLru(f)
+
+			// err := f.PinFrame()
 
 			if err != nil {
 				panic(fmt.Sprintf("Unable to pin frame: ", err.Error()))
 			}
-
-			// remove frame from LRU
-			// BCache.rmu.RUnlock()
-			BCache.RemoveItemFromLru(f)
-			// BCache.rmu.RLock()
 
 			if d, err := f.Page.IsDirty(); err != nil {
 				panic(err)
@@ -153,10 +154,12 @@ func (bw *BgWriter) watchFreeList() {
 		c := make(chan int)
 		go diskio.PgFreeList.FlushFreeList(&c)
 
-		fmt.Println("Flushing free list....")
+		// fmt.Println("Flushing free list....")
 		n := <-c
 
-		fmt.Printf("Flushed %d bytes in free list\n", n)
+		if n > 0 {
+			fmt.Printf("Flushed %d bytes in free list\n", n)
+		}
 
 		time.Sleep(time.Millisecond * FREELIST_WRITER_DELAY)
 	}

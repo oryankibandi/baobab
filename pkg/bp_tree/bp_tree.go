@@ -457,6 +457,7 @@ func (n *Node) search(key []byte, nextNodeId *int32) ([]byte, error) {
 	defer n.mu.RUnlock()
 
 	fmt.Println("--------------------------------------------------")
+	fmt.Println("NODE ID: ", n.PageId)
 	fmt.Printf("SEARCH: %v\n", key)
 	fmt.Println("KEYS: ", n.Keys)
 	if n.Leaf {
@@ -467,7 +468,7 @@ func (n *Node) search(key []byte, nextNodeId *int32) ([]byte, error) {
 	fmt.Println("--------------------------------------------------")
 
 	if len(n.Keys) <= 0 || (len(n.Values) <= 0 && len(n.Children) <= 0) {
-		return nil, nil
+		panic("Invalid node")
 	}
 
 	idx, err := helpers.InsertBinarySearch(n.Keys, key, 0)
@@ -1505,6 +1506,7 @@ func Get(key []byte) ([]byte, error) {
 	}
 
 	nodePageId = bTree.Root.Page.Header.PageId
+	fmt.Println("ROOT PAGE ID ==> ", nodePageId)
 	bTree.mu.RUnlock()
 
 	for nodePageId > 0 {

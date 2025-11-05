@@ -41,8 +41,8 @@ type Frame struct {
 
 // Remove least recently used
 func (l *LruList[T]) Pop() *Frame {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	if l.Count <= 0 {
 		log.Println("(pop) list is empty")
@@ -79,14 +79,14 @@ func (l *LruList[T]) Pop() *Frame {
 	return oldTail
 }
 
-// Add item to linked list
+// Add item to the doubly linked list
 func (l *LruList[T]) Add(f *Frame) *Frame {
 	log.Println("ADDINT ITEM TO CACHE^^^^^^^>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 	log.Println("ADDINT ITEM TO CACHE^^^^^^^>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 	log.Println("ADDINT ITEM TO CACHE^^^^^^^>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 	// log.Println("ITEM >> ", f)
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	log.Println("ITEM >> ", f)
 	log.Println("ITEM COUNT B4:>>>>>>>>> ", l.Count)
 
@@ -125,8 +125,8 @@ func (l *LruList[T]) Add(f *Frame) *Frame {
 
 // Deletes item from linked list and adjusts count
 func (l *LruList[T]) Delete(n *Frame) *Frame {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	// If tail or head, update the values
 	if n.Next == nil && n.Prev != nil {
@@ -182,15 +182,19 @@ func (f *Frame) PrepareForEviction() error {
 }
 
 // Sets node n as the most recent
-func (l *LruList[T]) SetMostRecent(n *Frame) {
+func (l *LruList[T]) SetMostRecent(f *Frame) {
 	l.mu.Lock()
-	n.mu.Lock()
+	log.Println("(SETMOSTRECENT) Obtained LRU lock...")
+	f.mu.Lock()
+	log.Println("(SETMOSTRECENT) Obtained FRAME lock...")
 
-	defer n.mu.Unlock()
-
+	defer f.mu.Unlock()
 	defer l.mu.Unlock()
+
 	log.Println("SETTING MOST RECENT......................................................")
 	log.Println("ITEMS IN LRU ==> ", l.Count)
+	log.Println("(SETMOSTRECENT) HEAD => ", l.Head)
+	log.Println("(SETMOSTRECENT) TAIL => ", l.Tail)
 
 	if l.Count <= 0 || l.Head == nil {
 		log.Println("NO ITEM IN LRU...")
@@ -200,48 +204,51 @@ func (l *LruList[T]) SetMostRecent(n *Frame) {
 	if l.Count == 1 {
 		log.Println("OnLY ONE ITEM IN LRU")
 		// set only frame as head and tail
-		l.Head = n
-		l.Tail = n
-		n.Prev = nil
-		n.Next = nil
+		l.Head = f
+		l.Tail = f
+		f.Prev = nil
+		f.Next = nil
 
 		return
 
 	}
 
-	if n.Prev == nil {
+	if f.Prev == nil {
 		// is already the most recent
 		log.Println("ALREADY AT MOST RECENT")
 		return
 	}
 
-	log.Println("PREV => ", n.Prev)
-	log.Println("NEXT => ", n.Next)
+	log.Println("(SETMOSTRECENT) PREV => ", f.Prev)
+	log.Println("(SETMOSTRECENT) NEXT => ", f.Next)
 
-	if n.Prev != nil {
-		if n.Next != nil {
-			n.Prev.Next = n.Next
+	if f.Prev != nil {
+		if f.Next != nil {
+			f.Prev.Next = f.Next
 		} else {
-			n.Prev.Next = nil
+			f.Prev.Next = nil
 		}
 	}
 
-	if n.Next != nil {
-		if n.Prev != nil {
-			n.Next.Prev = n.Prev
+	if f.Next != nil {
+		if f.Prev != nil {
+			f.Next.Prev = f.Prev
 		} else {
-			n.Next.Prev = nil
+			f.Next.Prev = nil
 		}
 	} else {
 		// set new tail
-		l.Tail = n.Prev
+		l.Tail = f.Prev
 	}
 
 	// Add to head ot DLL
-	n.Next = l.Head
-	l.Head.Prev = n
-	n.Prev = nil
-	l.Head = n
+	f.Next = l.Head
+	l.Head.Prev = f
+	f.Prev = nil
+	l.Head = f
+
+	log.Println("(SETMOSTRECENT) PREV => ", f.Prev)
+	log.Println("(SETMOSTRECENT) NEXT => ", f.Next)
 
 	return
 }
@@ -250,7 +257,6 @@ func (l *LruList[T]) SetMostRecent(n *Frame) {
 func (l *LruList[T]) RemoveFrame(f *Frame) error {
 	l.mu.Lock()
 	f.mu.RLock()
-	defer f.mu.RUnlock()
 	defer l.mu.Unlock()
 
 	if l.Head == f {
@@ -264,7 +270,41 @@ func (l *LruList[T]) RemoveFrame(f *Frame) error {
 	}
 
 	if l.Count > 0 {
-		l.Count--
+		l.Count-- // FIX: Should not be decremented when pinning a frame
+	}
+
+	f.mu.RUnlock()
+	err := f.PinFrame()
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Readds a frame as head during unpinning
+func (l *LruList[T]) ReAddFrame(f *Frame) error {
+	l.mu.Lock()
+	f.mu.Lock()
+	defer l.mu.Unlock()
+	defer f.mu.Unlock()
+
+	if l.Count <= 0 {
+		return LruError{Message: "No item in LRU"}
+	}
+
+	if l.Head != nil {
+		f.Next = l.Head
+		l.Head.mu.Lock()
+		l.Head.Prev = f
+		l.Head.mu.Unlock()
+	} else {
+		l.Head = f
+	}
+
+	if l.Count == 1 {
+		l.Tail = f
 	}
 
 	return nil
@@ -272,10 +312,10 @@ func (l *LruList[T]) RemoveFrame(f *Frame) error {
 
 // Pins frame
 func (f *Frame) PinFrame() error {
-	log.Println("Obtaining Frame Pin...")
+	log.Println("(PinFrame) Obtaining Frame Lock...")
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	log.Println("Obtained Frame Pin...")
+	log.Println("(PinFrame) Obtained Frame Lock...")
 	log.Println("CURR FRAME => ", f)
 	if f.Pins == 0 {
 		// first time pin, remove from LRU
@@ -303,7 +343,8 @@ func (f *Frame) PinFrame() error {
 	return nil
 }
 
-// Unpins a frame and if no other pins exists, returns if it should be added back to LRU
+// Unpins a frame and if no other pins exists,
+// returns if it should be added back to LRU
 func (f *Frame) UnpinFrame() (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

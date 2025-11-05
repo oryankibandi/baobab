@@ -1,5 +1,5 @@
 run:
 	@./bin/btree
 build:
-	@go build -o bin/btree
+	@go build -race -o bin/btree
 

@@ -374,112 +374,20 @@ func main() {
 	trace.Start(f)
 	defer trace.Stop()
 	start := time.Now()
-	fmt.Println("Hello world")
+	// fmt.Println("Hello world")
 	btree, err := bp_tree.InitBTree[int32]()
 
 	if err != nil {
 		panic(err.Error())
 	}
 
-	log.Println("NEW BTREE => ", *btree)
-
 	if btree.Root != nil {
 		log.Println("BTree Root => ", btree.Root)
 	}
-
-	items := make([]NodeData, 0)
-
-	items = append(items, NodeData{key: 25, value: []byte("CAPETOWN systems")})
-	items = append(items, NodeData{key: 5, value: []byte("AMSTERDAN systems")})
-	items = append(items, NodeData{key: 520, value: []byte("DC systems")})
-	items = append(items, NodeData{key: 50, value: []byte("Bengaluru systems")})
-	items = append(items, NodeData{key: 45, value: []byte("Amsterdam systems")})
-	items = append(items, NodeData{key: 65, value: []byte("Portland systems")})
-	items = append(items, NodeData{key: 55, value: []byte("San Francisco systems")})
-	items = append(items, NodeData{key: 67, value: []byte("Austin systems")})
-	items = append(items, NodeData{key: 70, value: []byte("NBO systems")})
-	items = append(items, NodeData{key: 72, value: []byte("DBX systems")})
-
-	sorted := sortItems(items)
-	fmt.Println("(main) SORTED ==> ", sorted)
-
-	keySlice := make([][]byte, 0)
-	valSlice := make([][]byte, 0)
-
-	for _, v := range sorted {
-		k := make([]byte, 0)
-		n := binary.LittleEndian.AppendUint32(k, uint32(v.key))
-		fmt.Println("(main) AFTER LITTLE ENDIAN ==> ", n)
-		keySlice = append(keySlice, n)
-
-		valSlice = append(valSlice, v.value)
-	}
-
-	fmt.Println("(main) => KEYS ", keySlice)
-	//inserted, err := bp_tree.InsertValue(keySlice, valSlice)
-
-	//if err != nil {
-	//	panic(err.Error())
-	//}
-
-	//inserted, err = bp_tree.InsertValue([][]byte{[]byte("city")}, [][]byte{[]byte("cupertino")})
-
-	//if err != nil {
-	//	panic(err.Error())
-	//}
-
-	//fmt.Println("Page Inserted: ", inserted)
-	fmt.Println("--------------------------------------------------------------------------------------------------------------")
-	fmt.Println("--------------------------------------------------------------------------------------------------------------")
-	fmt.Println("--------------------------------------------------------------------------------------------------------------")
-
-	//l := make([]NodeData, 0)
-
-	//for i := range 50 {
-	//	r := NewRandomNodeData(12)
-	//	fmt.Println("Random DATA: ", r)
-	//	l = append(l, r)
-	//	k := make([]byte, 0)
-	//	n := binary.LittleEndian.AppendUint32(k, uint32(r.key))
-
-	//	inserted, err := bp_tree.InsertValue([][]byte{n}, [][]byte{r.value})
-
-	//	if err != nil {
-	//		panic(err)
-	//	}
-
-	//	fmt.Printf("<><><><><><><><><><><><><><>><><><><><><>><><><><>><><><><><>><<><>><><><><><><><><><><><><><><><><><><><><%d inserted -> %v\n", i, inserted)
-	//	time.Sleep(time.Millisecond * 500)
-	//}
-
-	//fmt.Println("------------------------------------------------------------------------------------------------------------------------------------------------")
-	//fmt.Println("INSERTED DATA:")
-	//for _, v := range l {
-	//	fmt.Println(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-	//	fmt.Printf("key: %d\tval: %s\n", v.key, v.value)
-	//}
-
 	duration := time.Since(start)
 	fmt.Println()
 	fmt.Println("Done in ", duration)
 
-	//	go func() {
-	//
-	//		time.Sleep(time.Second * 5)
-	//		fmt.Println("DELETING........")
-	//		time.Sleep(time.Second * 1)
-	//		k := make([]byte, 0)
-	//		n := binary.LittleEndian.AppendUint32(k, uint32(45))
-	//		deleted, err := bp_tree.DeleteValue([][]byte{n})
-	//
-	//		if err != nil {
-	//			panic(err.Error())
-	//		}
-	//
-	//		fmt.Println("DELETED: --> ", deleted)
-	//
-	//	}()
-
-	runProfiler()
+	// runProfiler()
 	runServer()
 }

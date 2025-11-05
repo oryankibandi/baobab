@@ -3,6 +3,7 @@ package tinylfu
 import (
 	"hash"
 	"hash/maphash"
+	"sync"
 )
 
 type Hasher interface {
@@ -10,13 +11,16 @@ type Hasher interface {
 }
 
 func (m *MapHash) Sum64(data []byte) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.h.Reset()
 	m.h.Write(data)
 	return m.h.Sum64()
 }
 
 type MapHash struct {
-	h hash.Hash64
+	h  hash.Hash64
+	mu sync.Mutex
 }
 
 func NewMapHash() *MapHash {
