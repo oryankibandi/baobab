@@ -1,10 +1,21 @@
 # Baobab
 
+![Baobab Logo](logos/baobab.png)
+
 Baobab is a simple B+ Tree based key-value store written in Go.
 
 ## Caution
 
 This is a work in progress and is not intended for production use - yet.
+
+##  Highlights
+
+1. B+ Tree index - supports adding keys, retreving keys and range queries.
+2. Buffer Manager - TinyLFU filter with W-TinyLFU cache eviction.
+3. A background writer to flush dirty pages periodically. Similar to [PostgreSQL](https://www.postgresql.org/docs/current/runtime-config-resource.html#RUNTIME-CONFIG-RESOURCE-BACKGROUND-WRITER).
+4. A  disk maneger that supports concurrent writes on distinct page IDs.
+5. Free list - A record of available page IDs after deletion.
+6. A http API for get, put and range queries
 
 ## Getting started
 
@@ -59,13 +70,48 @@ ubuntu@ubuntu:~$ curl http://127.0.0.1:8080/kv/data:item_1
 {"error":"Key not found"}
 ```
 
+7. Range Query
+
+A range query will return a number of items(`item_count`)  starting from the `start_item`.
+
+### Format
+```bash
+curl http://127.0.0.1:8080/kv/range?start=<start_item>&limit=<item_count>
+```
+
+```bash
+ubuntu@ubuntu:~$ curl http://127.0.0.1:8080/kv/range?start=data:item_1&limit=4
+{
+  "status": "success",
+  "count": 4,
+  "results": [
+    {
+      "key": "data:item_1",
+      "val": "Status_1_Value_1"
+    },
+    {
+      "key": "data:item_10",
+      "val": "Status_0_Value_10"
+    },
+    {
+      "key": "data:item_11",
+      "val": "Status_1_Value_11"
+    },
+    {
+      "key": "data:item_12",
+      "val": "Status_2_Value_12"
+    }
+  ]
+}
+```
+
 
 ## Tasks
 - [x] Design page layout and file format
 - [x] Disk Manager
 - [x] Background writer
 - [x] B+ Tree Algorithm - Splits and merges
-- [ ] Buffer Management - W-TinyLFU (80%)
+- [ ] Buffer Management - W-TinyLFU (90%)
 - [ ] Recovery - WAL, Checkpointing
 - [ ] Transactions
 - [ ] Replication - Raft
