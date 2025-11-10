@@ -718,6 +718,15 @@ func (p *Page) SetAsRoot() error {
 
 }
 
+// Check if page is marked for deletion
+func (p *Page) IsDeleted() bool {
+	p.Rmu.Lock()
+	defer p.Rmu.Unlock()
+	d := p.Header.IsSet(4)
+
+	return d
+}
+
 // Synchronizes keys, values and  page IDs in node to items in Page
 func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
 	p.Rmu.Lock()
@@ -847,9 +856,6 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 	}
 
 	lowerOff := HEADER_SIZE_BYTES + (CELL_POINTER_SIZE_BYTE * len(keys))
-
-	// p.Cells = cells
-	// p.CellPointers = cellPtrs
 
 	p.Header.updateUpperOffset(uint32(startOffs))
 	p.Header.updateLowerOffset(uint32(lowerOff))
@@ -1116,6 +1122,9 @@ func (p *CellPointer) toBytes() []byte {
 
 // Convert page header to bytes
 func (h *PageHeader) toBytes() []byte {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	headerBytes := make([]byte, HEADER_SIZE_BYTES)
 
 	headerBytes[0] = h.Flags

@@ -41,6 +41,7 @@ type Frame struct {
 
 // Remove least recently used
 func (l *LruList[T]) Pop() *Frame {
+	log.Println("lru.Pop()")
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -86,7 +87,11 @@ func (l *LruList[T]) Add(f *Frame) *Frame {
 	log.Println("ADDINT ITEM TO CACHE^^^^^^^>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 	// log.Println("ITEM >> ", f)
 	l.mu.Lock()
+	log.Println("OBTAINED LRU LOCK >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+	f.mu.Lock()
+	log.Println("OBTAINED FRAME LOCK >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 	defer l.mu.Unlock()
+	defer f.mu.Unlock()
 	log.Println("ITEM >> ", f)
 	log.Println("ITEM COUNT B4:>>>>>>>>> ", l.Count)
 
@@ -103,8 +108,10 @@ func (l *LruList[T]) Add(f *Frame) *Frame {
 
 	// Add item before head, and make it the new head
 	if l.Head != nil {
+		l.Head.mu.Lock()
 		l.Head.Prev = f
 		f.Next = l.Head
+		l.Head.mu.Unlock()
 	}
 
 	// if only one item existed in the DLL, ensure the old head is set as the tail
@@ -125,8 +132,11 @@ func (l *LruList[T]) Add(f *Frame) *Frame {
 
 // Deletes item from linked list and adjusts count
 func (l *LruList[T]) Delete(n *Frame) *Frame {
+	log.Println("lru.Delete()")
 	l.mu.Lock()
+	n.mu.Lock()
 	defer l.mu.Unlock()
+	defer n.mu.Unlock()
 
 	// If tail or head, update the values
 	if n.Next == nil && n.Prev != nil {
@@ -138,19 +148,26 @@ func (l *LruList[T]) Delete(n *Frame) *Frame {
 	}
 
 	if n.Prev != nil {
+		n.Prev.mu.Lock()
 		if n.Next != nil {
 			n.Prev.Next = n.Next
 		} else {
 			n.Prev.Next = nil
 		}
+		n.Prev.mu.Unlock()
 	}
 
 	if n.Next != nil {
+		n.Next.mu.Lock()
 		if n.Prev != nil {
-			n.Next.Prev = n.Prev
+			log.Println("n => ", n)
+			log.Println("n.Next => ", n.Next)
+			log.Println("n.Prev => ", n.Prev)
+			n.Next.Prev = n.Prev // TODO: Check nil ptr dereference err
 		} else {
 			n.Next.Prev = nil
 		}
+		n.Next.mu.Unlock()
 	} else {
 		// set new tail
 		l.Tail = n.Prev
@@ -162,8 +179,9 @@ func (l *LruList[T]) Delete(n *Frame) *Frame {
 	return n
 }
 
-// Prepares page for eviction by flusing page to disk
+// Prepares page for eviction by flushing page to disk
 func (f *Frame) PrepareForEviction() error {
+	log.Println("lru.PrepareForEviction()")
 	f.mu.Lock()
 	f.mu.Unlock()
 	c := make(chan int32)
@@ -178,11 +196,11 @@ func (f *Frame) PrepareForEviction() error {
 	log.Printf("(PrepareForEviction) Flushed %d page\n", n)
 
 	return nil
-
 }
 
 // Sets node n as the most recent
 func (l *LruList[T]) SetMostRecent(f *Frame) {
+	log.Println("lru.SetMostRecent()")
 	l.mu.Lock()
 	log.Println("(SETMOSTRECENT) Obtained LRU lock...")
 	f.mu.Lock()
@@ -223,19 +241,23 @@ func (l *LruList[T]) SetMostRecent(f *Frame) {
 	log.Println("(SETMOSTRECENT) NEXT => ", f.Next)
 
 	if f.Prev != nil {
+		f.Prev.mu.Lock()
 		if f.Next != nil {
 			f.Prev.Next = f.Next
 		} else {
 			f.Prev.Next = nil
 		}
+		f.Prev.mu.Unlock()
 	}
 
 	if f.Next != nil {
+		f.Next.mu.Lock()
 		if f.Prev != nil {
 			f.Next.Prev = f.Prev
 		} else {
 			f.Next.Prev = nil
 		}
+		f.Next.mu.Unlock()
 	} else {
 		// set new tail
 		l.Tail = f.Prev
@@ -243,7 +265,13 @@ func (l *LruList[T]) SetMostRecent(f *Frame) {
 
 	// Add to head ot DLL
 	f.Next = l.Head
+
+	log.Println("(SETMOSTRECENT) GETTING LOCK FOR HEAD => l.Head")
+	l.Head.mu.Lock()
+	log.Println("(SETMOSTRECENT) OBTAINED LOCK FOR HEAD => ")
 	l.Head.Prev = f
+	l.Head.mu.Unlock()
+
 	f.Prev = nil
 	l.Head = f
 
@@ -255,9 +283,14 @@ func (l *LruList[T]) SetMostRecent(f *Frame) {
 
 // Remove frame from LRU. Called when pinning/deleting a frame
 func (l *LruList[T]) RemoveFrame(f *Frame) error {
+	if f == nil {
+		return LruError{Message: "(RemoveFrame) Frame is required"}
+	}
+	log.Println("lru.RemoveFrame()")
 	l.mu.Lock()
-	f.mu.RLock()
+	f.mu.Lock()
 	defer l.mu.Unlock()
+	defer f.mu.Unlock()
 
 	if l.Head == f {
 		// set new head
@@ -270,10 +303,10 @@ func (l *LruList[T]) RemoveFrame(f *Frame) error {
 	}
 
 	if l.Count > 0 {
-		l.Count-- // FIX: Should not be decremented when pinning a frame
+		l.Count -= 1
 	}
 
-	f.mu.RUnlock()
+	// f.mu.RUnlock()
 	err := f.PinFrame()
 
 	if err != nil {
@@ -283,8 +316,38 @@ func (l *LruList[T]) RemoveFrame(f *Frame) error {
 	return nil
 }
 
+func (l *LruList[T]) GetCount() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	c := l.Count
+
+	return c
+}
+
+func (l *LruList[T]) GetCapacity() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	cp := l.Capacity
+
+	return cp
+}
+
+// Returns the key of current tail
+func (l *LruList[T]) GetTailKey() uint32 {
+	log.Println("lru.GetTailKey()")
+	l.mu.RLock()
+	l.Tail.mu.RLock()
+	defer l.mu.RUnlock()
+	tKey := l.Tail.Key
+
+	l.Tail.mu.RUnlock()
+
+	return tKey
+}
+
 // Readds a frame as head during unpinning
 func (l *LruList[T]) ReAddFrame(f *Frame) error {
+	log.Println("lru.ReAddFrame()")
 	l.mu.Lock()
 	f.mu.Lock()
 	defer l.mu.Unlock()
@@ -310,17 +373,23 @@ func (l *LruList[T]) ReAddFrame(f *Frame) error {
 	return nil
 }
 
+func (l *LruList[T]) IsFull() bool {
+	log.Println("lru.IsFull()")
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.Full
+}
+
 // Pins frame
 func (f *Frame) PinFrame() error {
 	log.Println("(PinFrame) Obtaining Frame Lock...")
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	//	f.mu.Lock()
+	//	defer f.mu.Unlock()
 	log.Println("(PinFrame) Obtained Frame Lock...")
 	log.Println("CURR FRAME => ", f)
 	if f.Pins == 0 {
 		// first time pin, remove from LRU
 		if f.Prev != nil {
-			log.Println("(pinFrame) Geting look for prev frame...->", f.Prev)
 			f.Prev.mu.Lock()
 			log.Println("(pinFrame) Obtained lock for prev frame...")
 			f.Prev.Next = f.Next
@@ -343,6 +412,24 @@ func (f *Frame) PinFrame() error {
 	return nil
 }
 
+func (f *Frame) GetKey() uint32 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	k := f.Key
+
+	return k
+}
+
+func (f *Frame) GetPage() *diskio.Page {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	p := f.Page
+
+	return p
+}
+
 // Unpins a frame and if no other pins exists,
 // returns if it should be added back to LRU
 func (f *Frame) UnpinFrame() (bool, error) {
@@ -354,7 +441,7 @@ func (f *Frame) UnpinFrame() (bool, error) {
 		return false, nil
 	}
 
-	f.Pins--
+	f.Pins -= 1
 
 	if f.Pins <= 0 {
 		return true, nil
@@ -382,6 +469,26 @@ func (f *Frame) UpdateCacheType(t LruType) {
 	defer f.mu.Unlock()
 
 	f.CacheType = t
+}
+
+func (f *Frame) PageIsDirty() (bool, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	d, err := f.Page.IsDirty()
+
+	return d, err
+}
+
+// Check if a frame's page is marked for deletion.
+func (f *Frame) PageIsDead() (bool, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.Page == nil {
+		return false, LruError{Message: "No page associated with frame."}
+	}
+	d := f.Page.IsDeleted()
+
+	return d, nil
 }
 
 // Create new instance of LRU Linked List

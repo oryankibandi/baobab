@@ -30,10 +30,9 @@ func (bw *BgWriter) Start() {
 	go bw.watchFreeList()
 	dirtyList := make([]*lrulist.Frame, 0)
 	for {
-		BCache.rmu.Lock()
+		BCache.rmu.RLock()
 		for _, f := range BCache.CacheMap {
-
-			dirty, err := f.Page.IsDirty()
+			dirty, err := f.PageIsDirty()
 
 			if err != nil {
 				panic(err.Error())
@@ -45,7 +44,7 @@ func (bw *BgWriter) Start() {
 
 		}
 
-		BCache.rmu.Unlock()
+		BCache.rmu.RUnlock()
 
 		if len(dirtyList) > 0 {
 			fmt.Println("DIRTY LIST COUNT => ", len(dirtyList))
@@ -61,10 +60,13 @@ func (bw *BgWriter) Start() {
 				panic(fmt.Sprintf("Unable to pin frame: ", err.Error()))
 			}
 
-			if d, err := f.Page.IsDirty(); err != nil {
+			if d, err := f.PageIsDirty(); err != nil {
 				panic(err)
 			} else if !d {
-				BCache.ReleaseFrame(f)
+				err = BCache.ReleaseFrame(f)
+				if err != nil {
+					panic(err)
+				}
 				continue
 			}
 
@@ -84,12 +86,15 @@ func (bw *BgWriter) Start() {
 			if n >= 0 {
 				fmt.Printf("(bgwriter) Written %d bytes.\n", n)
 
-				if f.Page.Header.IsSet(4) {
+				// Check if page is marked for deletion
+				if d, err := f.PageIsDead(); err == nil && d {
 					// release shared reader lock temporarily  to gain exclusive lock in BCache.Delete()
 					// BCache.rmu.RUnlock()
 					// remove from buffer pool
 					BCache.Delete(uint32(f.Page.Header.PageId), false)
 					// BCache.rmu.RLock()
+				} else if err != nil {
+					panic(err)
 				}
 
 				bw.mu.Lock()

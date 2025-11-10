@@ -1096,7 +1096,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 			fmt.Println("(InsertValue) ROOT NODE FOUND...")
 
 			bTree.mu.RLock()
-			nodePageId = bTree.Root.Page.Header.PageId
+			nodePageId = bTree.Root.PageId
 			bTree.mu.RUnlock()
 			fmt.Println("updated root node id")
 			fmt.Println("ROOT NODE ID ==> ", nodePageId)
@@ -1116,7 +1116,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				// defer bf.BCache.ReleaseFrame(frame)
 
 				// create node
-				node, err := loadNode(frame.Page)
+				node, err := loadNode(frame.GetPage())
 				fmt.Println("Loaded node ==> ")
 
 				fmt.Println("NODE KEYS *************> ", node.Keys)
@@ -1128,12 +1128,15 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				// release parent frame
 				if oldFrame != nil {
 					fmt.Println("RELEASING OLD FRAME....")
-					bf.BCache.ReleaseFrame(oldFrame)
+					err = bf.BCache.ReleaseFrame(oldFrame)
+					if err != nil {
+						panic(err)
+					}
 				}
 
 				// update root ptr
 				bTree.mu.Lock()
-				if nodePageId == bTree.Root.Page.Header.PageId {
+				if nodePageId == bTree.Root.PageId {
 					bTree.Root = node
 				}
 				bTree.mu.Unlock()
@@ -1156,7 +1159,11 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 			}
 
 			if oldFrame != nil {
-				bf.BCache.ReleaseFrame(oldFrame)
+				err := bf.BCache.ReleaseFrame(oldFrame)
+
+				if err != nil {
+					panic(fmt.Sprintf("Unable to  release frame: ", err))
+				}
 			}
 
 			// Handle propagating splits
@@ -1509,6 +1516,8 @@ func Get(key []byte) ([]byte, error) {
 	fmt.Println("ROOT PAGE ID ==> ", nodePageId)
 	bTree.mu.RUnlock()
 
+	var oldFrame *lrulist.Frame
+
 	for nodePageId > 0 {
 		// pge, err := buildPage(uint32(nodePageId))
 		fr, err := bf.BCache.Get(uint32(nodePageId))
@@ -1517,19 +1526,48 @@ func Get(key []byte) ([]byte, error) {
 			return nil, err
 		}
 
-		pge, err := loadNode(fr.Page)
+		pge, err := loadNode(fr.GetPage())
 
 		if err != nil {
 			return nil, err
+		}
+
+		if oldFrame != nil {
+			fmt.Println("RELEASING OLD FRAME....")
+			err = bf.BCache.ReleaseFrame(oldFrame)
+
+			if err != nil {
+				panic(err)
+			}
 		}
 
 		val, err = pge.search(key, &nodePageId)
 
 		if err != nil {
+			bf.BCache.ReleaseFrame(fr)
+
+			if oldFrame != nil {
+				bf.BCache.ReleaseFrame(oldFrame)
+			}
+
 			return nil, err
 		}
 
-		bf.BCache.ReleaseFrame(fr)
+		// err = bf.BCache.ReleaseFrame(fr)
+
+		// if err != nil {
+		// 	fmt.Println(fmt.Sprintf("ERROR on ReleaseFrame => ", err))
+		// 	panic(err)
+		// }
+		oldFrame = fr
+	}
+
+	if oldFrame != nil {
+		err := bf.BCache.ReleaseFrame(oldFrame)
+
+		if err != nil {
+			panic(fmt.Sprintf("Unable to  release frame: ", err))
+		}
 	}
 
 	return val, nil

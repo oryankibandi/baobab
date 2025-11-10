@@ -14,6 +14,8 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/pprof"
 	"runtime/trace"
 	"sort"
 	"strconv"
@@ -48,6 +50,11 @@ type DelResp struct {
 // simple JSON error response
 type ErrResp struct {
 	Error string `json:"error"`
+}
+
+func init() {
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
 }
 
 func sortItems(l []NodeData) []NodeData {
@@ -306,6 +313,22 @@ func setKey() http.HandlerFunc {
 	}
 }
 
+func dumpStacks(path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	// goroutine profile
+	if err := pprof.Lookup("goroutine").WriteTo(f, 2); err != nil {
+		return err
+	}
+	// optionally also write block/mutex profiles (if enabled)
+	pprof.Lookup("block").WriteTo(f, 2)
+	pprof.Lookup("mutex").WriteTo(f, 2)
+	return nil
+}
+
 func runProfiler() {
 	profSrv := &http.Server{Addr: ":8020"}
 
@@ -355,6 +378,11 @@ func runServer() {
 	<-stop
 
 	fmt.Println("Shutting down BTree...")
+	go func() {
+		fmt.Println("Creating goroutine dump")
+		_ = dumpStacks("goroutine-dump_4.txt")
+	}()
+
 	bp_tree.Shutdown()
 
 	fmt.Println("Gracefully shutting down...")
@@ -388,6 +416,6 @@ func main() {
 	fmt.Println()
 	fmt.Println("Done in ", duration)
 
-	// runProfiler()
+	go runProfiler()
 	runServer()
 }
