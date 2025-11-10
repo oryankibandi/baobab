@@ -8,10 +8,10 @@ import (
 	"log"
 	"sync"
 
-	"github.com/oryankibandi/on_disk_btree/internal/lrulist"
-	bf "github.com/oryankibandi/on_disk_btree/pkg/buffer_manager"
-	"github.com/oryankibandi/on_disk_btree/pkg/disk_io"
-	"github.com/oryankibandi/on_disk_btree/pkg/helpers"
+	"github.com/oryankibandi/baobab/internal/lrulist"
+	bf "github.com/oryankibandi/baobab/pkg/buffer_manager"
+	"github.com/oryankibandi/baobab/pkg/disk_io"
+	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
 // TODO: Store root page ID instead of pointer to node

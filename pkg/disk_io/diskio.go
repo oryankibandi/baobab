@@ -10,8 +10,8 @@ import (
 	"os"
 	"sync"
 
-	"github.com/oryankibandi/on_disk_btree/pkg/errors"
-	//"github.com/oryankibandi/on_disk_btree/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/errors"
+	//"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
 const (

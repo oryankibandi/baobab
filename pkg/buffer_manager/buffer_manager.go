@@ -9,9 +9,8 @@ import (
 	"log"
 	"sync"
 
-	lru "github.com/oryankibandi/on_disk_btree/internal/lrulist"
-	tiny "github.com/oryankibandi/on_disk_btree/internal/tinylfu"
-	diskio "github.com/oryankibandi/on_disk_btree/pkg/disk_io"
+	lru "github.com/oryankibandi/baobab/internal/lrulist"
+	diskio "github.com/oryankibandi/baobab/pkg/disk_io"
 )
 
 // const (
@@ -33,14 +32,15 @@ var BCache *Cache
 // type CacheType int
 
 type Cache struct {
-	windowCache    *lru.LruList[*lru.Frame]
-	probationCache *lru.LruList[*lru.Frame]
-	protectedCache *lru.LruList[*lru.Frame]
-	CacheMap       map[uint32]*lru.Frame
-	tinyFilter     *tiny.TinyLFU
-	rmu            sync.RWMutex
-	frameCount     uint32
-	freeFrames     uint32
+	// windowCache    *lru.LruList[*lru.Frame]
+	// probationCache *lru.LruList[*lru.Frame]
+	// protectedCache *lru.LruList[*lru.Frame]
+	CacheMap map[uint32]*lru.Frame
+	// tinyFilter     *tiny.TinyLFU
+	wTinyLfu   *WTinyLfu
+	rmu        sync.RWMutex
+	frameCount uint32
+	freeFrames uint32
 }
 
 func init() {
@@ -78,51 +78,27 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 		// TODO: Check free frames first, if none evict first
 		// First time entry
 		log.Println("First Entry, adding to window cache----------------")
-		// item.CacheType = lru.Window
 		item.UpdateCacheType(lru.Window)
 
-		c.rmu.Unlock()
-		n := c.addToWindowCache(k, &item)
+		c.CacheMap[k] = &item
 
-		// log.Println("NEW NEW FRAME PREV ====================> ", n.Prev)
-		// log.Println("NEW NEW FRAME NEXT ====================>", n.Next)
+		// add to lru
+		err := c.wTinyLfu.AddItem(&item)
 
-		// log.Println("Added to window cache.....................")
-		c.rmu.Lock()
-		// log.Println("Regained lock..........................")
-		c.CacheMap[k] = n
-		// c.rmu.Unlock()
-
+		if err != nil {
+			panic(err)
+		}
 	} else {
-		// data already exists, update, retrieve, and update count
-		// item.Type = val.(*CacheItem[T]).Type
-		// c.CacheMap.Store(formattedKey, item)
 		// update value
-
 		log.Println("Item Exists, incrementing count........")
-
 		log.Println("EXISTING FRAME PREV ====================> ", val.Prev)
 		log.Println("EXISTING FRAME NEXT ====================>", val.Next)
 
 		val.UpdatePage(v)
-		cType := val.GetCacheType()
-
-		if cType == lru.Probation {
-			// Move to protected.
-			c.promoteItemFromProbation(val)
-		} else if cType == lru.Protected {
-			c.protectedCache.SetMostRecent(val)
-		} else {
-			c.windowCache.SetMostRecent(val)
-		}
-
-		// c.rmu.RUnlock()
 	}
 
-	// increment count in filter
-	log.Println("Incrementing item....")
-	go c.tinyFilter.IncrementItem(toBytes(k))
-	log.Println("Incremented item....")
+	// increment count
+	go c.wTinyLfu.Increment(val)
 
 	// if err != nil {
 	// 	panic(err.Error())
@@ -130,189 +106,170 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 
 	log.Println("Printing stats ....")
 	c.rmu.Unlock()
-	c.Stat()
+	go c.wTinyLfu.Stat()
 	return &item, nil
 }
 
-// List metadata i.e no. of items in all segments
-func (c *Cache) Stat() {
-	c.rmu.RLock()
-	defer c.rmu.RUnlock()
-	winCount := c.windowCache.GetCount()
-	probCount := c.probationCache.GetCount()
-	protCount := c.protectedCache.GetCount()
-
-	winCap := c.windowCache.GetCapacity()
-	probCap := c.probationCache.GetCapacity()
-	protCap := c.protectedCache.GetCapacity()
-
-	log.Println("------------------------------------------------------------------")
-	log.Printf("WINDOW COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", winCount, c.windowCache.IsFull(), winCap, (float64(winCount)/float64(winCap))*100)
-	log.Printf("PROBATION COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", probCount, c.probationCache.IsFull(), probCap, (float64(probCount)/float64(probCap))*100)
-	log.Printf("PROTECTED COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", protCount, c.protectedCache.IsFull(), protCap, (float64(protCount)/float64(protCap))*100)
-	log.Println("------------------------------------------------------------------")
-
-}
-
 // Add new item to window cache
-func (c *Cache) addToWindowCache(key uint32, item *lru.Frame) *lru.Frame {
-	c.rmu.Lock()
-	defer c.rmu.Unlock()
-	// update LRU type
-	item.UpdateCacheType(lru.Window)
-	if !c.windowCache.IsFull() {
-		// Cache not full, add
-		node := c.windowCache.Add(item)
-		c.frameCount++
-
-		if c.freeFrames > 0 {
-			c.freeFrames--
-		}
-
-		return node
-	} else {
-		// cache is full, need to evict
-		windowVictim := c.windowCache.Pop()
-
-		if windowVictim == nil {
-			msg := fmt.Sprintf("NO ITEM IN WINDOW CACHE.Frame Count => %d", int(c.frameCount))
-			fmt.Println()
-			panic(msg)
-		}
-
-		// if probation not full, add victim to probation, otherwise evict
-		if !c.probationCache.IsFull() {
-			// Add window victim to main cache
-			// windowVictim.CacheType = lru.Probation
-			windowVictim.UpdateCacheType(lru.Probation)
-			c.probationCache.Add(windowVictim)
-
-			// Add new item to window cache
-			n := c.windowCache.Add(item)
-
-			return n
-		} else {
-			// evict from probation
-			mainCacheVictim := c.probationCache.Pop()
-
-			// compare the two, and evict one with lower count
-			windCount, err := c.tinyFilter.CheckItemCount(toBytes(key))
-
-			if err != nil {
-				panic(err.Error())
-			}
-
-			mainCacheCount, err := c.tinyFilter.CheckItemCount(toBytes(mainCacheVictim.Key))
-
-			if err != nil {
-				panic(err.Error())
-			}
-
-			if windCount > mainCacheCount {
-				// admit window victim to main cache and evict & delete main cache victim
-				// windowVictim.CacheType = lru.Probation
-				windowVictim.UpdateCacheType(lru.Probation)
-				c.probationCache.Add(windowVictim)
-
-				log.Println("(Probation) Evicting: ", string(mainCacheVictim.Key))
-
-				// flush page first before eviction
-				mainCacheVictim.PrepareForEviction()
-
-				delete(c.CacheMap, mainCacheVictim.Key)
-				// c.CacheMap.Delete(mainCacheVictim.Item.Key)
-			} else {
-				// evict window victim and add new item
-				c.probationCache.Add(mainCacheVictim)
-
-				log.Println("(Window) Evicting: ", string(windowVictim.Key))
-				windowVictim.PrepareForEviction()
-				delete(c.CacheMap, windowVictim.Key)
-				// c.CacheMap.Delete(windowVictim.Item.Key)
-			}
-
-			n := c.windowCache.Add(item)
-
-			return n
-		}
-	}
-}
-
+//
+//	func (c *Cache) addToWindowCache(key uint32, item *lru.Frame) *lru.Frame {
+//		c.rmu.Lock()
+//		defer c.rmu.Unlock()
+//		// update LRU type
+//		item.UpdateCacheType(lru.Window)
+//		if !c.windowCache.IsFull() {
+//			// Cache not full, add
+//			node := c.windowCache.Add(item)
+//			c.frameCount++
+//
+//			if c.freeFrames > 0 {
+//				c.freeFrames--
+//			}
+//
+//			return node
+//		} else {
+//			// cache is full, need to evict
+//			windowVictim := c.windowCache.Pop()
+//
+//			if windowVictim == nil {
+//				msg := fmt.Sprintf("NO ITEM IN WINDOW CACHE.Frame Count => %d", int(c.frameCount))
+//				fmt.Println()
+//				panic(msg)
+//			}
+//
+//			// if probation not full, add victim to probation, otherwise evict
+//			if !c.probationCache.IsFull() {
+//				// Add window victim to main cache
+//				// windowVictim.CacheType = lru.Probation
+//				windowVictim.UpdateCacheType(lru.Probation)
+//				c.probationCache.Add(windowVictim)
+//
+//				// Add new item to window cache
+//				n := c.windowCache.Add(item)
+//
+//				return n
+//			} else {
+//				// evict from probation
+//				mainCacheVictim := c.probationCache.Pop()
+//
+//				// compare the two, and evict one with lower count
+//				windCount, err := c.tinyFilter.CheckItemCount(toBytes(key))
+//
+//				if err != nil {
+//					panic(err.Error())
+//				}
+//
+//				mainCacheCount, err := c.tinyFilter.CheckItemCount(toBytes(mainCacheVictim.Key))
+//
+//				if err != nil {
+//					panic(err.Error())
+//				}
+//
+//				if windCount > mainCacheCount {
+//					// admit window victim to main cache and evict & delete main cache victim
+//					// windowVictim.CacheType = lru.Probation
+//					windowVictim.UpdateCacheType(lru.Probation)
+//					c.probationCache.Add(windowVictim)
+//
+//					log.Println("(Probation) Evicting: ", string(mainCacheVictim.Key))
+//
+//					// flush page first before eviction
+//					mainCacheVictim.PrepareForEviction()
+//
+//					delete(c.CacheMap, mainCacheVictim.Key)
+//					// c.CacheMap.Delete(mainCacheVictim.Item.Key)
+//				} else {
+//					// evict window victim and add new item
+//					c.probationCache.Add(mainCacheVictim)
+//
+//					log.Println("(Window) Evicting: ", string(windowVictim.Key))
+//					windowVictim.PrepareForEviction()
+//					delete(c.CacheMap, windowVictim.Key)
+//					// c.CacheMap.Delete(windowVictim.Item.Key)
+//				}
+//
+//				n := c.windowCache.Add(item)
+//
+//				return n
+//			}
+//		}
+//	}
+//
 // promote item from probation
-func (c *Cache) promoteItemFromProbation(candidate *lru.Frame) *lru.Frame {
-	// c.rmu.Lock()
-	// defer c.rmu.Unlock()
-	log.Println("Promoting to protected: ", string(candidate.Key))
-	// 1. Check if protected is full, if not full add to protected
-	if !c.protectedCache.IsFull() {
-		log.Println("Protected cache is not full...")
-		candidate.UpdateCacheType(lru.Protected)
-		log.Println("Updated cache type...")
-		// candidate.CacheType = lru.Protected
-		log.Println("Adding to protected cache...")
-		n := c.protectedCache.Add(candidate)
-
-		log.Println("(Probation) Evicting: ", string(candidate.Key))
-		c.probationCache.Delete(candidate)
-
-		return n
-	}
-	log.Println("Protected is full, evicting...")
-	// 2. If protected is full, compare LRU from protected with candidate
-	// protectedVictim := c.protectedCache.Tail // TODO: Ensure this is accessed in a concurrency safe manner
-	protectedTailKey := c.protectedCache.GetTailKey()
-	candidateKey := candidate.GetKey()
-
-	candidateCount, err := c.tinyFilter.CheckItemCount(toBytes(candidateKey))
-
-	if err != nil {
-		panic(err.Error())
-	}
-
-	protectedCount, err := c.tinyFilter.CheckItemCount(toBytes(protectedTailKey))
-
-	if err != nil {
-		panic(err.Error())
-	}
-
-	if candidateCount > protectedCount {
-		// Demote protected cache victim to probation and add candidate to protected
-		p := c.protectedCache.Pop()
-
-		log.Println("(Probation) Evicting: ", string(candidateKey))
-		pr := c.probationCache.Delete(candidate)
-
-		n := c.protectedCache.Add(pr)
-		c.probationCache.Add(p)
-
-		// update metadata
-		// pr.CacheType = lru.Protected
-		pr.UpdateCacheType(lru.Protected)
-		// p.CacheType = lru.Probation
-		p.UpdateCacheType(lru.Probation)
-
-		return n
-	} else {
-		// Just update recency of the node in the DLL
-		c.probationCache.SetMostRecent(candidate)
-		return candidate
-	}
-}
-
-func (c *Cache) RemoveItemFromLru(f *lru.Frame) error {
-	c.rmu.RLock()
-	defer c.rmu.RUnlock()
-	switch f.GetCacheType() {
-	case lru.Window:
-		c.windowCache.RemoveFrame(f)
-	case lru.Protected:
-		c.protectedCache.RemoveFrame(f)
-	default:
-		c.probationCache.RemoveFrame(f)
-	}
-
-	return nil
-}
+// func (c *Cache) promoteItemFromProbation(candidate *lru.Frame) *lru.Frame {
+// 	// c.rmu.Lock()
+// 	// defer c.rmu.Unlock()
+// 	log.Println("Promoting to protected: ", string(candidate.Key))
+// 	// 1. Check if protected is full, if not full add to protected
+// 	if !c.protectedCache.IsFull() {
+// 		log.Println("Protected cache is not full...")
+// 		candidate.UpdateCacheType(lru.Protected)
+// 		log.Println("Updated cache type...")
+// 		// candidate.CacheType = lru.Protected
+// 		log.Println("Adding to protected cache...")
+// 		n := c.protectedCache.Add(candidate)
+//
+// 		log.Println("(Probation) Evicting: ", string(candidate.Key))
+// 		c.probationCache.Delete(candidate)
+//
+// 		return n
+// 	}
+// 	log.Println("Protected is full, evicting...")
+// 	// 2. If protected is full, compare LRU from protected with candidate
+// 	// protectedVictim := c.protectedCache.Tail // TODO: Ensure this is accessed in a concurrency safe manner
+// 	protectedTailKey := c.protectedCache.GetTailKey()
+// 	candidateKey := candidate.GetKey()
+//
+// 	candidateCount, err := c.tinyFilter.CheckItemCount(toBytes(candidateKey))
+//
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	protectedCount, err := c.tinyFilter.CheckItemCount(toBytes(protectedTailKey))
+//
+// 	if err != nil {
+// 		panic(err.Error())
+// 	}
+//
+// 	if candidateCount > protectedCount {
+// 		// Demote protected cache victim to probation and add candidate to protected
+// 		p := c.protectedCache.Pop()
+//
+// 		log.Println("(Probation) Evicting: ", string(candidateKey))
+// 		pr := c.probationCache.Delete(candidate)
+//
+// 		n := c.protectedCache.Add(pr)
+// 		c.probationCache.Add(p)
+//
+// 		// update metadata
+// 		// pr.CacheType = lru.Protected
+// 		pr.UpdateCacheType(lru.Protected)
+// 		// p.CacheType = lru.Probation
+// 		p.UpdateCacheType(lru.Probation)
+//
+// 		return n
+// 	} else {
+// 		// Just update recency of the node in the DLL
+// 		c.probationCache.SetMostRecent(candidate)
+// 		return candidate
+// 	}
+// }
+//
+// func (c *Cache) RemoveItemFromLru(f *lru.Frame) error {
+// 	c.rmu.RLock()
+// 	defer c.rmu.RUnlock()
+// 	switch f.GetCacheType() {
+// 	case lru.Window:
+// 		c.windowCache.RemoveFrame(f)
+// 	case lru.Protected:
+// 		c.protectedCache.RemoveFrame(f)
+// 	default:
+// 		c.probationCache.RemoveFrame(f)
+// 	}
+//
+// 	return nil
+// }
 
 // 2. Retrieve item from cache
 func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
@@ -323,56 +280,15 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 	val, ok := c.CacheMap[pageId]
 
 	if ok {
-		// increment count
-		// log.Println("Value found in cache.... ")
-		// log.Println("EXISTING FRAME PREV ====================> ", val.Prev)
-		// log.Println("EXISTING FRAME NEXT ====================>", val.Next)
-
-		err := c.tinyFilter.IncrementItem(toBytes(pageId))
-
-		if err != nil {
-			return nil, err
-		}
-		log.Println("Incremented item in LRU.... ")
-
 		cType := val.GetCacheType()
-		log.Println("CacheType => ", cType)
 
 		if cType == lru.Probation {
-			c.rmu.RUnlock()
-			fmt.Println("Promoting item from probation...")
-			c.promoteItemFromProbation(val)
-			c.rmu.RLock()
-		} else if cType == lru.Protected {
-			fmt.Println("Setting most recent in protected...")
-			c.protectedCache.SetMostRecent(val)
+			// item will be promoted
+			c.wTinyLfu.Increment(val)
 		} else {
-			fmt.Println("Setting most recent in window...")
-			c.windowCache.SetMostRecent(val)
+			// no promotion
+			c.wTinyLfu.GetIncrement(val)
 		}
-
-		// log.Println("EXISTING FRAME PREV ====================> ", val.Prev)
-		// log.Println("EXISTING FRAME NEXT ====================>", val.Next)
-
-		// log.Println("performed the necessary promotion....")
-
-		// pin frame
-		//val.PinFrame()
-		//fmt.Println("Pinned Frame.....")
-
-		// remove frame from LRU
-		switch val.GetCacheType() {
-		case lru.Window:
-			c.windowCache.RemoveFrame(val)
-		case lru.Protected:
-			c.protectedCache.RemoveFrame(val)
-		case lru.Probation:
-			c.probationCache.RemoveFrame(val)
-		default:
-			log.Println("No LRU associated with frame.")
-		}
-
-		fmt.Println("REMOVED FROM LRU...")
 
 		c.rmu.RUnlock()
 
@@ -398,15 +314,10 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 		fmt.Println("(Get) Frame not found, read from disk...")
 
 		// remove frame from LRU & Pin
-		switch f.GetCacheType() {
-		case lru.Window:
-			c.windowCache.RemoveFrame(f)
-		case lru.Protected:
-			c.protectedCache.RemoveFrame(f)
-		case lru.Probation:
-			c.probationCache.RemoveFrame(f)
-		default:
-			log.Println("No LRU associated with frame.")
+		err = c.wTinyLfu.handlePinFrame(f)
+
+		if err != nil {
+			panic(err)
 		}
 
 		return f, nil
@@ -416,45 +327,64 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 // Releases a frame in use by unpinning and reinserting to LRU.
 // Called when a thread is done with a frame
 func (c *Cache) ReleaseFrame(f *lru.Frame) error {
-	fmt.Println("(ReleaseFrame) Obtaining lock....")
-	c.rmu.Lock()
-	defer c.rmu.Unlock()
-
-	fmt.Println("Unpinning Fram...e")
 	addToLru, err := f.UnpinFrame()
-	cType := f.GetCacheType()
 
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("ADD BACK TO LRU ==> ", addToLru)
-
 	if addToLru {
-		switch cType {
-		case lru.Probation:
-			fmt.Println("ADDING TO PROBATION.....")
-			// err = c.probationCache.ReAddFrame(f)
-			c.probationCache.Add(f)
-		case lru.Protected:
-			fmt.Println("ADDING TO PROTETED.....")
-			// err = c.protectedCache.ReAddFrame(f)
-			c.protectedCache.Add(f)
-			fmt.Println("ADDED TO PROTECTED.....")
-		default:
-			fmt.Println("ADDING TO WINDOW.....")
-			// err = c.windowCache.ReAddFrame(f)
-			c.windowCache.Add(f)
+		err = c.wTinyLfu.reAddToLru(f)
+		if err != nil {
+			return err
 		}
 	}
 
-	if err != nil {
-		return err
-	}
-	fmt.Println("Unpinned frame.....")
-
 	return nil
 }
+
+// Releases a frame in use by unpinning and reinserting to LRU.
+// Called when a thread is done with a frame
+// func (c *Cache) ReleaseFrame(f *lru.Frame) error {
+// 	fmt.Println("(ReleaseFrame) Obtaining lock....")
+// 	c.rmu.Lock()
+// 	defer c.rmu.Unlock()
+//
+// 	fmt.Println("Unpinning Fram...e")
+// 	addToLru, err := f.UnpinFrame()
+// 	cType := f.GetCacheType()
+//
+// 	if err != nil {
+// 		return err
+// 	}
+//
+// 	fmt.Println("ADD BACK TO LRU ==> ", addToLru)
+//
+// 	if addToLru {
+// 		switch cType {
+// 		case lru.Probation:
+// 			fmt.Println("ADDING TO PROBATION.....")
+// 			// err = c.probationCache.ReAddFrame(f)
+// 			c.probationCache.Add(f)
+// 		case lru.Protected:
+// 			fmt.Println("ADDING TO PROTETED.....")
+// 			// err = c.protectedCache.ReAddFrame(f)
+// 			c.protectedCache.Add(f)
+// 			fmt.Println("ADDED TO PROTECTED.....")
+// 		default:
+// 			fmt.Println("ADDING TO WINDOW.....")
+// 			// err = c.windowCache.ReAddFrame(f)
+// 			c.windowCache.Add(f)
+// 		}
+// 	}
+//
+// 	if err != nil {
+// 		return err
+// 	}
+// 	fmt.Println("Unpinned frame.....")
+//
+// 	return nil
+// }
 
 // Traverses the DLL and prints all keys
 //func (c *Cache[K]) Traverse() {
@@ -490,23 +420,16 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 
 	// fVal := val.(*lru.LRUNode[CacheItem[K]])
 
-	cType := val.GetCacheType()
+	err := c.wTinyLfu.deleteFromLru(val)
 
-	switch cType {
-	case lru.Protected:
-		log.Println("(Protected) Evicting: ", string(val.Key))
-		c.protectedCache.Delete(val)
-	case lru.Probation:
-		log.Println("(Probation) Evicting: ", string(val.Key))
-		c.probationCache.Delete(val)
-	default:
-		log.Println("(Window) Evicting: ", string(val.Key))
-		c.windowCache.Delete(val)
+	if err != nil {
+		return err
 	}
 
 	if flush {
 		val.PrepareForEviction()
 	}
+
 	delete(c.CacheMap, key)
 
 	c.freeFrames++
@@ -514,7 +437,6 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 	if c.frameCount > 0 {
 		c.frameCount++
 	}
-	// c.CacheMap.Delete(toBytes(key))
 
 	return nil
 }
@@ -529,12 +451,15 @@ func NewCache(windowSize uint64, mainCacheSize uint64) (*Cache, error) {
 		return nil, errors.New("Main cache size must be greater than 0")
 	}
 
+	w, err := NewWTinylfu(windowSize, mainCacheSize)
+
+	if err != nil {
+		panic(err)
+	}
+
 	n := Cache{
-		windowCache:    lru.NewLRUList[*lru.Frame](windowSize),
-		probationCache: lru.NewLRUList[*lru.Frame](uint64(MAIN_CACHE_RATIO * float64(mainCacheSize))),
-		protectedCache: lru.NewLRUList[*lru.Frame](uint64((1 - MAIN_CACHE_RATIO) * float64(mainCacheSize))),
-		tinyFilter:     tiny.New(),
-		CacheMap:       make(map[uint32]*lru.Frame),
+		CacheMap: make(map[uint32]*lru.Frame),
+		wTinyLfu: w,
 	}
 
 	return &n, nil

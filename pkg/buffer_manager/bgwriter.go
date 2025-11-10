@@ -5,9 +5,9 @@ import (
 	"sync"
 	"time"
 
-	//	buffermanager "github.com/oryankibandi/on_disk_btree/pkg/buffer_manager"
-	"github.com/oryankibandi/on_disk_btree/internal/lrulist"
-	diskio "github.com/oryankibandi/on_disk_btree/pkg/disk_io"
+	//	buffermanager "github.com/oryankibandi/baobab/pkg/buffer_manager"
+	"github.com/oryankibandi/baobab/internal/lrulist"
+	diskio "github.com/oryankibandi/baobab/pkg/disk_io"
 )
 
 const (

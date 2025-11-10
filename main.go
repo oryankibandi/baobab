@@ -23,7 +23,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/oryankibandi/on_disk_btree/pkg/bp_tree"
+	"github.com/oryankibandi/baobab/pkg/bp_tree"
 )
 
 type NodeData struct {

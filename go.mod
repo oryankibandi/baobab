@@ -1,3 +1,3 @@
-module github.com/oryankibandi/on_disk_btree
+module github.com/oryankibandi/baobab
 
 go 1.24.2

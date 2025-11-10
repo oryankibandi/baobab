@@ -4,7 +4,7 @@ import (
 	"log"
 	"sync"
 
-	diskio "github.com/oryankibandi/on_disk_btree/pkg/disk_io"
+	diskio "github.com/oryankibandi/baobab/pkg/disk_io"
 )
 
 const (
