@@ -70,8 +70,15 @@ func (l *LruList[T]) Pop() *Frame {
 
 	oldTail := l.Tail
 
-	l.Tail = l.Tail.Prev
-	oldTail.Prev.Next = nil
+	l.Tail = oldTail.Prev
+
+	if oldTail.Prev != nil {
+		oldTail.mu.RLock()
+		oldTail.Prev.mu.Lock()
+		oldTail.Prev.Next = nil
+		oldTail.mu.RUnlock()
+		oldTail.Prev.mu.Unlock()
+	}
 
 	l.Count -= 1
 
@@ -82,6 +89,10 @@ func (l *LruList[T]) Pop() *Frame {
 
 // Add item to the doubly linked list
 func (l *LruList[T]) Add(f *Frame) *Frame {
+	if f == nil {
+		panic("(Add) frame is nil")
+	}
+
 	log.Println("ADDINT ITEM TO CACHE^^^^^^^>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 	log.Println("ADDINT ITEM TO CACHE^^^^^^^>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 	log.Println("ADDINT ITEM TO CACHE^^^^^^^>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
@@ -95,9 +106,19 @@ func (l *LruList[T]) Add(f *Frame) *Frame {
 	log.Println("ITEM >> ", f)
 	log.Println("ITEM COUNT B4:>>>>>>>>> ", l.Count)
 
+	if l.Head == f {
+		panic("(Add) Frame is already head of lru list")
+	}
+
+	if l.Tail == f {
+		panic("(Add) Frame is already tail of lru list")
+	}
+
 	if l.Count <= 0 {
 		l.Head = f
 		l.Tail = f
+		f.Next = nil
+		f.Prev = nil
 		l.Count++
 
 		l.Full = l.Count >= l.Capacity
@@ -281,11 +302,12 @@ func (l *LruList[T]) SetMostRecent(f *Frame) {
 	return
 }
 
-// Remove frame from LRU. Called when pinning/deleting a frame
+// Remove frame from LRU. Called when pinning/deleting a frame.
 func (l *LruList[T]) RemoveFrame(f *Frame) error {
 	if f == nil {
 		return LruError{Message: "(RemoveFrame) Frame is required"}
 	}
+
 	log.Println("lru.RemoveFrame()")
 	l.mu.Lock()
 	f.mu.Lock()
@@ -307,7 +329,8 @@ func (l *LruList[T]) RemoveFrame(f *Frame) error {
 	}
 
 	// f.mu.RUnlock()
-	err := f.PinFrame()
+	log.Println("(RemoveFrame) CURR LRU COUNT  B4 PinFrame => ", l.Count)
+	err := f.pinFrame()
 
 	if err != nil {
 		return err
@@ -381,7 +404,11 @@ func (l *LruList[T]) IsFull() bool {
 }
 
 // Pins frame
-func (f *Frame) PinFrame() error {
+func (f *Frame) pinFrame() error {
+	if f.Pins < 0 {
+		panic("(PinFrame) Pin count is less than zero.")
+	}
+
 	log.Println("(PinFrame) Obtaining Frame Lock...")
 	//	f.mu.Lock()
 	//	defer f.mu.Unlock()

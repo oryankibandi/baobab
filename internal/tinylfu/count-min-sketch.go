@@ -69,6 +69,9 @@ func (c *CMS) Increment(key []byte) (bool, error) {
 	return false, nil
 }
 
+// Passes the key through k hash functions which produce k number of indices.
+// With theses indices, we check the count at each row of the array in the 2D
+// array and return the smallest count.
 func (c *CMS) GetCount(key []byte) (int64, error) {
 	indices := DoubleHashIndices(c.hasher, key, int(c.k), c.m)
 
@@ -94,7 +97,7 @@ func (c *CMS) GetCount(key []byte) (int64, error) {
 // Halves all the counters  in the CMS, reset op_counter and clear doorkeeper
 func (c *CMS) reset() {
 	// halve all  counters
-
+	c.mu.Lock()
 	for i, v := range c.arr {
 		for j, k := range v {
 			if k > 0 {
@@ -104,4 +107,5 @@ func (c *CMS) reset() {
 	}
 
 	c.op_counter = 0
+	c.mu.Unlock()
 }

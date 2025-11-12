@@ -98,7 +98,7 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 	}
 
 	// increment count
-	go c.wTinyLfu.Increment(val)
+	go c.wTinyLfu.Increment(&item)
 
 	// if err != nil {
 	// 	panic(err.Error())
@@ -196,80 +196,75 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 //	}
 //
 // promote item from probation
-// func (c *Cache) promoteItemFromProbation(candidate *lru.Frame) *lru.Frame {
-// 	// c.rmu.Lock()
-// 	// defer c.rmu.Unlock()
-// 	log.Println("Promoting to protected: ", string(candidate.Key))
-// 	// 1. Check if protected is full, if not full add to protected
-// 	if !c.protectedCache.IsFull() {
-// 		log.Println("Protected cache is not full...")
-// 		candidate.UpdateCacheType(lru.Protected)
-// 		log.Println("Updated cache type...")
-// 		// candidate.CacheType = lru.Protected
-// 		log.Println("Adding to protected cache...")
-// 		n := c.protectedCache.Add(candidate)
 //
-// 		log.Println("(Probation) Evicting: ", string(candidate.Key))
-// 		c.probationCache.Delete(candidate)
+//	func (c *Cache) promoteItemFromProbation(candidate *lru.Frame) *lru.Frame {
+//		// c.rmu.Lock()
+//		// defer c.rmu.Unlock()
+//		log.Println("Promoting to protected: ", string(candidate.Key))
+//		// 1. Check if protected is full, if not full add to protected
+//		if !c.protectedCache.IsFull() {
+//			log.Println("Protected cache is not full...")
+//			candidate.UpdateCacheType(lru.Protected)
+//			log.Println("Updated cache type...")
+//			// candidate.CacheType = lru.Protected
+//			log.Println("Adding to protected cache...")
+//			n := c.protectedCache.Add(candidate)
 //
-// 		return n
-// 	}
-// 	log.Println("Protected is full, evicting...")
-// 	// 2. If protected is full, compare LRU from protected with candidate
-// 	// protectedVictim := c.protectedCache.Tail // TODO: Ensure this is accessed in a concurrency safe manner
-// 	protectedTailKey := c.protectedCache.GetTailKey()
-// 	candidateKey := candidate.GetKey()
+//			log.Println("(Probation) Evicting: ", string(candidate.Key))
+//			c.probationCache.Delete(candidate)
 //
-// 	candidateCount, err := c.tinyFilter.CheckItemCount(toBytes(candidateKey))
+//			return n
+//		}
+//		log.Println("Protected is full, evicting...")
+//		// 2. If protected is full, compare LRU from protected with candidate
+//		// protectedVictim := c.protectedCache.Tail // TODO: Ensure this is accessed in a concurrency safe manner
+//		protectedTailKey := c.protectedCache.GetTailKey()
+//		candidateKey := candidate.GetKey()
 //
-// 	if err != nil {
-// 		panic(err.Error())
-// 	}
+//		candidateCount, err := c.tinyFilter.CheckItemCount(toBytes(candidateKey))
 //
-// 	protectedCount, err := c.tinyFilter.CheckItemCount(toBytes(protectedTailKey))
+//		if err != nil {
+//			panic(err.Error())
+//		}
 //
-// 	if err != nil {
-// 		panic(err.Error())
-// 	}
+//		protectedCount, err := c.tinyFilter.CheckItemCount(toBytes(protectedTailKey))
 //
-// 	if candidateCount > protectedCount {
-// 		// Demote protected cache victim to probation and add candidate to protected
-// 		p := c.protectedCache.Pop()
+//		if err != nil {
+//			panic(err.Error())
+//		}
 //
-// 		log.Println("(Probation) Evicting: ", string(candidateKey))
-// 		pr := c.probationCache.Delete(candidate)
+//		if candidateCount > protectedCount {
+//			// Demote protected cache victim to probation and add candidate to protected
+//			p := c.protectedCache.Pop()
 //
-// 		n := c.protectedCache.Add(pr)
-// 		c.probationCache.Add(p)
+//			log.Println("(Probation) Evicting: ", string(candidateKey))
+//			pr := c.probationCache.Delete(candidate)
 //
-// 		// update metadata
-// 		// pr.CacheType = lru.Protected
-// 		pr.UpdateCacheType(lru.Protected)
-// 		// p.CacheType = lru.Probation
-// 		p.UpdateCacheType(lru.Probation)
+//			n := c.protectedCache.Add(pr)
+//			c.probationCache.Add(p)
 //
-// 		return n
-// 	} else {
-// 		// Just update recency of the node in the DLL
-// 		c.probationCache.SetMostRecent(candidate)
-// 		return candidate
-// 	}
-// }
+//			// update metadata
+//			// pr.CacheType = lru.Protected
+//			pr.UpdateCacheType(lru.Protected)
+//			// p.CacheType = lru.Probation
+//			p.UpdateCacheType(lru.Probation)
 //
-// func (c *Cache) RemoveItemFromLru(f *lru.Frame) error {
-// 	c.rmu.RLock()
-// 	defer c.rmu.RUnlock()
-// 	switch f.GetCacheType() {
-// 	case lru.Window:
-// 		c.windowCache.RemoveFrame(f)
-// 	case lru.Protected:
-// 		c.protectedCache.RemoveFrame(f)
-// 	default:
-// 		c.probationCache.RemoveFrame(f)
-// 	}
-//
-// 	return nil
-// }
+//			return n
+//		} else {
+//			// Just update recency of the node in the DLL
+//			c.probationCache.SetMostRecent(candidate)
+//			return candidate
+//		}
+//	}
+func (c *Cache) RemoveItemFromLru(f *lru.Frame) error {
+	err := c.wTinyLfu.handlePinFrame(f)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
 
 // 2. Retrieve item from cache
 func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
@@ -280,16 +275,8 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 	val, ok := c.CacheMap[pageId]
 
 	if ok {
-		cType := val.GetCacheType()
-
-		if cType == lru.Probation {
-			// item will be promoted
-			c.wTinyLfu.Increment(val)
-		} else {
-			// no promotion
-			c.wTinyLfu.GetIncrement(val)
-		}
-
+		// increment count & pin frame
+		c.wTinyLfu.GetIncrement(val)
 		c.rmu.RUnlock()
 
 		return val, nil

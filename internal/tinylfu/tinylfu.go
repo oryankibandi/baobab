@@ -35,8 +35,9 @@ func New() *TinyLFU {
 }
 
 // Increments count of an item
+// Checks if an item is in the Doorkeeper. If not, add to doorkeeper. If it is
+// already in the doorkeeper increment in main structure
 func (t *TinyLFU) IncrementItem(data []byte) error {
-	// Check if item is in  Doorkeeper. If not, add to doorkeeper. If it already in doorkeeper increment in main structure
 
 	log.Println("Checking doorkeeper....")
 	mayExist := t.Doorkeeper.Check(data)
@@ -74,11 +75,11 @@ func (t *TinyLFU) CheckItemCount(data []byte) (int64, error) {
 	}
 
 	// Increment count
-	err = t.IncrementItem(data)
+	// err = t.IncrementItem(data)
 
-	if err != nil {
-		return -1, nil
-	}
+	//if err != nil {
+	//	return -1, nil
+	//}
 
 	return count, nil
 }

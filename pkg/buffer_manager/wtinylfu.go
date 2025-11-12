@@ -17,6 +17,10 @@ type WTinyLfu struct {
 
 // Increments count of an item in TinyLFU. If item is in probation, it is promoted to protected. If any cache is full one of it's items is evicted.
 func (w *WTinyLfu) Increment(f *lru.Frame) (bool, error) {
+	if f == nil {
+		panic("(Increment) frame is required")
+	}
+
 	cType := f.GetCacheType()
 
 	if cType == lru.Probation {

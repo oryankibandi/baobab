@@ -1071,7 +1071,7 @@ func (p *Page) GetCellData() ([][]byte, [][]byte, []int32, error) {
 		}
 
 		key := p.pgeData[cellOff+13 : cellOff+13+keySize]
-		fmt.Println("KEY TO ADD => ", key)
+		fmt.Println("(Get Cell data) KEY TO ADD => ", key)
 		keys[i] = key
 		fmt.Println("(Get Cell data) Keys after adding =>", keys)
 
