@@ -227,8 +227,8 @@ func (l *LruList[T]) SetMostRecent(f *Frame) {
 	f.mu.Lock()
 	log.Println("(SETMOSTRECENT) Obtained FRAME lock...")
 
-	defer f.mu.Unlock()
 	defer l.mu.Unlock()
+	defer f.mu.Unlock()
 
 	log.Println("SETTING MOST RECENT......................................................")
 	log.Println("ITEMS IN LRU ==> ", l.Count)
@@ -361,6 +361,10 @@ func (l *LruList[T]) GetTailKey() uint32 {
 	l.mu.RLock()
 	l.Tail.mu.RLock()
 	defer l.mu.RUnlock()
+	if l.Tail == nil {
+		return 0
+	}
+
 	tKey := l.Tail.Key
 
 	l.Tail.mu.RUnlock()
