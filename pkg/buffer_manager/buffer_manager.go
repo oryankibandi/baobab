@@ -95,10 +95,10 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 		log.Println("EXISTING FRAME NEXT ====================>", val.Next)
 
 		val.UpdatePage(v)
-	}
 
-	// increment count
-	// go c.wTinyLfu.Increment(&item)
+		// increment count
+		go c.wTinyLfu.Increment(&item)
+	}
 
 	// if err != nil {
 	// 	panic(err.Error())
