@@ -879,20 +879,15 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 func (p *Page) flushPage(b chan int32) {
 	p.Rmu.Lock()
 	defer p.Rmu.Unlock()
-	// get write offset
-	// offs, err := LookupTable.GetPageOffset(int(p.Header.PageId))
 
-	//if err != nil {
-	//	fmt.Printf("ERR: %v\n", err.Error())
-	//	log.Fatal("(flushPage) Invalid offset")
-	//}
+	// Unmark as dirty
+	p.Header.unsetFlag(5)
+
+	// update page header data
+	hdrBytes := p.Header.toBytes()
+	copy(p.pgeData[:HEADER_SIZE_BYTES], hdrBytes)
 
 	if p.Header.IsSet(4) {
-		//if offs <= 0 {
-		//	log.Println("Zero offset on deleted page.")
-		//	b <- int32(0)
-		//	return
-		//}
 		// page marked for deletion, overwrite with 0s
 		var isRoot bool
 		p.pgeData = [PAGE_SIZE_BYTES]byte{}
@@ -938,60 +933,8 @@ func (p *Page) flushPage(b chan int32) {
 		return
 	}
 
-	//if offs <= 0 {
-	//	fmt.Errorf("OFFSET IS ZERO or less than zero\n")
-	//	// page not flushed before, need to get new offset
-	//	if len(FreeSpaceMap) > 0 {
-	//		// Check for empty space in Free Space Map
-	//		offs = int32(FreeSpaceMap[(len(FreeSpaceMap) - 1)])
-	//		FreeSpaceMap = append(FreeSpaceMap[:len(FreeSpaceMap)-1], []int64{}...)
-	//	} else {
-	//		DiskBTree.mu.RLock()
-	//		offs = int32(METADATA_PAGE_SIZE_BYTES + (int64(DiskBTree.FlushedPages) * PAGE_SIZE_BYTES))
-	//		LookupTable.AddPageOffset(int(p.Header.PageId), uint32(offs))
-	//		DiskBTree.mu.RUnlock()
-	//	}
-
-	//	// set stored in disk flag and offset to lookup table
-	//	DiskBTree.incrementFlushedPages()
-	//	p.Header.setFlag(6)
-	//}
-
 	// set stored in disk flag and offset to lookup table
 	DiskBTree.incrementFlushedPages()
-	//
-	//	// construct data
-	//	data := make([]byte, 0)
-	//
-	//	cellPtrs := make([]byte, 0)
-	//
-	//	for _, ptr := range p.CellPointers {
-	//		cellPtrs = append(cellPtrs, ptr.toBytes()...)
-	//	}
-	//
-	//	cells := make([]byte, 0)
-	//	for _, c := range p.Cells {
-	//		cells = append(c.toBytes(), cells...)
-	//	}
-	//
-	//	// calculate free space upper offset
-	//	upperOff := PAGE_SIZE_BYTES - LOWER_PADDING_BYTES - len(cells)
-	//	lowerOff := HEADER_SIZE_BYTES + len(cellPtrs)
-	//
-	//	// update free space offsets
-	//	p.Header.updateLowerOffset(uint32(lowerOff))
-	//	p.Header.updateUpperOffset(uint32(upperOff))
-	//	// Update dirty header
-	//	p.Header.unsetFlag(5)
-	//
-	//	header := p.Header.toBytes()
-	//	fmt.Println("HEADER ===> ", header)
-	//
-	//	data = append(data, header...)
-	//	data = append(data, cellPtrs...)
-	//	data = append(data, append(make([]byte, (upperOff-lowerOff)), cells...)...)
-	//	data = append(data, make([]byte, LOWER_PADDING_BYTES)...)
-
 	// write page to disk
 	p.Header.mu.RLock()
 	offs := p.Header.PageId * PAGE_SIZE_BYTES
@@ -1008,7 +951,7 @@ func (p *Page) flushPage(b chan int32) {
 	}
 
 	// Unmark as dirty
-	p.Header.unsetFlag(5)
+	// p.Header.unsetFlag(5)
 	// set stored to disk flag
 	p.Header.setFlag(6)
 	fmt.Println("flushed page:=> ", p.Header.PageId)

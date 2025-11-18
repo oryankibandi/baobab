@@ -98,7 +98,7 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 	}
 
 	// increment count
-	go c.wTinyLfu.Increment(&item)
+	// go c.wTinyLfu.Increment(&item)
 
 	// if err != nil {
 	// 	panic(err.Error())
@@ -291,6 +291,10 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 
 		pge := <-ch
 
+		if pge == nil {
+			return nil, BufferManagerError{Message: "Page not found"}
+		}
+
 		//  add item  to cache
 		c.rmu.RUnlock()
 		f, err := c.Put(pageId, pge)
@@ -298,6 +302,7 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 		if err != nil {
 			return nil, errors.New("No item found")
 		}
+
 		fmt.Println("(Get) Frame not found, read from disk...")
 
 		// remove frame from LRU & Pin

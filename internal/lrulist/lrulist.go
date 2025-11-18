@@ -90,7 +90,7 @@ func (l *LruList[T]) Pop() *Frame {
 // Add item to the doubly linked list
 func (l *LruList[T]) Add(f *Frame) *Frame {
 	if f == nil {
-		panic("(Add) frame is nil")
+		panic("(Add) No Frame provided")
 	}
 
 	log.Println("ADDINT ITEM TO CACHE^^^^^^^>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
@@ -316,12 +316,20 @@ func (l *LruList[T]) RemoveFrame(f *Frame) error {
 
 	if l.Head == f {
 		// set new head
-		l.Head = f.Next
+		if l.Count <= 1 {
+			l.Head = nil
+		} else {
+			l.Head = f.Next
+		}
 	}
 
 	if l.Tail == f {
 		// set new tail
-		l.Tail = f.Prev
+		if l.Count <= 1 {
+			l.Tail = nil
+		} else {
+			l.Tail = f.Prev
+		}
 	}
 
 	if l.Count > 0 {
