@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/oryankibandi/baobab/pkg/bp_tree"
+	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
 type NodeData struct {
@@ -403,7 +404,9 @@ func main() {
 	defer trace.Stop()
 	start := time.Now()
 	// fmt.Println("Hello world")
-	btree, err := bp_tree.InitBTree[int32]()
+	wal := wal.NewWal()
+	fmt.Println("(main) => NEW WAL ==> ", wal)
+	btree, err := bp_tree.InitBTree[int32](wal)
 
 	if err != nil {
 		panic(err.Error())

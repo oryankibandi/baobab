@@ -1,5 +1,5 @@
 run:
-	@./bin/btree
+	@./bin/baobab
 build:
-	@go build -race -o bin/btree
+	@go build -race -o bin/baobab
 

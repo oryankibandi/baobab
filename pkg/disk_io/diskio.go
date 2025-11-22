@@ -209,83 +209,6 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 	fmt.Println("CELL POINTERS => ")
 	fmt.Println("RightPointer ==> ", rightPtr)
 
-	//pointers := make([]CellPointer, 0)
-	//cells := make([]Cell, 0)
-	// cellPointerData := make([]byte, 0)
-	// key := make([]byte, 0)
-	// val := make([]byte, 0)
-
-	// cell pointers
-	// var startOff int
-	// var endOff int
-	// var cellP CellPointer
-	// var cellFlag byte
-	// var keySize uint32
-	// var valSize uint32
-	// var kO int32
-	// var vO int32
-
-	// for i := range itemCount {
-	// 	startOff = HEADER_SIZE_BYTES + (int(i) * CELL_POINTER_SIZE_BYTE)
-	// 	endOff = startOff + CELL_POINTER_SIZE_BYTE
-	// 	cellPointerData = pageData[startOff:endOff]
-	// 	log.Println("CURR ITERATION: ", i)
-	// 	fmt.Println("CELL POINTER DATA ==> ", cellPointerData)
-	// 	cellOffset := int32(binary.LittleEndian.Uint32(cellPointerData[1:]))
-
-	// 	cellP = CellPointer{
-	// 		Flags:  []byte{cellPointerData[0]},
-	// 		offset: cellOffset,
-	// 	}
-
-	// 	log.Println("CELL OFFSET -> ", cellP)
-
-	// 	//log.Println("******** CELL DATA => ", pageData[cellOffset:(cellOffset+32)])
-	// 	log.Println("******** EXPECTED CELL DATA=> ", pageData[cellOffset:])
-	// 	// Get cell data
-	// 	cellFlag = pageData[cellOffset]
-	// 	keySize = binary.LittleEndian.Uint32(pageData[cellOffset+1 : cellOffset+1+CELL_KEY_SIZE_BYTES])
-	// 	valSize = binary.LittleEndian.Uint32(pageData[cellOffset+1+CELL_KEY_SIZE_BYTES : cellOffset+1+CELL_KEY_SIZE_BYTES+CELL_VAL_SIZE_BYTES])
-
-	// 	fmt.Println("Key Size: ", keySize)
-	// 	fmt.Println("Val Size:: ", valSize)
-
-	// 	var childPageId int32
-	// 	if isInternal {
-	// 		// Read child page ID
-	// 		childPageId = int32(binary.LittleEndian.Uint32(pageData[cellOffset+1+CELL_KEY_SIZE_BYTES+CELL_VAL_SIZE_BYTES : cellOffset+1+CELL_KEY_SIZE_BYTES+CELL_VAL_SIZE_BYTES+CELL_CHILD_PAGEID_SIZE]))
-	// 	}
-
-	// 	// Key and Value Offsets
-	// 	kO = cellOffset + 1 + CELL_KEY_SIZE_BYTES + CELL_VAL_SIZE_BYTES + CELL_CHILD_PAGEID_SIZE
-	// 	vO = kO + int32(keySize)
-
-	// 	// Read key and value
-	// 	key = pageData[kO : kO+int32(keySize)]
-	// 	log.Println("KEY DATA ===> ", key)
-	// 	//fmt.Println("KEY-=-=-==-=-=-=-=-=-=--=-=-=-> ", binary.LittleEndian.Uint32(key))
-	// 	fmt.Println("KEY-=-=-==-=-=-=-=-=-=--=-=-=-> ", key)
-
-	// 	val = pageData[vO : vO+int32(valSize)]
-	// 	fmt.Println("VAL-=-=-==-=-=-=-=-=-=--=-=-=-> ", string(val))
-
-	// 	// Create Cell
-	// 	c := Cell{
-	// 		Flags:     []byte{cellFlag},
-	// 		KeySize:   int32(keySize),
-	// 		ValueSize: int32(valSize),
-	// 		PageId:    childPageId,
-	// 		Key:       key,
-	// 		Value:     val,
-	// 	}
-
-	// 	cellP.CellRef = &c
-
-	// 	pointers = append(pointers, cellP)
-	// 	cells = append(cells, c)
-
-	// }
-
 	p := Page{
 		Header:  &h,
 		pgeData: [8192]byte(pageData),
@@ -1112,6 +1035,9 @@ func (h *PageHeader) unsetFlag(pos int) {
 
 // Check if flag is et
 func (h *PageHeader) IsSet(pos int) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	var mask byte
 	mask = 1 << byte(pos)
 

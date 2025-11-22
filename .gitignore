@@ -3,6 +3,9 @@ data
 data_lt
 data_fl
 
+# WAL file
+*.wal
+
 # binaries
 bin/
 

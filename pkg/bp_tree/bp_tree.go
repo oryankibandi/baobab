@@ -12,12 +12,14 @@ import (
 	bf "github.com/oryankibandi/baobab/pkg/buffer_manager"
 	"github.com/oryankibandi/baobab/pkg/disk_io"
 	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
 // TODO: Store root page ID instead of pointer to node
 type BTree struct {
 	Root *Node
 	mu   sync.RWMutex
+	wal  *wal.WAL
 }
 
 type Node struct {
@@ -29,6 +31,7 @@ type Node struct {
 	RightSibling int32        // right sibling in leaf node
 	Page         *diskio.Page // Associated on disk page
 	PageId       int32
+	lsn          []byte       // Current LSN of the page
 	mu           sync.RWMutex // Reader Writer Mutex
 }
 
@@ -71,14 +74,16 @@ const (
 
 var bTree *BTree
 
-func InitBTree[K cmp.Ordered]() (*BTree, error) {
+func InitBTree[K cmp.Ordered](w *wal.WAL) (*BTree, error) {
 	// Load Root Node from diskio
 	if diskio.DiskBTree == nil {
 		return nil, BTreeError{Message: "BTree not initialized."}
 	}
 
 	if diskio.DiskBTree.RootNode == nil {
-		bTree = &BTree{}
+		bTree = &BTree{
+			wal: w,
+		}
 		log.Println("No root node set.")
 		return bTree, nil
 	}
@@ -91,6 +96,7 @@ func InitBTree[K cmp.Ordered]() (*BTree, error) {
 
 	bTree = &BTree{
 		Root: node,
+		wal:  w,
 	}
 
 	return bTree, nil
@@ -274,7 +280,7 @@ func (n *Node) assignPage(isRoot bool) (*Node, error) {
 }
 
 // Inserts key and value to node. If is internal node, return page ID of child page. If leaf node insert and return
-func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack) (int32, error) {
+func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack, wal *wal.WAL) (int32, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	// If empty (new node), add the values
@@ -303,6 +309,15 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack)
 
 	// compare index
 	if n.Leaf {
+		// Create BLOG entry in wal
+		lsn, err := wal.AddPutLog(uint32(n.PageId), key, val)
+
+		if err != nil {
+			panic(err)
+		}
+
+		n.lsn = lsn
+
 		if bytes.Compare(key, kAtIdx) == -1 {
 			// insert at index `idx`
 
@@ -562,7 +577,7 @@ func (n *Node) rangeSearch(key []byte, nextNodeId *int32) ([]RangeItem, int32, e
 }
 
 // Deletes key and associated value from BTree. If n is an internal node, returns pageID of child to follow, -1 if error and 0 if delete was successful or key doesn't exist.
-func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata) (int32, error) {
+func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata, w *wal.WAL) (int32, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -586,6 +601,16 @@ func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata) (int32
 			// item not in leaf/btree
 			return -1, nil
 		}
+
+		// add operation to WAL
+		// Create BLOG entry in wal
+		lsn, err := w.AddDelLog(uint32(n.PageId), key)
+
+		if err != nil {
+			panic(err)
+		}
+
+		n.lsn = lsn
 
 		// delete Item
 		n.Keys = append(n.Keys[:idx], n.Keys[idx+1:]...)
@@ -1088,6 +1113,19 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 			// Assign page & persist
 			bTree.Root.assignPage(true)
+
+			fmt.Println("ROOT NODE ID: => ", bTree.Root.PageId)
+
+			// add entry to WAL
+			lsn, err := bTree.wal.AddPutLog(uint32(bTree.Root.PageId), keys[i], vals[i])
+
+			if err != nil {
+				panic(err)
+			}
+
+			bTree.Root.lsn = lsn
+
+			// sync
 			bTree.Root.Page.Sync(bTree.Root.Keys, bTree.Root.Values, bTree.Root.Children, uint32(bTree.Root.RightSibling), uint32(bTree.Root.LeftSibling))
 			bTree.mu.Unlock()
 
@@ -1143,7 +1181,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 				// insert
 				fmt.Printf("(%d)********INSERTING KEY: %v\nINSERTING VAL:%v\n", nodePageId, keys[i], vals[i])
-				nodePageId, err = node.insert(keys[i], vals[i], &insertRes, &st)
+				nodePageId, err = node.insert(keys[i], vals[i], &insertRes, &st, bTree.wal)
 				fmt.Println("INSERTED KEYS")
 
 				if err != nil {
@@ -1357,7 +1395,7 @@ func DeleteValue(keys [][]byte) (bool, error) {
 			// delete
 			fmt.Printf("(%d) DELETING KEY: %v\n", nodePageId, keys[i])
 
-			nodePageId, err = node.deleteValue(keys[i], &st, &mergeMetadata)
+			nodePageId, err = node.deleteValue(keys[i], &st, &mergeMetadata, bTree.wal)
 
 			fmt.Printf("NODEPAGEID: %d\n", nodePageId)
 
