@@ -89,3 +89,12 @@ func (bt *BTStack) Parent() (*TraversePath, error) {
 
 	return v, nil
 }
+
+func NewBTStack(root uint32) (*BTStack, error) {
+	st := BTStack{
+		root:  root,
+		stack: make(map[int]*TraversePath),
+	}
+
+	return &st, nil
+}

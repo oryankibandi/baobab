@@ -646,7 +646,7 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 			bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 			if err != nil {
-				panic(fmt.Errorf("Unable to Sync frame: ", err))
+				panic(fmt.Errorf("Unable to Sync frame: %v", err))
 			}
 
 			bt.mu.Unlock()
@@ -705,7 +705,7 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 
 		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 		if err != nil {
-			panic(fmt.Errorf("Unable to Sync frame: ", err))
+			panic(fmt.Errorf("Unable to Sync frame: %v", err))
 		}
 
 		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
@@ -713,7 +713,7 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
 		if err != nil {
-			panic(fmt.Errorf("Unable to Sync frame: ", err))
+			panic(fmt.Errorf("Unable to Sync frame: %v", err))
 		}
 
 		// mark mergeSibling frame as dirty
@@ -1260,7 +1260,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				err := bt.cache.ReleaseFrame(oldFrame)
 
 				if err != nil {
-					panic(fmt.Sprintf("Unable to  release frame: ", err))
+					panic(fmt.Sprintf("Unable to  release frame: %v", err))
 				}
 			}
 
@@ -1419,7 +1419,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					err = bt.cache.SyncFrame(rootFr, newRoot.Keys, newRoot.Values, newRoot.Children, uint32(newRoot.RightSibling), uint32(newRoot.LeftSibling))
 
 					if err != nil {
-						panic(fmt.Errorf("Unable to Sync root frame: ", err))
+						panic(fmt.Errorf("Unable to Sync root frame: %v", err))
 					}
 
 					// update new root in btree
@@ -1467,7 +1467,7 @@ func (bt *BTree) DeleteValue(keys [][]byte) (bool, error) {
 			// frame, err := bt.cache.Get(uint32(nodePageId))
 
 			if err != nil {
-				return false, fmt.Errorf("Unable to delete val: ", err)
+				return false, fmt.Errorf("Unable to delete val: %v", err)
 			}
 
 			if oldFrame != nil {
@@ -1803,7 +1803,7 @@ func (bt *BTree) Get(key []byte) ([]byte, error) {
 		err := bt.cache.ReleaseFrame(oldFrame)
 
 		if err != nil {
-			panic(fmt.Sprintf("Unable to  release frame: ", err))
+			panic(fmt.Sprintf("Unable to  release frame: %v", err))
 		}
 	}
 

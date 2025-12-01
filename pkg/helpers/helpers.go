@@ -53,7 +53,7 @@ func LookupBinarySearch[T cmp.Ordered](sortedList []T, searchKey T, startIdx int
 
 	if l == 1 {
 		fmt.Println("LAST ARR => ", sortedList)
-		e := fmt.Sprintf("Key %d does not exist", searchKey)
+		e := fmt.Sprintf("Key %v does not exist", searchKey)
 		return -1, HelperError{Message: e}
 	}
 
@@ -198,7 +198,7 @@ func Compact[T any](list []*T) []*T {
 
 func DeleteSliceKey[T cmp.Ordered](l *[]T, idx int) (*[]T, error) {
 	if len(*l) <= 0 {
-		return nil, HelperError{Message: fmt.Sprintf("(deleteSliceKey) Slice is empty\n", idx)}
+		return nil, HelperError{Message: fmt.Sprintf("(deleteSliceKey) Slice is empty: %v\n", idx)}
 	}
 
 	if idx < 0 || idx >= len(*l) {

@@ -454,7 +454,7 @@ func (c *Cache) CreateNewEntry(keys [][]byte, values *([][]byte), childPageIds *
 	if setAsRoot {
 		if pgeId == 0 {
 			// invalid page id
-			panic(fmt.Errorf("Invalid page id to set as root: ", pgeId))
+			panic(fmt.Errorf("Invalid page id to set as root: %v", pgeId))
 		}
 
 		// set  new page as root

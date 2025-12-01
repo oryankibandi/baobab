@@ -414,7 +414,7 @@ func main() {
 	cache, err := buffermanager.NewCache(10, 100)
 
 	if err != nil {
-		panic(fmt.Errorf("Could not initialize cache: ", err))
+		panic(fmt.Errorf("Could not initialize cache: %v", err))
 	}
 
 	fmt.Println("(main) => NEW WAL ==> ", wal)

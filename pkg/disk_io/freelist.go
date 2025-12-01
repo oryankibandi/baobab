@@ -74,7 +74,7 @@ func (fl *FreeList) FlushFreeList(c *chan int) {
 		err := fl.fd.Truncate(0)
 
 		if err != nil {
-			panic(fmt.Sprintf("Unable to truncate free list: ", err.Error()))
+			panic(fmt.Sprintf("Unable to truncate free list: %v", err))
 		}
 
 		log.Println("Cleared file")
@@ -115,7 +115,7 @@ func (fl *FreeList) FlushFreeList(c *chan int) {
 	err := fl.fd.Truncate(int64(numOfPages) * FREE_LIST_PAGE_SIZE)
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to truncate free list: ", err.Error()))
+		panic(fmt.Sprintf("Unable to truncate free list: %v", err))
 	}
 
 	fmt.Println("TRUNCATED SUCCESSFULLY...")
@@ -151,7 +151,7 @@ FreeLoop:
 		n, err := fl.fd.ReadAt(byteArr, int64(i*FREE_LIST_PAGE_SIZE))
 
 		if err != nil {
-			panic(fmt.Sprintf("Unable to read free list: ", err.Error()))
+			panic(fmt.Sprintf("Unable to read free list: %v", err))
 		}
 
 		fmt.Printf("(freelist) Read %d bytes\n", n)
@@ -180,7 +180,7 @@ func (fl *FreeList) close() {
 	err := fl.fd.Close()
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to close free list file descriptor: ", err))
+		panic(fmt.Sprintf("Unable to close free list file descriptor: %v", err))
 	}
 
 	fmt.Println("closed free list file descriptors.")
@@ -190,7 +190,7 @@ func NewFreeList() *FreeList {
 	fd, err := os.OpenFile("data_fl", os.O_CREATE|os.O_RDWR, 0644)
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to open free list file: ", err.Error()))
+		panic(fmt.Sprintf("Unable to open free list file: %v", err))
 	}
 
 	fl := &FreeList{

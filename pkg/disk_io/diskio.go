@@ -258,34 +258,34 @@ func (d *DiskManager) flushMetadata() {
 	_, err := wr.Write(rootPageId)
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
 	}
 
 	// Version
 	_, err = wr.Write([]byte{0, 0, 0, 0})
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadata: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
 	}
 	// tree height
 	_, err = wr.Write([]byte{0, 0, 0, 0})
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
 	}
 
 	// No or pages
 	_, err = wr.Write(pageCount)
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
 	}
 
 	// Max page Id
 	_, err = wr.Write(maxPageId)
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadat: ", err.Error()))
+		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
 	}
 
 	//	if d.RootNode != nil {
@@ -302,7 +302,7 @@ func (d *DiskManager) flushMetadata() {
 	err = wr.Flush()
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to flush metadata buffer: ", err.Error()))
+		panic(fmt.Sprintf("Unable to flush metadata buffer: %v", err))
 	}
 
 	if err = d.fd.Sync(); err != nil {

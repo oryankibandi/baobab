@@ -47,7 +47,7 @@ func (bw *BgWriter) Start() {
 			// err := f.PinFrame()
 
 			if err != nil {
-				panic(fmt.Sprintf("Unable to pin frame: ", err.Error()))
+				panic(fmt.Sprintf("Unable to pin frame: %v", err))
 			}
 
 			if d := fDirty.frame.IsDirty(); !d {
@@ -109,7 +109,7 @@ func (bw *BgWriter) Start() {
 			err = bw.cache.ReleaseFrame(fDirty.frame)
 
 			if err != nil {
-				panic(fmt.Sprintf("Unable to release frame: ", err.Error()))
+				panic(fmt.Sprintf("Unable to release frame: %v", err))
 			}
 
 			fDirty = bw.cache.diryList.popDirtyPage()

@@ -154,7 +154,7 @@ func NewWalWriter(path string) *WalWriter {
 	// open wal in append mode. Create if does not exist
 	fd, err := os.OpenFile(WAL_PATH, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		panic(fmt.Sprintf("Unable to open wal: ", err.Error()))
+		panic(fmt.Sprintf("Unable to open wal: %v", err))
 	}
 
 	jobQueue := WriteQueue{}
