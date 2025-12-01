@@ -6,7 +6,6 @@ import (
 	"time"
 
 	//	buffermanager "github.com/oryankibandi/baobab/pkg/buffer_manager"
-	"github.com/oryankibandi/baobab/internal/lrulist"
 	diskio "github.com/oryankibandi/baobab/pkg/disk_io"
 )
 
@@ -22,37 +21,28 @@ type BgWriter struct {
 	writtenBytes uint32
 	mu           sync.Mutex
 	wg           sync.WaitGroup
+	cache        *Cache
 }
 
 func (bw *BgWriter) Start() {
 	// Give time for other processes to initialize
-	time.Sleep(time.Second * 5)
+	time.Sleep(time.Second * 15)
 	go bw.watchFreeList()
-	dirtyList := make([]*lrulist.Frame, 0)
+
 	for {
-		BCache.rmu.RLock()
-		for _, f := range BCache.CacheMap {
-			dirty, err := f.PageIsDirty()
 
-			if err != nil {
-				panic(err.Error())
-			}
-
-			if dirty {
-				dirtyList = append(dirtyList, f)
-			}
-
+		if bw.cache.diryList.dPageLru.isEmpty() {
+			// no dirty page
+			fmt.Println("No dirty frame... ")
+			time.Sleep(time.Millisecond * BGWRITER_DELAY)
+			continue
 		}
 
-		BCache.rmu.RUnlock()
-
-		if len(dirtyList) > 0 {
-			fmt.Println("DIRTY LIST COUNT => ", len(dirtyList))
-		}
-		// check dirty list and flush dirty frames
-		for _, f := range dirtyList {
+		// check dirty list
+		fDirty := bw.cache.diryList.popDirtyPage()
+		for fDirty != nil {
 			// remove frame from LRU
-			err := BCache.RemoveItemFromLru(f)
+			err := bw.cache.RemoveItemFromLru(fDirty.frame)
 
 			// err := f.PinFrame()
 
@@ -60,10 +50,8 @@ func (bw *BgWriter) Start() {
 				panic(fmt.Sprintf("Unable to pin frame: ", err.Error()))
 			}
 
-			if d, err := f.PageIsDirty(); err != nil {
-				panic(err)
-			} else if !d {
-				err = BCache.ReleaseFrame(f)
+			if d := fDirty.frame.IsDirty(); !d {
+				err = bw.cache.ReleaseFrame(fDirty.frame)
 				if err != nil {
 					panic(err)
 				}
@@ -75,7 +63,7 @@ func (bw *BgWriter) Start() {
 			bw.mu.Unlock()
 
 			c := make(chan int32)
-			err = diskio.DiskBTree.WriteReq(f.Page, &c)
+			err = bw.cache.diskManager.WriteReq(fDirty.frame.page, &c)
 
 			if err != nil {
 				panic(err.Error())
@@ -87,12 +75,12 @@ func (bw *BgWriter) Start() {
 				fmt.Printf("(bgwriter) Written %d bytes.\n", n)
 
 				// Check if page is marked for deletion
-				if d, err := f.PageIsDead(); err == nil && d {
-					// release shared reader lock temporarily  to gain exclusive lock in BCache.Delete()
-					// BCache.rmu.RUnlock()
+				if d, err := fDirty.frame.PageIsDead(); err == nil && d {
+					// release shared reader lock temporarily  to gain exclusive lock in bw.cache.Delete()
+					// bw.cache.rmu.RUnlock()
 					// remove from buffer pool
-					BCache.Delete(uint32(f.Page.Header.PageId), false)
-					// BCache.rmu.RLock()
+					bw.cache.Delete(uint32(fDirty.frame.page.Header.PageId), false)
+					// bw.cache.rmu.RLock()
 				} else if err != nil {
 					panic(err)
 				}
@@ -114,16 +102,23 @@ func (bw *BgWriter) Start() {
 			}
 			bw.mu.Unlock()
 
-			err = BCache.ReleaseFrame(f)
+			// mark frame  as clean
+			fDirty.frame.markClean()
+
+			// unpin frame
+			err = bw.cache.ReleaseFrame(fDirty.frame)
 
 			if err != nil {
 				panic(fmt.Sprintf("Unable to release frame: ", err.Error()))
 			}
+
+			fDirty = bw.cache.diryList.popDirtyPage()
 		}
 
-		diskio.DiskBTree.ForceFlush()
+		// call Sync() to flush buffer contents to disk
+		bw.cache.flushWritten()
 
-		// BCache.rmu.RUnlock()
+		// bw.cache.rmu.RUnlock()
 		// bw.wg.Wait()
 
 		// DiskBTree.forceFlush()
@@ -148,15 +143,14 @@ func (bw *BgWriter) Start() {
 			bw.mu.Unlock()
 		}
 
-		dirtyList = make([]*lrulist.Frame, 0)
-
 		time.Sleep(time.Millisecond * BGWRITER_DELAY)
 	}
 }
 
 func (bw *BgWriter) watchFreeList() {
+	c := make(chan int)
+
 	for {
-		c := make(chan int)
 		go diskio.PgFreeList.FlushFreeList(&c)
 
 		// fmt.Println("Flushing free list....")
@@ -170,6 +164,8 @@ func (bw *BgWriter) watchFreeList() {
 	}
 }
 
-func NewBgWriter() *BgWriter {
-	return &BgWriter{}
+func NewBgWriter(cache *Cache) *BgWriter {
+	return &BgWriter{
+		cache: cache,
+	}
 }

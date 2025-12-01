@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/oryankibandi/baobab/pkg/bp_tree"
+	buffermanager "github.com/oryankibandi/baobab/pkg/buffer_manager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
@@ -144,7 +145,7 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 }
 
-func getKey() http.HandlerFunc {
+func getKey(tree *bp_tree.BTree) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
@@ -158,7 +159,7 @@ func getKey() http.HandlerFunc {
 			return
 		}
 
-		val, err := bp_tree.Get([]byte(key))
+		val, err := tree.Get([]byte(key))
 
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
@@ -171,7 +172,7 @@ func getKey() http.HandlerFunc {
 	}
 }
 
-func getRange() http.HandlerFunc {
+func getRange(tree *bp_tree.BTree) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
@@ -202,7 +203,7 @@ func getRange() http.HandlerFunc {
 
 		log.Printf("start: %s , end: %s , limit: %v\n", start, end, limit)
 
-		results, err := bp_tree.RangeSearch([]byte(start), []byte(end), int32(limit))
+		results, err := tree.RangeSearch([]byte(start), []byte(end), int32(limit))
 
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
@@ -226,7 +227,7 @@ func getRange() http.HandlerFunc {
 	}
 }
 
-func addKey() http.HandlerFunc {
+func addKey(tree *bp_tree.BTree) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
@@ -258,14 +259,14 @@ func addKey() http.HandlerFunc {
 		}
 
 		fmt.Printf("Key: %v\nVal: %v\n", payload.Key, payload.Val)
-		bp_tree.InsertValue([][]byte{[]byte(payload.Key)}, [][]byte{[]byte(payload.Val)})
+		tree.InsertValue([][]byte{[]byte(payload.Key)}, [][]byte{[]byte(payload.Val)})
 		writeJSON(w, http.StatusOK, payload)
 
 		return
 	}
 }
 
-func removeKey() http.HandlerFunc {
+func removeKey(tree *bp_tree.BTree) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
@@ -279,7 +280,7 @@ func removeKey() http.HandlerFunc {
 			return
 		}
 
-		del, err := bp_tree.DeleteValue([][]byte{[]byte(key)})
+		del, err := tree.DeleteValue([][]byte{[]byte(key)})
 
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
@@ -290,7 +291,7 @@ func removeKey() http.HandlerFunc {
 	}
 }
 
-func setKey() http.HandlerFunc {
+func setKey(tree *bp_tree.BTree) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, ErrResp{Error: "method not allowed"})
@@ -304,7 +305,7 @@ func setKey() http.HandlerFunc {
 			return
 		}
 
-		val, err := bp_tree.Get([]byte(key))
+		val, err := tree.Get([]byte(key))
 
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
@@ -340,19 +341,19 @@ func runProfiler() {
 }
 
 // runServer starts a basic HTTP server on port 8080
-func runServer() {
+func runServer(tree *bp_tree.BTree) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "Hello, world! Server is running on port 8080.")
 	})
 
-	mux.HandleFunc("/kv/", getKey())
+	mux.HandleFunc("/kv/", getKey(tree))
 
-	mux.HandleFunc("/kv", addKey())
+	mux.HandleFunc("/kv", addKey(tree))
 
-	mux.HandleFunc("/kv/range", getRange())
+	mux.HandleFunc("/kv/range", getRange(tree))
 
-	mux.HandleFunc("/kv/remove/", removeKey())
+	mux.HandleFunc("/kv/remove/", removeKey(tree))
 
 	srv := &http.Server{
 		Addr:              ":8080",
@@ -384,7 +385,7 @@ func runServer() {
 		_ = dumpStacks("goroutine-dump_4.txt")
 	}()
 
-	bp_tree.Shutdown()
+	tree.Shutdown()
 
 	fmt.Println("Gracefully shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -405,14 +406,25 @@ func main() {
 	start := time.Now()
 	// fmt.Println("Hello world")
 	wal := wal.NewWal()
+
+	if wal == nil {
+		panic(fmt.Errorf("Could not initialize WAL"))
+	}
+
+	cache, err := buffermanager.NewCache(10, 100)
+
+	if err != nil {
+		panic(fmt.Errorf("Could not initialize cache: ", err))
+	}
+
 	fmt.Println("(main) => NEW WAL ==> ", wal)
-	btree, err := bp_tree.InitBTree[int32](wal)
+	btree, err := bp_tree.Initialize[int32](wal, cache)
 
 	if err != nil {
 		panic(err.Error())
 	}
 
-	if btree.Root != nil {
+	if btree.Root != 0 {
 		log.Println("BTree Root => ", btree.Root)
 	}
 	duration := time.Since(start)
@@ -420,5 +432,5 @@ func main() {
 	fmt.Println("Done in ", duration)
 
 	go runProfiler()
-	runServer()
+	runServer(btree)
 }

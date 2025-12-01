@@ -9,15 +9,8 @@ import (
 	"log"
 	"sync"
 
-	lru "github.com/oryankibandi/baobab/internal/lrulist"
-	diskio "github.com/oryankibandi/baobab/pkg/disk_io"
+	diskmanager "github.com/oryankibandi/baobab/pkg/disk_io"
 )
-
-// const (
-// 	Window CacheType = iota
-// 	Probation
-// 	Protected
-// )
 
 // Ideally, window cache size ≈ 1%, main cache ≈ 99%
 const (
@@ -27,46 +20,45 @@ const (
 	MAIN_CACHE_RATIO  = 0.25
 )
 
-var BCache *Cache
+// var BCache *Cache
 
 // type CacheType int
 
 type Cache struct {
-	// windowCache    *lru.LruList[*lru.Frame]
-	// probationCache *lru.LruList[*lru.Frame]
-	// protectedCache *lru.LruList[*lru.Frame]
-	CacheMap map[uint32]*lru.Frame
-	// tinyFilter     *tiny.TinyLFU
-	wTinyLfu   *WTinyLfu
-	rmu        sync.RWMutex
-	frameCount uint32
-	freeFrames uint32
+	CacheMap    map[uint32]*Frame
+	wTinyLfu    *WTinyLfu
+	rmu         sync.RWMutex
+	frameCount  uint32
+	freeFrames  uint32
+	diryList    *dPages
+	diskManager *diskmanager.DiskManager
 }
 
-func init() {
-	var err error
-	BCache, err = NewCache(WINDOW_CACHE_SIZE, MAIN_CACHE_SIZE)
-
-	if err != nil {
-		panic(err)
-	}
-
-	log.Println("Initialized Buffer Pool: ", BCache)
-
-	bgWriter := NewBgWriter()
-
-	go bgWriter.Start()
-
-	log.Println("Initialized BgWriter ")
-}
-
-// 1. Add item to cache
-func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
+// Adds a page to cache, setting k as key. k is the unique page ID.
+func (c *Cache) put(k uint32, v *diskmanager.Page, dirty bool) (*Frame, error) {
 	c.rmu.Lock()
 	// formattedKey := toKey(k)
-	item := lru.Frame{
-		Page: v,
-		Key:  k,
+	// internal page
+	isInternal, err := v.IsInternal()
+
+	if err != nil {
+		return nil, err
+	}
+
+	item := Frame{
+		page:       v,
+		Key:        k,
+		IsInternal: isInternal,
+	}
+
+	if dirty {
+		err = c.MarkFrameDirty(&item)
+
+		if err != nil {
+			log.Panic(err)
+		}
+
+		// item.MarkDirty()
 	}
 
 	// log.Println("NEW FRAME PREV ====================> ", item.Prev)
@@ -78,12 +70,12 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 		// TODO: Check free frames first, if none evict first
 		// First time entry
 		log.Println("First Entry, adding to window cache----------------")
-		item.UpdateCacheType(lru.Window)
+		item.UpdateCacheType(Window)
 
 		c.CacheMap[k] = &item
 
 		// add to lru
-		err := c.wTinyLfu.AddItem(&item)
+		err := c.wTinyLfu.AddItem(c, &item)
 
 		if err != nil {
 			panic(err)
@@ -91,8 +83,8 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 	} else {
 		// update value
 		log.Println("Item Exists, incrementing count........")
-		log.Println("EXISTING FRAME PREV ====================> ", val.Prev)
-		log.Println("EXISTING FRAME NEXT ====================>", val.Next)
+		log.Println("EXISTING FRAME PREV ====================> ", val.prev)
+		log.Println("EXISTING FRAME NEXT ====================>", val.next)
 
 		val.UpdatePage(v)
 
@@ -112,7 +104,7 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 
 // Add new item to window cache
 //
-//	func (c *Cache) addToWindowCache(key uint32, item *lru.Frame) *lru.Frame {
+//	func (c *Cache) addToWindowCache(key uint32, item *Frame) *Frame {
 //		c.rmu.Lock()
 //		defer c.rmu.Unlock()
 //		// update LRU type
@@ -197,7 +189,7 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 //
 // promote item from probation
 //
-//	func (c *Cache) promoteItemFromProbation(candidate *lru.Frame) *lru.Frame {
+//	func (c *Cache) promoteItemFromProbation(candidate *Frame) *Frame {
 //		// c.rmu.Lock()
 //		// defer c.rmu.Unlock()
 //		log.Println("Promoting to protected: ", string(candidate.Key))
@@ -256,7 +248,7 @@ func (c *Cache) Put(k uint32, v *diskio.Page) (*lru.Frame, error) {
 //			return candidate
 //		}
 //	}
-func (c *Cache) RemoveItemFromLru(f *lru.Frame) error {
+func (c *Cache) RemoveItemFromLru(f *Frame) error {
 	err := c.wTinyLfu.handlePinFrame(f)
 
 	if err != nil {
@@ -267,7 +259,7 @@ func (c *Cache) RemoveItemFromLru(f *lru.Frame) error {
 }
 
 // 2. Retrieve item from cache
-func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
+func (c *Cache) Get(pageId uint32) (*Frame, error) {
 	fmt.Println("(Get) Obtaining lock for cache...")
 	c.rmu.RLock()
 	fmt.Println("(Get) Obtained lock for cache...")
@@ -282,8 +274,8 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 		return val, nil
 	} else {
 		// Retrieve item from disk
-		ch := make(chan *diskio.Page)
-		err := diskio.DiskBTree.ReadReq(uint32(pageId), &ch)
+		ch := make(chan *diskmanager.Page)
+		err := c.diskManager.ReadReq(uint32(pageId), &ch)
 
 		if err != nil {
 			return nil, err
@@ -297,7 +289,7 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 
 		//  add item  to cache
 		c.rmu.RUnlock()
-		f, err := c.Put(pageId, pge)
+		f, err := c.put(pageId, pge, false)
 
 		if err != nil {
 			return nil, errors.New("No item found")
@@ -318,7 +310,7 @@ func (c *Cache) Get(pageId uint32) (*lru.Frame, error) {
 
 // Releases a frame in use by unpinning and reinserting to LRU.
 // Called when a thread is done with a frame
-func (c *Cache) ReleaseFrame(f *lru.Frame) error {
+func (c *Cache) ReleaseFrame(f *Frame) error {
 	addToLru, err := f.UnpinFrame()
 
 	if err != nil {
@@ -337,7 +329,7 @@ func (c *Cache) ReleaseFrame(f *lru.Frame) error {
 
 // Releases a frame in use by unpinning and reinserting to LRU.
 // Called when a thread is done with a frame
-// func (c *Cache) ReleaseFrame(f *lru.Frame) error {
+// func (c *Cache) ReleaseFrame(f *Frame) error {
 // 	fmt.Println("(ReleaseFrame) Obtaining lock....")
 // 	c.rmu.Lock()
 // 	defer c.rmu.Unlock()
@@ -407,7 +399,7 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 	val, ok := c.CacheMap[key]
 
 	if !ok {
-		return errors.New("No key in cache")
+		return BufferManagerError{Message: "No key in cache"}
 	}
 
 	// fVal := val.(*lru.LRUNode[CacheItem[K]])
@@ -419,7 +411,11 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 	}
 
 	if flush {
-		val.PrepareForEviction()
+		err = c.prepareForEviction(val)
+
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	delete(c.CacheMap, key)
@@ -429,6 +425,126 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 	if c.frameCount > 0 {
 		c.frameCount++
 	}
+
+	return nil
+}
+
+func (c *Cache) GetRootPageId() uint32 {
+	return c.diskManager.CheckRootPageId()
+}
+
+// marks a frame as dirty and adds it to dirty list LRU
+func (c *Cache) MarkFrameDirty(f *Frame) error {
+	f.markDirty()
+	c.diryList.addDirtyFrame(f)
+
+	return nil
+}
+
+// Creates a new frame and assigns page ID to frame with provided keys and values/child
+// SetAsRoot parameter ensures to set
+func (c *Cache) CreateNewEntry(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Frame, error) {
+	// create page
+	pgeId, pge, err := c.diskManager.NewPage(keys, values, childPageIds, setAsRoot)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if setAsRoot {
+		if pgeId == 0 {
+			// invalid page id
+			panic(fmt.Errorf("Invalid page id to set as root: ", pgeId))
+		}
+
+		// set  new page as root
+		err = c.diskManager.SetAsRoot(pgeId)
+
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Add to buffer
+	log.Println("Adding new page to cache...")
+	f, err := c.put(uint32(pge.Header.PageId), pge, true)
+	log.Println("Added new page to cache...")
+
+	return f, nil
+}
+
+// Calls ForceFlush on disk manager
+func (c *Cache) flushWritten() {
+	c.diskManager.ForceFlush()
+}
+
+// Prepares page for eviction by flushing page to disk
+func (c *Cache) prepareForEviction(f *Frame) error {
+	log.Println("lru.PrepareForEviction()")
+	f.mu.Lock()
+	f.mu.Unlock()
+	ch := make(chan int32)
+	err := c.diskManager.WriteReq(f.page, &ch)
+
+	if err != nil {
+		panic(err.Error())
+	}
+
+	n := <-ch
+
+	log.Printf("(PrepareForEviction) Flushed %d page\n", n)
+
+	return nil
+}
+
+// sets the frame's page ID as the new root on the disk manager
+func (c *Cache) SetNewRoot(f *Frame) error {
+	pId := f.GetKey()
+
+	err := c.diskManager.SetAsRoot(int32(pId))
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Syncs contents to the frame's associated page.
+// Called when the materialized node has been updated
+// through DELETEs, PUTs, Merges or Splits
+func (c *Cache) SyncFrame(f *Frame, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
+	f.mu.Lock()
+	if f.page == nil {
+		f.mu.Unlock()
+		return BufferManagerError{Message: "No page associated with frame"}
+	}
+
+	err := f.page.Sync(keys, vals, pageIds, rightSibling, leftSibling)
+	fmt.Println("DONE SYNCING...")
+
+	if err != nil {
+		f.mu.Unlock()
+		return err
+	}
+	f.mu.Unlock()
+
+	// mark frame as dirty
+	// f.MarkDirty()
+	fmt.Println("MARKING FRAMS AS DIRTY...")
+	err = c.MarkFrameDirty(f)
+	fmt.Println("MARKED FRAME AS DIRTY...")
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Safely close down cache
+func (c *Cache) Close() error {
+	c.diskManager.Close()
 
 	return nil
 }
@@ -449,10 +565,19 @@ func NewCache(windowSize uint64, mainCacheSize uint64) (*Cache, error) {
 		panic(err)
 	}
 
+	dList := NewDirtyPageList()
+
 	n := Cache{
-		CacheMap: make(map[uint32]*lru.Frame),
-		wTinyLfu: w,
+		CacheMap:    make(map[uint32]*Frame),
+		wTinyLfu:    w,
+		diryList:    dList,
+		diskManager: diskmanager.NewDiskManager(),
 	}
+
+	// create new background writer
+	bg := NewBgWriter(&n)
+
+	go bg.Start()
 
 	return &n, nil
 }
@@ -464,13 +589,3 @@ func toBytes(key uint32) []byte {
 
 	return b
 }
-
-// Converts p to fixed size []byte
-//func toKey(p []byte) KeyType {
-//	n := make([]byte, 16)
-//
-//	n = append(append(n[:0], p...), n[len(p):]...)
-//	//	fmt.Println("APPENDED => ", n)
-//
-//	return KeyType(n)
-//}

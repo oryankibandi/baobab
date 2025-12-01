@@ -8,31 +8,30 @@ import (
 	"log"
 	"sync"
 
-	"github.com/oryankibandi/baobab/internal/lrulist"
 	bf "github.com/oryankibandi/baobab/pkg/buffer_manager"
-	"github.com/oryankibandi/baobab/pkg/disk_io"
 	"github.com/oryankibandi/baobab/pkg/helpers"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
 // TODO: Store root page ID instead of pointer to node
 type BTree struct {
-	Root *Node
-	mu   sync.RWMutex
-	wal  *wal.WAL
+	Root  uint32 // Root Page ID
+	mu    sync.RWMutex
+	wal   *wal.WAL
+	cache *bf.Cache
 }
 
 type Node struct {
-	Keys         [][]byte     // Keys in the Node
-	Children     []int32      // Internal Node children
-	Leaf         bool         // Whether Node is leaf
-	Values       [][]byte     // Values in leaf node
-	LeftSibling  int32        // Left sibling in leaf node
-	RightSibling int32        // right sibling in leaf node
-	Page         *diskio.Page // Associated on disk page
-	PageId       int32
-	lsn          []byte       // Current LSN of the page
-	mu           sync.RWMutex // Reader Writer Mutex
+	Keys         [][]byte // Keys in the Node
+	Children     []int32  // Internal Node children
+	Leaf         bool     // Whether Node is leaf
+	Values       [][]byte // Values in leaf node
+	LeftSibling  int32    // Left sibling in leaf node
+	RightSibling int32    // right sibling in leaf node
+	// Page         *diskio.Page // Associated on disk page
+	PageId int32
+	lsn    []byte       // Current LSN of the page
+	mu     sync.RWMutex // Reader Writer Mutex
 }
 
 type NodeOpResponse struct {
@@ -70,125 +69,31 @@ type RangeItem struct {
 
 const (
 	DEGREE = 2
+	ORDER  = DEGREE * 2
 )
 
-var bTree *BTree
+// var bTree *BTree
 
-func InitBTree[K cmp.Ordered](w *wal.WAL) (*BTree, error) {
-	// Load Root Node from diskio
-	if diskio.DiskBTree == nil {
-		return nil, BTreeError{Message: "BTree not initialized."}
+// Initialize a new instance if B+ Tree index
+func Initialize[K cmp.Ordered](w *wal.WAL, c *bf.Cache) (*BTree, error) {
+
+	if w == nil {
+		panic("WAL is required")
 	}
 
-	if diskio.DiskBTree.RootNode == nil {
-		bTree = &BTree{
-			wal: w,
-		}
-		log.Println("No root node set.")
-		return bTree, nil
+	if c == nil {
+		panic("Cache is required")
 	}
 
-	node, err := loadNode(diskio.DiskBTree.RootNode)
+	rootPageId := c.GetRootPageId()
 
-	if err != nil {
-		return nil, err
-	}
-
-	bTree = &BTree{
-		Root: node,
-		wal:  w,
+	bTree := &BTree{
+		Root:  rootPageId,
+		wal:   w,
+		cache: c,
 	}
 
 	return bTree, nil
-}
-
-// Create new node - does not include associated page
-func createNode(separatorKeys [][]byte, isLeaf bool, isRoot bool) (*Node, error) {
-	if !isLeaf && (len(separatorKeys) < diskio.DEGREE-1 && len(separatorKeys) > diskio.ORDER-1) {
-		msg := fmt.Sprintf("Keys must be between %d to %d", diskio.DEGREE-1, diskio.ORDER-1)
-		return nil, BTreeError{Message: msg}
-	}
-
-	if isLeaf && (len(separatorKeys) < diskio.DEGREE && len(separatorKeys) > diskio.ORDER) {
-		msg := fmt.Sprintf("Keys must be from %d to %d", diskio.DEGREE, diskio.ORDER)
-		return nil, BTreeError{Message: msg}
-	}
-
-	var newNode Node
-
-	if isLeaf {
-		newNode = Node{
-			Keys:   separatorKeys,
-			Leaf:   isLeaf,
-			Values: make([][]byte, (2 * DEGREE)), // Empty list
-		}
-	} else {
-		newNode = Node{
-			Keys:     separatorKeys,
-			Children: make([]int32, 0),
-			Leaf:     isLeaf,
-		}
-	}
-
-	return &newNode, nil
-}
-
-// Load node from existing page
-func loadNode(page *diskio.Page) (*Node, error) {
-	if page == nil {
-		return nil, BTreeError{Message: "Page not provided"}
-	}
-
-	page.Rmu.RLock()
-	defer page.Rmu.RUnlock()
-
-	//	k := make([][]byte, 0) // keys
-	//	v := make([][]byte, 0) // values
-	//	children := make([]int32, 0)
-
-	k, v, children, err := page.GetCellData()
-
-	if err != nil {
-		return nil, err
-	}
-
-	internalNode, err := page.IsInternal()
-
-	if err != nil {
-		panic(err.Error())
-	}
-
-	var n Node
-
-	if internalNode {
-		rightPtr := page.Header.RightChild
-
-		if rightPtr != 0 {
-			children = append(children, rightPtr)
-		}
-
-		n = Node{
-			Keys:         k,
-			Children:     children,
-			Leaf:         !internalNode,
-			Page:         page,
-			PageId:       page.Header.PageId,
-			RightSibling: page.Header.RightSibling,
-			LeftSibling:  page.Header.LeftSibling,
-		}
-	} else {
-		n = Node{
-			Keys:         k,
-			Values:       v,
-			Leaf:         !internalNode,
-			Page:         page,
-			RightSibling: page.Header.RightSibling,
-			LeftSibling:  page.Header.LeftSibling,
-			PageId:       page.Header.PageId,
-		}
-	}
-
-	return &n, nil
 }
 
 // Splits the given node and returns the new created node, promoted key if `n` is an internal node and error
@@ -239,57 +144,48 @@ func (n *Node) split() (*Node, []byte, error) {
 	}
 }
 
-// Assign a page to node
-func (n *Node) assignPage(isRoot bool) (*Node, error) {
+// Creates a frame for a new node
+func (n *Node) assignFrame(isRoot bool, cache *bf.Cache) (*bf.Frame, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.Page != nil {
-		log.Println("(assignPage) Page already exists")
-		return n, nil
-	}
 
 	if n.Leaf {
-		pge, err := diskio.New(n.Keys, &n.Values, nil, isRoot)
+		fr, err := cache.CreateNewEntry(n.Keys, &n.Values, nil, isRoot)
 
 		if err != nil {
 			return nil, err
 		}
 
-		n.Page = pge
+		// set pageId on node
+		n.PageId = int32(fr.GetKey())
+
+		return fr, nil
 	} else {
-		pge, err := diskio.New(n.Keys, nil, &n.Children, isRoot)
+		fr, err := cache.CreateNewEntry(n.Keys, nil, &n.Children, isRoot)
 
 		if err != nil {
 			return nil, err
 		}
 
-		n.Page = pge
+		// set pageId on node
+		n.PageId = int32(fr.GetKey())
 
+		return fr, nil
 	}
-
-	// new page not flushed or added to cache yet, unlikely to be accessed concurrently
-	n.PageId = n.Page.Header.PageId
-	_, err := bf.BCache.Put(uint32(n.PageId), n.Page)
-	// diskio.BPool.AddPageToCache(uint32(n.Page.Header.PageId), n.Page)
-
-	if err != nil {
-		panic(fmt.Sprintf("Unable to add item to buffer pool: ", err.Error()))
-	}
-
-	return n, nil
 }
 
 // Inserts key and value to node. If is internal node, return page ID of child page. If leaf node insert and return
-func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack, wal *wal.WAL) (int32, error) {
+func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *SplitResponse, stack *BTStack) (uint32, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	// If empty (new node), add the values
+
+	// If empty (new node), add keys and values then sync
 	if len(n.Keys) <= 0 && len(n.Values) <= 0 {
 		n.Keys = append(n.Keys, key)
 		n.Values = append(n.Values, val)
 
 		// Sync to page
-		err := n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		err := bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 		fmt.Println("/////// KEYS AFTER INSERT => ", n.Keys)
 
 		if err != nil {
@@ -310,7 +206,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack,
 	// compare index
 	if n.Leaf {
 		// Create BLOG entry in wal
-		lsn, err := wal.AddPutLog(uint32(n.PageId), key, val)
+		lsn, err := bt.wal.AddPutLog(uint32(n.PageId), key, val)
 
 		if err != nil {
 			panic(err)
@@ -344,7 +240,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack,
 		}
 
 		// Check overflow
-		if len(n.Keys) > diskio.ORDER {
+		if len(n.Keys) > ORDER {
 			log.Println("(insert) OVERFLOW DETECTED...")
 			newRightNode, _, err := n.split()
 			// fmt.Println("AFTER SPLIT-------->")
@@ -361,7 +257,11 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack,
 			// n.postSplitCleanup(idx)
 
 			// create  page for right node
-			newRightNode.assignPage(false)
+			newRightFr, err := newRightNode.assignFrame(false, bt.cache)
+
+			if err != nil {
+				panic(err)
+			}
 			// fmt.Println("AFTER ASSIGN PAGE-------->")
 			// fmt.Println("KEYS ----> ", newRightNode.Keys)
 			// fmt.Println("VALS ----> ", newRightNode.Values)
@@ -373,12 +273,13 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack,
 
 			// update sibling links
 			var oldRightSibling *Node
+			var oldRightFr *bf.Frame
 			newRightNode.LeftSibling = n.PageId
 			newRightNode.RightSibling = n.RightSibling
 
 			if n.RightSibling > 0 {
 				// load node update sibling link
-				oldRightSibling, err = buildPage(uint32(n.RightSibling))
+				oldRightFr, oldRightSibling, err = bt.buildPage(uint32(n.RightSibling))
 
 				if err != nil {
 					return 0, err
@@ -389,43 +290,46 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack,
 			}
 
 			n.RightSibling = newRightNode.PageId
-			// fmt.Println("JUST AFTER UPDATING SIBLINGS PAGE-------->")
-			// fmt.Println("KEYS ----> ", newRightNode.Keys)
-			// fmt.Println("VALS ----> ", newRightNode.Values)
 
-			//			r := SplitResponse{
-			//				PromotedSeparatorKey: newRightNode.Keys[0],
-			//				NewNodeId:            uint32(newRightNode.Page.Header.PageId),
-			//			}
-			//
 			rp.PromotedSeparatorKey = append([]byte(nil), newRightNode.Keys[0]...)
 			// copy(rp.PromotedSeparatorKey, newRightNode.Keys[0])
 			rp.NewNodeId = uint32(newRightNode.PageId)
 
-			// fmt.Println("JUST AFTER UPDATING SEPARATOR KEYS-------->")
-			// fmt.Println("KEYS ----> ", newRightNode.Keys)
-			// fmt.Println("VALS ----> ", newRightNode.Values)
-
-			// fmt.Println("SEPARATOR KEY TO PROMOTE -----> ", rp.PromotedSeparatorKey)
-			// fmt.Println("EXPECTED SEPARATOE KEY TO PROMOTE -------> ", newRightNode.Keys[0])
-
+			fmt.Println("NEW  NODE ID: ", rp.NewNodeId)
+			fmt.Println("PROMOTED SEPRATOR KEY -> ", rp.PromotedSeparatorKey)
 			fmt.Println("+---------------------SPLIT DONE ---------------------+")
-			//
-			// sync btreee node to page
 
-			// fmt.Println("JUST BEFORE SYNC -------->")
-			// fmt.Println("KEYS ----> ", newRightNode.Keys)
-			// fmt.Println("VALS ----> ", newRightNode.Values)
-			newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
-			// fmt.Println("JUST AFTER SYNC -------->")
-			// fmt.Println("KEYS ----> ", newRightNode.Keys)
-			// fmt.Println("VALS ----> ", newRightNode.Values)
+			// newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
 
-			n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+			err = bt.cache.SyncFrame(newRightFr, newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
+
+			if err != nil {
+				panic(err)
+			}
+
+			// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+			err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+			if err != nil {
+				panic(err)
+			}
 
 			if oldRightSibling != nil {
 				fmt.Println("SYNCING OLD RIGHT SIBLING...")
-				oldRightSibling.Page.Sync(oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+				// oldRightSibling.Page.Sync(oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+
+				err := bt.cache.SyncFrame(oldRightFr, oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+
+				if err != nil {
+					panic(err)
+				}
+				// oldRightFr.MarkDirty()
+				err = bt.cache.MarkFrameDirty(oldRightFr)
+
+				if err != nil {
+					log.Panic(err)
+				}
 
 				oldRightSibling.mu.Unlock()
 			}
@@ -433,7 +337,13 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack,
 			return 0, nil
 		}
 
-		err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		// err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+		bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+		if err != nil {
+			panic(err)
+		}
 
 		fmt.Println("/////// KEYS AFTER INSERT => ", n.Keys)
 
@@ -453,7 +363,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack,
 			stack.Add(&tn)
 
 			// return page ID of child to follow
-			return n.Children[idx], nil
+			return uint32(n.Children[idx]), nil
 		} else {
 			// Add to BTStack
 			tn := TraversePath{
@@ -462,7 +372,7 @@ func (n *Node) insert(key []byte, val []byte, rp *SplitResponse, stack *BTStack,
 			}
 			stack.Add(&tn)
 
-			return n.Children[idx+1], nil
+			return uint32(n.Children[idx+1]), nil
 		}
 	}
 }
@@ -577,7 +487,7 @@ func (n *Node) rangeSearch(key []byte, nextNodeId *int32) ([]RangeItem, int32, e
 }
 
 // Deletes key and associated value from BTree. If n is an internal node, returns pageID of child to follow, -1 if error and 0 if delete was successful or key doesn't exist.
-func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata, w *wal.WAL) (int32, error) {
+func (bt *BTree) deleteValue(n *Node, f *bf.Frame, key []byte, stack *BTStack, mr *MergeMetadata) (int32, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -602,9 +512,8 @@ func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata, w *wal
 			return -1, nil
 		}
 
-		// add operation to WAL
 		// Create BLOG entry in wal
-		lsn, err := w.AddDelLog(uint32(n.PageId), key)
+		lsn, err := bt.wal.AddDelLog(uint32(n.PageId), key)
 
 		if err != nil {
 			panic(err)
@@ -620,7 +529,7 @@ func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata, w *wal
 		if len(n.Keys) < DEGREE {
 			fmt.Println("UNDERFLOW DETECTED------------------>")
 			// merge
-			err = n.handleLeafUnderflow(mr)
+			err = bt.handleLeafUnderflow(mr, n, f)
 
 			if err != nil {
 				return -1, nil
@@ -640,7 +549,8 @@ func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata, w *wal
 		}
 
 		// sync
-		err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		// err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		err = bt.cache.SyncFrame(f, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 		if err != nil {
 			return -1, err
@@ -676,19 +586,20 @@ func (n *Node) deleteValue(key []byte, stack *BTStack, mr *MergeMetadata, w *wal
 }
 
 // Redistributes keys or merges underflowed node with sibling node
-func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
+func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) error {
 	if !n.Leaf {
 		return BTreeError{Message: "(handleLeafUnderflow) Tried to merge internal node"}
 	}
 
 	var mergeSibling *Node
+	var mergeFr *bf.Frame
 	var rightMerge bool
 	var err error
 
 	// determing sibling to merge with, default to right sibling
 	if n.RightSibling > 0 {
 		fmt.Println("RIGHT MERGE")
-		mergeSibling, err = buildPage(uint32(n.RightSibling))
+		mergeFr, mergeSibling, err = bt.buildPage(uint32(n.RightSibling))
 
 		if err != nil {
 			return err
@@ -697,7 +608,7 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 		rightMerge = true
 	} else if n.LeftSibling > 0 {
 		fmt.Println("LEFT MERGE")
-		mergeSibling, err = buildPage(uint32(n.LeftSibling))
+		mergeFr, mergeSibling, err = bt.buildPage(uint32(n.LeftSibling))
 
 		if err != nil {
 			return err
@@ -706,14 +617,15 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 		rightMerge = false
 	} else {
 		fmt.Println("NO SIBLINGS....")
-		bTree.mu.Lock()
-		if bTree.Root.Page.Header.PageId == n.Page.Header.PageId {
+		bt.mu.Lock()
+		if bt.Root == uint32(n.PageId) {
 			fmt.Println("IS ROOT NODE....")
 			// Node is root, underflow Invariant allowed
 			if len(n.Keys) <= 0 {
 				// root node is empty, delete page
 				fmt.Println("MARKING PAGE AS DEAD...")
-				err = n.Page.MarkAsDead()
+				// err = n.Page.MarkAsDead()
+				err = fr.MarkAsDead()
 
 				if err != nil {
 					return err
@@ -721,33 +633,35 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 
 				// clear
 				fmt.Println("RESETTING ROOT NODE ==> ")
-				bTree.Root.PageId = 0
-				bTree.Root.Page = nil
-				bTree.Root = nil
+				bt.Root = 0
+				// bt.Root.Page = nil
+				// bt.Root = nil
 			}
 
 			mr.merged = false
 			mr.rebalanceKey = make([]byte, 0)
 
-			err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+			// err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+			bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 			if err != nil {
-				return err
+				panic(fmt.Errorf("Unable to Sync frame: ", err))
 			}
 
-			bTree.mu.Unlock()
+			bt.mu.Unlock()
 			return nil
 		} else {
 			fmt.Println("NOT ROOT NODE...")
 		}
-		bTree.mu.Unlock()
+		bt.mu.Unlock()
 
 		// TODO: If not root, collapse into parent
 		return BTreeError{Message: "No sibling to merge/borrow leaf node"}
 	}
 
 	mergeSibling.mu.Lock()
-	if len(n.Keys)+len(mergeSibling.Keys) >= diskio.ORDER {
+	if len(n.Keys)+len(mergeSibling.Keys) >= ORDER {
 		// redistribute/borrow keys
 		fmt.Println("(leafnode underflow) REDISTRIBUTING...")
 		totKeys := make([][]byte, 0)
@@ -787,8 +701,28 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 		totKeys = nil
 		totVals = nil
 
-		n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-		mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+		// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		if err != nil {
+			panic(fmt.Errorf("Unable to Sync frame: ", err))
+		}
+
+		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+		if err != nil {
+			panic(fmt.Errorf("Unable to Sync frame: ", err))
+		}
+
+		// mark mergeSibling frame as dirty
+		err = bt.cache.MarkFrameDirty(mergeFr)
+
+		if err != nil {
+			log.Panic(err)
+		}
+		// mergeFr.MarkDirty()
 
 		mergeSibling.mu.Unlock()
 	} else {
@@ -802,14 +736,7 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 			if n.LeftSibling > 0 {
 				// get left sibling
 				fmt.Println("UPDATING LEFT SIBLING POINTERS...")
-				frame, err := bf.BCache.Get(uint32(n.LeftSibling))
-
-				if err != nil {
-					return err
-				}
-
-				leftSib, err := loadNode(frame.Page)
-
+				frame, leftSib, err := bt.buildPage(uint32(n.LeftSibling))
 				if err != nil {
 					return err
 				}
@@ -819,8 +746,21 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 				mergeSibling.LeftSibling = n.LeftSibling
 				leftSib.mu.Unlock()
 
-				leftSib.Page.Sync(leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
-				bf.BCache.ReleaseFrame(frame)
+				// leftSib.Page.Sync(leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
+				err = bt.cache.SyncFrame(frame, leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
+
+				if err != nil {
+					panic(err)
+				}
+
+				// frame.MarkDirty()
+				err = bt.cache.MarkFrameDirty(frame)
+
+				if err != nil {
+					log.Panic(err)
+				}
+
+				bt.cache.ReleaseFrame(frame)
 			}
 		} else {
 			fmt.Println("LEFT MERGE...")
@@ -831,15 +771,7 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 			if n.RightSibling > 0 {
 				fmt.Println("UPDATING RIGHT SIBLING POINTERS...")
 				// get left sibling
-				frame, err := bf.BCache.Get(uint32(n.RightSibling))
-
-				if err != nil {
-					return err
-				}
-
-				// defer bf.BCache.ReleaseFrame(frame)
-
-				rightSib, err := loadNode(frame.Page)
+				frame, rightSib, err := bt.buildPage(uint32(n.RightSibling))
 
 				if err != nil {
 					return err
@@ -850,9 +782,21 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 				mergeSibling.RightSibling = n.RightSibling
 				rightSib.mu.Unlock()
 
-				rightSib.Page.Sync(rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
+				// rightSib.Page.Sync(rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
+				err = bt.cache.SyncFrame(frame, rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
 
-				bf.BCache.ReleaseFrame(frame)
+				if err != nil {
+					panic(err)
+				}
+
+				// frame.MarkDirty()
+				err = bt.cache.MarkFrameDirty(frame)
+
+				if err != nil {
+					log.Panic(err)
+				}
+
+				bt.cache.ReleaseFrame(frame)
 			}
 		}
 
@@ -861,15 +805,35 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 
 		// mark node as deleted
 		fmt.Println("MARKING LEAF PAGE AS DEAD...")
-		err = n.Page.MarkAsDead()
+		// err = n.Page.MarkAsDead()
+		err = fr.MarkAsDead()
 
 		if err != nil {
 			return err
 		}
 
 		// Sync to page
-		n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-		mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+		// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+		if err != nil {
+			panic(err)
+		}
+
+		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+		if err != nil {
+			panic(err)
+		}
+
+		// mergeFr.MarkDirty()
+		err = bt.cache.MarkFrameDirty(mergeFr)
+
+		if err != nil {
+			log.Panic(err)
+		}
 		mergeSibling.mu.Unlock()
 	}
 
@@ -879,20 +843,21 @@ func (n *Node) handleLeafUnderflow(mr *MergeMetadata) error {
 }
 
 // Handle underflow of an internal node's children - merges or rebalances
-func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error {
+func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadata, stack *BTStack) error {
 	if n.Leaf {
 		return BTreeError{Message: "Tried to merge leaf node"}
 	}
 
 	var mergeSibling *Node
+	var mergeFr *bf.Frame
 	var err error
 	var rightMerge bool
 
 	path, err := stack.Parent()
 
 	if err != nil || path == nil || (path != nil && path.n == nil) {
-		if bTree.Root.Page.Header.PageId != n.Page.Header.PageId {
-			// none root without parent
+		if stack.root != uint32(n.PageId) {
+			// non-root node without parent
 			return err
 		}
 
@@ -902,7 +867,7 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 
 	// determing sibling to merge with, default to right sibling
 	if n.RightSibling > 0 {
-		mergeSibling, err = buildPage(uint32(n.RightSibling))
+		mergeFr, mergeSibling, err = bt.buildPage(uint32(n.RightSibling))
 
 		if err != nil {
 			return err
@@ -910,7 +875,7 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 
 		rightMerge = true
 	} else if n.LeftSibling > 0 {
-		mergeSibling, err = buildPage(uint32(n.LeftSibling))
+		mergeFr, mergeSibling, err = bt.buildPage(uint32(n.LeftSibling))
 
 		if err != nil {
 			return err
@@ -919,8 +884,8 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 		rightMerge = false
 	} else {
 
-		bTree.mu.Lock()
-		if bTree.Root.Page.Header.PageId == n.Page.Header.PageId {
+		bt.mu.Lock()
+		if stack.root == uint32(n.PageId) {
 			// Node is root, underflow Invariant allowed
 			mr.merged = false
 			mr.rebalanceKey = make([]byte, 0)
@@ -932,32 +897,35 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 		fmt.Println("NO SIBLINGS FOUND ===> ")
 		fmt.Println("RIGHT SIBLING ==> ", n.RightSibling)
 		fmt.Println("LEFT SIBLING ====> ", n.LeftSibling)
-		fmt.Println("OLD ROOT ID => ", bTree.Root.Page.Header.PageId)
-		fmt.Println("OLD ROOT KEYS => ", bTree.Root.Keys)
-		fmt.Println("OLD ROOT VALUES => ", bTree.Root.Values)
-		fmt.Println("OLD ROOT CHILDREN => ", bTree.Root.Children)
-		fmt.Println("NEW ROOT ID => ", n.Page.Header.PageId)
-		oldRoot := bTree.Root
-		err := oldRoot.Page.MarkAsDead()
+		fmt.Println("OLD ROOT ID => ", bt.Root)
+
+		// oldRoot := stack.root
+		rootfr, rootNode, err := bt.buildPage(stack.root)
+
+		if err != nil {
+			return err
+		}
+
+		err = rootfr.MarkAsDead()
 
 		if err != nil {
 			return err
 		}
 
 		// Set new root
-		err = n.Page.SetAsRoot()
-		bTree.Root = n
-		fmt.Println("NEW SET ROOT ID => ", bTree.Root.Page.Header.PageId)
-		fmt.Println("NEW ROOT KEYS => ", bTree.Root.Keys)
-		fmt.Println("NEW ROOT VALUES => ", bTree.Root.Values)
-		fmt.Println("NEW ROOT CHILDREN => ", bTree.Root.Children)
-		bTree.mu.Unlock()
+		bt.cache.SetNewRoot(fr)
+		// err = n.Page.SetAsRoot()
+		bt.Root = fr.Key
+		fmt.Println("NEW SET ROOT ID => ", bt.Root)
+		bt.mu.Unlock()
 
 		if err != nil {
 			return err
 		}
 
-		err = oldRoot.Page.Sync(oldRoot.Keys, oldRoot.Values, oldRoot.Children, uint32(oldRoot.RightSibling), uint32(oldRoot.LeftSibling))
+		// err = oldRoot.Page.Sync(oldRoot.Keys, oldRoot.Values, oldRoot.Children, uint32(oldRoot.RightSibling), uint32(oldRoot.LeftSibling))
+
+		err = bt.cache.SyncFrame(rootfr, rootNode.Keys, rootNode.Values, rootNode.Children, uint32(rootNode.RightSibling), uint32(rootNode.LeftSibling))
 
 		if err != nil {
 			return err
@@ -971,7 +939,7 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 
 	mergeSibling.mu.Lock()
 
-	if len(n.Children)+len(mergeSibling.Children) >= diskio.ORDER+1 {
+	if len(n.Children)+len(mergeSibling.Children) >= ORDER+1 {
 		// SUM(A+B) >= N+1, borrow/redistribute
 		totKeys := make([][]byte, 0)
 		totChildren := make([]int32, 0)
@@ -1007,8 +975,27 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 		totKeys = nil
 		totChildren = nil
 
-		n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-		mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+		// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+		if err != nil {
+			return err
+		}
+
+		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+		if err != nil {
+			return err
+		}
+		// update fr
+		err = bt.cache.MarkFrameDirty(mergeFr)
+
+		if err != nil {
+			log.Panic(err)
+		}
+		// mergeFr.MarkDirty()
 
 	} else {
 		// merge
@@ -1019,7 +1006,7 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 
 			// update links
 			if n.LeftSibling > 0 {
-				leftSib, err := buildPage(uint32(n.LeftSibling))
+				leftSibFr, leftSib, err := bt.buildPage(uint32(n.LeftSibling))
 
 				if err != nil {
 					return err
@@ -1029,7 +1016,19 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 				leftSib.RightSibling = n.RightSibling
 				mergeSibling.LeftSibling = n.LeftSibling
 
-				leftSib.Page.Sync(leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
+				// leftSib.Page.Sync(leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
+
+				err = bt.cache.SyncFrame(leftSibFr, leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
+
+				if err != nil {
+					return err
+				}
+				// leftSibFr.MarkDirty()
+				err = bt.cache.MarkFrameDirty(leftSibFr)
+
+				if err != nil {
+					log.Panic(err)
+				}
 
 				leftSib.mu.Unlock()
 			} else {
@@ -1043,7 +1042,7 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 
 			// update sibling links
 			if n.RightSibling > 0 {
-				rightSib, err := buildPage(uint32(n.RightSibling))
+				rightSibFr, rightSib, err := bt.buildPage(uint32(n.RightSibling))
 
 				if err != nil {
 					return err
@@ -1053,7 +1052,19 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 				rightSib.LeftSibling = n.LeftSibling
 				mergeSibling.RightSibling = n.RightSibling
 
-				rightSib.Page.Sync(rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
+				// rightSib.Page.Sync(rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
+
+				err = bt.cache.SyncFrame(rightSibFr, rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
+
+				if err != nil {
+					panic(err)
+				}
+				// rightSibFr.MarkDirty()
+				err = bt.cache.MarkFrameDirty(rightSibFr)
+
+				if err != nil {
+					log.Panic(err)
+				}
 
 				rightSib.mu.Unlock()
 			} else {
@@ -1063,7 +1074,13 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 
 		// mark curr node for deletion
 		fmt.Println("MARKING INTERNAL PAGE AS DEAD...")
-		err = n.Page.MarkAsDead()
+		err = fr.MarkAsDead()
+
+		if err != nil {
+			panic(err)
+		}
+
+		// err = n.Page.MarkAsDead()
 
 		if err != nil {
 			return err
@@ -1071,8 +1088,28 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 
 		mr.merged = true
 
-		n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-		mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+		// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+
+		if err != nil {
+			panic(err)
+		}
+
+		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+
+		if err != nil {
+			panic(err)
+		}
+		// mergeFr.MarkDirty()
+
+		err = bt.cache.MarkFrameDirty(mergeFr)
+
+		if err != nil {
+			log.Panic(err)
+		}
 	}
 
 	mr.rightMerge = rightMerge
@@ -1081,7 +1118,7 @@ func (n *Node) handleInternalUnderflow(mr *MergeMetadata, stack *BTStack) error 
 	return nil
 }
 
-func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
+func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 	for i, _ := range keys {
 		if len(keys[i]) >= 4 {
 			log.Printf("%d Inserting {%v:%v} .................................................................\n", i, binary.LittleEndian.Uint32(keys[i]), string(vals[i]))
@@ -1093,111 +1130,134 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 		// stack
 		st := BTStack{
-			stack: make(map[int]*TraversePath),
+			stack: make(map[int]*TraversePath), // {pageId: Traverse path}
+			root:  bt.Root,
 		}
 
 		insertRes := SplitResponse{}
-		var nodePageId int32
+		var nodePageId uint32
 
 		// fmt.Println("(InsertValue) ROOT => ", bTree.Root)
-		if bTree.Root == nil {
-			fmt.Println("(InsertValue) NO ROOT NODE. SETTING...")
+		if bt.Root == 0 {
+			log.Println("(InsertValue) NO ROOT NODE. SETTING...")
 			rootNode := Node{
 				Keys:   [][]byte{keys[i]},
 				Leaf:   true,
 				Values: [][]byte{vals[i]},
 			}
 
-			bTree.mu.Lock()
-			bTree.Root = &rootNode
+			rootFr, err := rootNode.assignFrame(true, bt.cache)
 
-			// Assign page & persist
-			bTree.Root.assignPage(true)
+			if err != nil {
+				log.Println(err)
+				return false, err
+			}
 
-			fmt.Println("ROOT NODE ID: => ", bTree.Root.PageId)
+			bt.mu.Lock()
+			bt.Root = rootFr.Key
+
+			fmt.Println("ROOT NODE ID: => ", bt.Root)
 
 			// add entry to WAL
-			lsn, err := bTree.wal.AddPutLog(uint32(bTree.Root.PageId), keys[i], vals[i])
+			lsn, err := bt.wal.AddPutLog(uint32(bt.Root), keys[i], vals[i])
 
 			if err != nil {
 				panic(err)
 			}
 
-			bTree.Root.lsn = lsn
+			rootNode.lsn = lsn
 
-			// sync
-			bTree.Root.Page.Sync(bTree.Root.Keys, bTree.Root.Values, bTree.Root.Children, uint32(bTree.Root.RightSibling), uint32(bTree.Root.LeftSibling))
-			bTree.mu.Unlock()
+			// sync to frame. New root node has no sibling, set to 0
+			err = bt.cache.SyncFrame(rootFr, rootNode.Keys, rootNode.Values, rootNode.Children, 0, 0)
+
+			if err != nil {
+				panic(err)
+			}
+
+			bt.mu.Unlock()
 
 			//return true, nil
 		} else {
 			fmt.Println("(InsertValue) ROOT NODE FOUND...")
 
-			bTree.mu.RLock()
-			nodePageId = bTree.Root.PageId
-			bTree.mu.RUnlock()
+			bt.mu.RLock()
+			nodePageId = bt.Root
+			bt.mu.RUnlock()
 			fmt.Println("updated root node id")
 			fmt.Println("ROOT NODE ID ==> ", nodePageId)
 
-			var oldFrame *lrulist.Frame
+			var oldFrame *bf.Frame
 			// handle insertion
 			for nodePageId != 0 {
 				// Construct Node from page
 				fmt.Println("fetching page...")
-				frame, err := bf.BCache.Get(uint32(nodePageId))
-				fmt.Println("Retrieved page...")
+				frame, node, err := bt.buildPage(nodePageId)
 
+				// 				frame, err := bf.BCache.Get(uint32(nodePageId))
+				// 				fmt.Println("Retrieved page...")
+				//
 				if err != nil {
 					return false, err
 				}
 
-				// defer bf.BCache.ReleaseFrame(frame)
-
-				// create node
-				node, err := loadNode(frame.GetPage())
-				fmt.Println("Loaded node ==> ")
-
-				fmt.Println("NODE KEYS *************> ", node.Keys)
-
-				if err != nil {
-					return false, err
-				}
+				//				// defer bf.BCache.ReleaseFrame(frame)
+				//
+				//				// create node
+				//				node, err := loadNode(frame)
+				//				fmt.Println("Loaded node ==> ")
+				//
+				//				fmt.Println("NODE KEYS *************> ", node.Keys)
+				//
+				//				if err != nil {
+				//					return false, err
+				//				}
 
 				// release parent frame
 				if oldFrame != nil {
 					fmt.Println("RELEASING OLD FRAME....")
-					err = bf.BCache.ReleaseFrame(oldFrame)
+					err = bt.cache.ReleaseFrame(oldFrame)
 					if err != nil {
 						panic(err)
 					}
 				}
 
 				// update root ptr
-				bTree.mu.Lock()
-				if nodePageId == bTree.Root.PageId {
-					bTree.Root = node
+				bt.mu.Lock()
+				if nodePageId == bt.Root {
+					bt.Root = nodePageId
 				}
-				bTree.mu.Unlock()
+				bt.mu.Unlock()
 
 				// insert
 				fmt.Printf("(%d)********INSERTING KEY: %v\nINSERTING VAL:%v\n", nodePageId, keys[i], vals[i])
-				nodePageId, err = node.insert(keys[i], vals[i], &insertRes, &st, bTree.wal)
+				nodePageId, err = bt.insert(node, frame, keys[i], vals[i], &insertRes, &st)
 				fmt.Println("INSERTED KEYS")
 
 				if err != nil {
-					bf.BCache.ReleaseFrame(frame)
+					bt.cache.ReleaseFrame(frame)
 
 					if oldFrame != nil {
-						bf.BCache.ReleaseFrame(oldFrame)
+						bt.cache.ReleaseFrame(oldFrame)
 					}
 					return false, err
+				}
+
+				// if the right node was located,  nodePageId is 0
+				// mark frame as dirty
+				if nodePageId == 0 {
+					// frame.MarkDirty()
+					err = bt.cache.MarkFrameDirty(frame)
+
+					if err != nil {
+						log.Panic(err)
+					}
 				}
 
 				oldFrame = frame
 			}
 
 			if oldFrame != nil {
-				err := bf.BCache.ReleaseFrame(oldFrame)
+				err := bt.cache.ReleaseFrame(oldFrame)
 
 				if err != nil {
 					panic(fmt.Sprintf("Unable to  release frame: ", err))
@@ -1207,7 +1267,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 			// Handle propagating splits
 			for insertRes.NewNodeId != 0 {
 				fmt.Println("HANDLING PROPAGATING SPLITS..............")
-				// When there's a value to be promoted
+				// If there's a value to be promoted, get last immediate parent in Breadcrumb stack
 				if st.Count > 0 {
 					parent, err := st.Pop()
 
@@ -1215,7 +1275,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						return false, err
 					}
 
-					fr, err := bf.BCache.Get(uint32(parent.n.PageId))
+					parentFr, err := bt.cache.Get(uint32(parent.n.PageId))
 
 					if err != nil {
 						fmt.Println("Unable to pin frame")
@@ -1235,7 +1295,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						return false, err
 					}
 
-					if len(parent.n.Keys) > diskio.ORDER-1 {
+					if len(parent.n.Keys) > ORDER-1 {
 						// handle overflow(internal node)
 						fmt.Println("INTERNAL NODE OVERFLOW........................")
 						newRightNode, promoted, err := parent.n.split()
@@ -1245,7 +1305,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						}
 
 						// persist new right node
-						_, err = newRightNode.assignPage(false)
+						newRightFr, err := newRightNode.assignFrame(false, bt.cache)
 
 						if err != nil {
 							return false, err
@@ -1254,12 +1314,13 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						// update sibling pointers
 						newRightNode.mu.Lock()
 						var oldRightSibling *Node
+						var oldRightFr *bf.Frame
 						newRightNode.LeftSibling = parent.n.PageId
 						newRightNode.RightSibling = parent.n.RightSibling
 
 						if parent.n.RightSibling > 0 {
 							// load node update sibling link
-							oldRightSibling, err = buildPage(uint32(parent.n.RightSibling))
+							oldRightFr, oldRightSibling, err = bt.buildPage(uint32(parent.n.RightSibling))
 
 							if err != nil {
 								return false, err
@@ -1268,26 +1329,43 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 							oldRightSibling.mu.Lock()
 							oldRightSibling.LeftSibling = newRightNode.PageId
 
-							oldRightSibling.Page.Sync(oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+							err = bt.cache.SyncFrame(oldRightFr, oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+
+							if err != nil {
+								log.Panic(err)
+							}
+
+							// mark frame as dirty
+							// oldRightFr.MarkDirty()
+							err = bt.cache.MarkFrameDirty(oldRightFr)
+
+							if err != nil {
+								log.Panic(err)
+							}
 							oldRightSibling.mu.Unlock()
 						}
 
 						fmt.Println("(INTERNAL) NEW RIGHT NODE ====> ", newRightNode)
-						fmt.Println("(INTERNAL) NEW RIGHT NODE PAGE ====> ", newRightNode.Page)
-						fmt.Println("(INTERNAL) NEW RIGHT NODE PAGE HEADER ====> ", newRightNode.Page.Header)
+						//						fmt.Println("(INTERNAL) NEW RIGHT NODE PAGE ====> ", newRightNode.Page)
+						//						fmt.Println("(INTERNAL) NEW RIGHT NODE PAGE HEADER ====> ", newRightNode.Page.Header)
 						fmt.Println("(INTERNAL) RECEIVED SEPARATOR KEY =====> ", promoted)
 						parent.n.RightSibling = newRightNode.PageId
 
 						r := SplitResponse{
 							PromotedSeparatorKey: append([]byte(nil), promoted...),
-							NewNodeId:            uint32(newRightNode.Page.Header.PageId),
+							NewNodeId:            uint32(newRightNode.PageId),
 						}
 
 						// set new Insert response
 						insertRes = r
 
 						// Sync new child and its right sibling
-						newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
+						err = bt.cache.SyncFrame(newRightFr, newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
+
+						if err != nil {
+							log.Panic(err)
+						}
+
 						newRightNode.mu.Unlock()
 					} else {
 						// reset insertres
@@ -1296,11 +1374,16 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					}
 
 					// sync parent
-					parent.n.Page.Sync(parent.n.Keys, parent.n.Values, parent.n.Children, uint32(parent.n.RightSibling), uint32(parent.n.LeftSibling))
-					fmt.Printf("PARENT ID: %d\nKEYS %v\nVALS %v\nPAGEIDS: %v\n", parent.n.Page.Header.PageId, parent.n.Keys, parent.n.Values, parent.n.Children)
+					err = bt.cache.SyncFrame(parentFr, parent.n.Keys, parent.n.Values, parent.n.Children, uint32(parent.n.RightSibling), uint32(parent.n.LeftSibling))
+
+					if err != nil {
+						panic(err)
+					}
+
+					fmt.Printf("PARENT ID: %d\nKEYS %v\nVALS %v\nPAGEIDS: %v\n", parent.n.PageId, parent.n.Keys, parent.n.Values, parent.n.Children)
 					parent.n.mu.Unlock()
 
-					bf.BCache.ReleaseFrame(fr)
+					bt.cache.ReleaseFrame(parentFr)
 				} else {
 					// create and assign new root node.
 					log.Println("ADDING NEW ROOT -----------------------> ")
@@ -1313,7 +1396,7 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 					fmt.Println("NEW ROOT PAGE ID => ", newRoot.PageId)
 
-					newRoot.Children = append(newRoot.Children, bTree.Root.Page.Header.PageId)
+					newRoot.Children = append(newRoot.Children, int32(bt.Root))
 					newRoot.Children = append(newRoot.Children, int32(insertRes.NewNodeId))
 
 					log.Println("ADDED NEW ROOT -----------------------> ", newRoot)
@@ -1321,22 +1404,31 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 					log.Println("NEW ROOT CHILDREN -----------------------> ", newRoot.Children)
 
-					newRoot.assignPage(true)
+					// assign frame
+					rootFr, err := newRoot.assignFrame(true, bt.cache)
 
-					log.Println("NEW ROOT PAGEID -----------------------> ", newRoot.Page.Header.PageId)
-					log.Println("NEW ROOT PAGE -----------------------> ", newRoot.Page)
-					log.Println("NEW ROOT PAGE HEADER -----------------------> ", newRoot.Page.Header)
+					if err != nil {
+						log.Panic(err)
+					}
+
+					log.Println("NEW ROOT PAGEID -----------------------> ", newRoot.PageId)
+					log.Println("NEW ROOT PAGE -----------------------> ", newRoot.PageId)
+					log.Println("NEW ROOT PAGE HEADER -----------------------> ", newRoot.PageId)
 
 					// sync
-					newRoot.Page.Sync(newRoot.Keys, newRoot.Values, newRoot.Children, uint32(newRoot.RightSibling), uint32(newRoot.LeftSibling))
+					err = bt.cache.SyncFrame(rootFr, newRoot.Keys, newRoot.Values, newRoot.Children, uint32(newRoot.RightSibling), uint32(newRoot.LeftSibling))
 
-					bTree.mu.Lock()
-					bTree.Root = newRoot
-					bTree.mu.Unlock()
+					if err != nil {
+						panic(fmt.Errorf("Unable to Sync root frame: ", err))
+					}
+
+					// update new root in btree
+					bt.mu.Lock()
+					bt.Root = uint32(newRoot.PageId)
+					bt.mu.Unlock()
 					// reset value
 					insertRes.NewNodeId = 0
 				}
-
 			}
 
 			// clear stack if not empty
@@ -1349,45 +1441,47 @@ func InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 	return true, nil
 }
 
-func DeleteValue(keys [][]byte) (bool, error) {
+func (bt *BTree) DeleteValue(keys [][]byte) (bool, error) {
 	for i, _ := range keys {
 		st := BTStack{
 			stack: make(map[int]*TraversePath),
+			root:  bt.Root,
 		}
 
 		mergeMetadata := MergeMetadata{}
 
 		var nodePageId int32
 
-		bTree.mu.RLock()
-		if bTree.Root == nil {
+		bt.mu.RLock()
+		if bt.Root == 0 {
 			return false, BTreeError{Message: "BTree not initialized."}
 		}
 
-		nodePageId = bTree.Root.Page.Header.PageId
-		bTree.mu.RUnlock()
-		var oldFrame *lrulist.Frame
+		nodePageId = int32(bt.Root)
+		bt.mu.RUnlock()
+		var oldFrame *bf.Frame
 
 		for nodePageId > 0 {
 			// construct node
-			frame, err := bf.BCache.Get(uint32(nodePageId))
+			frame, node, err := bt.buildPage(uint32(nodePageId))
+			// frame, err := bt.cache.Get(uint32(nodePageId))
 
 			if err != nil {
-				return false, err
+				return false, fmt.Errorf("Unable to delete val: ", err)
 			}
 
 			if oldFrame != nil {
-				bf.BCache.ReleaseFrame(oldFrame)
+				bt.cache.ReleaseFrame(oldFrame)
 			}
 			// create node
-			node, err := loadNode(frame.Page)
+			// node, err := loadNode(frame)
 
 			fmt.Println("NODE KEYS *************> ", node.Keys)
 
 			if err != nil {
-				bf.BCache.ReleaseFrame(frame)
+				bt.cache.ReleaseFrame(frame)
 				if oldFrame != nil {
-					bf.BCache.ReleaseFrame(oldFrame)
+					bt.cache.ReleaseFrame(oldFrame)
 				}
 				return false, err
 			}
@@ -1395,17 +1489,25 @@ func DeleteValue(keys [][]byte) (bool, error) {
 			// delete
 			fmt.Printf("(%d) DELETING KEY: %v\n", nodePageId, keys[i])
 
-			nodePageId, err = node.deleteValue(keys[i], &st, &mergeMetadata, bTree.wal)
+			nodePageId, err = bt.deleteValue(node, frame, keys[i], &st, &mergeMetadata)
 
 			fmt.Printf("NODEPAGEID: %d\n", nodePageId)
 
 			if err != nil {
-				bf.BCache.ReleaseFrame(frame)
+				bt.cache.ReleaseFrame(frame)
 				if oldFrame != nil {
-					bf.BCache.ReleaseFrame(oldFrame)
+					bt.cache.ReleaseFrame(oldFrame)
 				}
 				fmt.Println("UNABLE TO DELETE PAGE ==> ", err.Error())
 				return false, err
+			}
+
+			// mark frame as dirty
+			// frame.MarkDirty()
+			err = bt.cache.MarkFrameDirty(frame)
+
+			if err != nil {
+				log.Panic(err)
 			}
 
 			oldFrame = frame
@@ -1418,7 +1520,7 @@ func DeleteValue(keys [][]byte) (bool, error) {
 		}
 
 		if oldFrame != nil {
-			bf.BCache.ReleaseFrame(oldFrame)
+			bt.cache.ReleaseFrame(oldFrame)
 		}
 
 		// Handle propagating merges and updating parent keys
@@ -1432,7 +1534,7 @@ func DeleteValue(keys [][]byte) (bool, error) {
 				return false, err
 			}
 
-			fr, err := bf.BCache.Get(uint32(path.n.PageId))
+			fr, err := bt.cache.Get(uint32(path.n.PageId))
 
 			if err != nil {
 				return false, err
@@ -1472,36 +1574,50 @@ func DeleteValue(keys [][]byte) (bool, error) {
 			mergeMetadata.rebalanceKey = make([]byte, 0)
 
 			// check underflow
-			if len(path.n.Keys) < DEGREE-1 && bTree.Root.PageId != path.n.PageId {
+			if len(path.n.Keys) < DEGREE-1 && bt.Root != uint32(path.n.PageId) {
 				// merge and set metadata
-				err = path.n.handleInternalUnderflow(&mergeMetadata, &st)
+				err = bt.handleInternalUnderflow(path.n, fr, &mergeMetadata, &st)
 
 				if err != nil {
 					fmt.Println("ERR HANDLING INTERNAL UNDERFLOW ==> ", err)
 					return false, err
 				}
-			} else if len(path.n.Keys) < DEGREE-1 && bTree.Root.PageId == path.n.PageId && len(path.n.Children) == 1 {
+			} else if len(path.n.Keys) < DEGREE-1 && bt.Root == uint32(path.n.PageId) && len(path.n.Children) == 1 {
 				// collapse node and set new root
-				node, err := buildPage(uint32(path.n.Children[0]))
+				nodeFr, _, err := bt.buildPage(uint32(path.n.Children[0]))
 
 				if err != nil {
 					panic(err.Error())
 				}
 
-				bTree.mu.Lock()
-				bTree.Root = node
-				node.Page.SetAsRoot()
-				path.n.Page.MarkAsDead()
-				err = path.n.Page.Sync(path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
+				bt.mu.Lock()
+				bt.Root = uint32(path.n.Children[0])
+				// node.Page.SetAsRoot()
+				bt.cache.SetNewRoot(nodeFr)
+
+				// mark old root for deletion
+				// path.n.Page.MarkAsDead()
+				err = nodeFr.MarkAsDead()
+
+				if err != nil {
+					panic(err)
+				}
+
+				err = bt.cache.SyncFrame(nodeFr, path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
 
 				if err != nil {
 					fmt.Println("ERR SYNCING...")
 					return false, err
 				}
-				bTree.mu.Unlock()
+
+				bt.mu.Unlock()
 			} else {
-				// Sync
-				err = path.n.Page.Sync(path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
+				// No underflow, Sync frame
+				// err = path.n.Page.Sync(path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
+
+				pathFr, _, err := bt.buildPage(uint32(path.n.PageId))
+
+				err = bt.cache.SyncFrame(pathFr, path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
 
 				if err != nil {
 					fmt.Println("ERR SYNCING...")
@@ -1509,8 +1625,18 @@ func DeleteValue(keys [][]byte) (bool, error) {
 				}
 			}
 
+			// mark frame as dirty
+			if fr != nil {
+				// fr.MarkDirty()
+				err = bt.cache.MarkFrameDirty(fr)
+
+				if err != nil {
+					log.Panic(err)
+				}
+			}
+
 			path.n.mu.Unlock()
-			bf.BCache.ReleaseFrame(fr)
+			bt.cache.ReleaseFrame(fr)
 
 		}
 
@@ -1522,49 +1648,122 @@ func DeleteValue(keys [][]byte) (bool, error) {
 	return true, nil
 }
 
-// Gets pages from cache and buids Node
-func buildPage(pageId uint32) (*Node, error) {
-	frame, err := bf.BCache.Get(pageId)
+// Create new node - does not include associated page
+func createNode(separatorKeys [][]byte, isLeaf bool, isRoot bool) (*Node, error) {
+	if !isLeaf && (len(separatorKeys) < DEGREE-1 && len(separatorKeys) > ORDER-1) {
+		msg := fmt.Sprintf("Keys must be between %d to %d", DEGREE-1, ORDER-1)
+		return nil, BTreeError{Message: msg}
+	}
+
+	if isLeaf && (len(separatorKeys) < DEGREE && len(separatorKeys) > ORDER) {
+		msg := fmt.Sprintf("Keys must be from %d to %d", DEGREE, ORDER)
+		return nil, BTreeError{Message: msg}
+	}
+
+	var newNode Node
+
+	if isLeaf {
+		newNode = Node{
+			Keys:   separatorKeys,
+			Leaf:   isLeaf,
+			Values: make([][]byte, (2 * DEGREE)), // Empty list
+		}
+	} else {
+		newNode = Node{
+			Keys:     separatorKeys,
+			Children: make([]int32, 0),
+			Leaf:     isLeaf,
+		}
+	}
+
+	return &newNode, nil
+}
+
+// Load node from existing page
+func loadNode(fr *bf.Frame) (*Node, error) {
+	if fr == nil {
+		return nil, BTreeError{Message: "Frame not provided"}
+	}
+
+	minPge, err := fr.GetMinPage()
 
 	if err != nil {
 		return nil, err
 	}
 
-	node, err := loadNode(frame.Page)
+	internalNode := fr.Internal()
 
-	if err != nil {
-		return nil, err
+	var n Node
+
+	if internalNode {
+
+		n = Node{
+			Keys:     minPge.Keys,
+			Children: minPge.Children,
+			Leaf:     !internalNode,
+			//			Page:         page,
+			PageId:       int32(minPge.PageId),
+			RightSibling: minPge.RightSibling,
+			LeftSibling:  minPge.LeftSibling,
+		}
+	} else {
+		n = Node{
+			Keys:   minPge.Keys,
+			Values: minPge.Vals,
+			Leaf:   !internalNode,
+			//			Page:         page,
+			RightSibling: minPge.RightSibling,
+			LeftSibling:  minPge.LeftSibling,
+			PageId:       int32(minPge.PageId),
+		}
 	}
 
-	return node, nil
+	return &n, nil
+}
+
+// Gets pages from cache and builds Node
+func (bt *BTree) buildPage(pageId uint32) (*bf.Frame, *Node, error) {
+	frame, err := bt.cache.Get(pageId)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	node, err := loadNode(frame)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return frame, node, nil
 }
 
 // Retrieves value with key
-func Get(key []byte) ([]byte, error) {
+func (bt *BTree) Get(key []byte) ([]byte, error) {
 	var nodePageId int32
 	var val []byte
 
-	bTree.mu.RLock()
-	if bTree.Root == nil {
-		bTree.mu.RUnlock()
+	bt.mu.RLock()
+	if bt.Root == 0 {
+		bt.mu.RUnlock()
 		return nil, BTreeError{"Key Value store not initialized"}
 	}
 
-	nodePageId = bTree.Root.Page.Header.PageId
+	nodePageId = int32(bt.Root)
 	fmt.Println("ROOT PAGE ID ==> ", nodePageId)
-	bTree.mu.RUnlock()
+	bt.mu.RUnlock()
 
-	var oldFrame *lrulist.Frame
+	var oldFrame *bf.Frame
 
 	for nodePageId > 0 {
 		// pge, err := buildPage(uint32(nodePageId))
-		fr, err := bf.BCache.Get(uint32(nodePageId))
+		fr, err := bt.cache.Get(uint32(nodePageId))
 
 		if err != nil {
 			return nil, err
 		}
 
-		pge, err := loadNode(fr.GetPage())
+		pge, err := loadNode(fr)
 
 		if err != nil {
 			return nil, err
@@ -1572,7 +1771,7 @@ func Get(key []byte) ([]byte, error) {
 
 		if oldFrame != nil {
 			fmt.Println("RELEASING OLD FRAME....")
-			err = bf.BCache.ReleaseFrame(oldFrame)
+			err = bt.cache.ReleaseFrame(oldFrame)
 
 			if err != nil {
 				panic(err)
@@ -1582,10 +1781,10 @@ func Get(key []byte) ([]byte, error) {
 		val, err = pge.search(key, &nodePageId)
 
 		if err != nil {
-			bf.BCache.ReleaseFrame(fr)
+			bt.cache.ReleaseFrame(fr)
 
 			if oldFrame != nil {
-				bf.BCache.ReleaseFrame(oldFrame)
+				bt.cache.ReleaseFrame(oldFrame)
 			}
 
 			return nil, err
@@ -1601,7 +1800,7 @@ func Get(key []byte) ([]byte, error) {
 	}
 
 	if oldFrame != nil {
-		err := bf.BCache.ReleaseFrame(oldFrame)
+		err := bt.cache.ReleaseFrame(oldFrame)
 
 		if err != nil {
 			panic(fmt.Sprintf("Unable to  release frame: ", err))
@@ -1612,21 +1811,21 @@ func Get(key []byte) ([]byte, error) {
 }
 
 // Retrieves value with key
-func RangeSearch(minKey []byte, maxKey []byte, count int32) ([]RangeItem, error) {
+func (bt *BTree) RangeSearch(minKey []byte, maxKey []byte, count int32) ([]RangeItem, error) {
 	var nodePageId int32
 	var items []RangeItem
 	var rightSibId int32
 
-	if bTree.Root == nil {
+	if bt.Root == 0 {
 		return nil, BTreeError{"Key Value store not initialized"}
 	}
 
-	nodePageId = bTree.Root.Page.Header.PageId
+	nodePageId = int32(bt.Root)
 	var pge *Node
 	var err error
 
 	for nodePageId > 0 {
-		pge, err = buildPage(uint32(nodePageId))
+		_, pge, err = bt.buildPage(uint32(nodePageId))
 
 		if err != nil {
 			return nil, err
@@ -1648,7 +1847,7 @@ RangeLoop:
 		// 2. For each key, check if is more than max key
 		// 3. Increment count
 		// 4. Add key to val
-		rightSib, err := buildPage(uint32(rightSibId))
+		_, rightSib, err := bt.buildPage(uint32(rightSibId))
 
 		if err != nil {
 			return nil, err
@@ -1699,6 +1898,12 @@ RangeLoop:
 }
 
 // shutdown
-func Shutdown() {
-	diskio.DiskBTree.Close()
+func (bt *BTree) Shutdown() error {
+	err := bt.cache.Close()
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

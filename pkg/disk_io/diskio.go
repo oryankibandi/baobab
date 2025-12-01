@@ -27,14 +27,24 @@ const (
 	CELL_CHILD_PAGEID_SIZE   = 4
 )
 
+// Page Header Flag bits
+const (
+	Dead = iota + 4
+	Dirty
+	Written
+	IsInternal
+)
+
 var (
 	maxPageOffset = 0
 )
 
-var DiskBTree *DiskTree
-var maxPageID uint32     // Use this to assign a pageID to new Pages.
+// var d *DiskManager
+// var maxPageID uint32     // Use this to assign a pageID to new Pages.
 var FreeSpaceMap []int64 // Simplistic Free Space Map. Contains an array of offsets where data has been deleted. On real-world databases this is a B-Tree structure.
 var PgFreeList *FreeList
+
+type PageHeaderFlagPos int
 
 type Cell struct {
 	Flags     []byte // 1 Byte
@@ -73,11 +83,11 @@ type Page struct {
 	//CellPointers []CellPointer
 	//Cells        []Cell
 	pgeData [PAGE_SIZE_BYTES]byte
-	Rmu     sync.RWMutex
+	rmu     sync.RWMutex
 }
 
-type DiskTree struct {
-	RootNode     *Page
+type DiskManager struct {
+	// RootNode     *Page
 	RootPage     int32 // Root Page ID
 	PageCount    int32 // 4 bytes No. of pages
 	FlushedPages int32 // No of pages flushed to disk. Default to PageCount on startup
@@ -95,6 +105,7 @@ type IOReq struct {
 	ReadPage  *chan *Page // if read req, new page read
 	Flushed   *chan int32 // Amount of bytes written.
 	WritePage *Page       // if write req, page to write
+	dManager  *DiskManager
 }
 
 type JobQueue struct {
@@ -104,7 +115,7 @@ type JobQueue struct {
 }
 
 // traverse nodes and set page count, lookupID and maxPageID
-func (d *DiskTree) startupTraversal(rootPageId int32) {
+func (d *DiskManager) startupTraversal(rootPageId int32) {
 	// pgeOff := make([]byte, PAGE_SIZE_BYTES)
 	// _, err := d.fd.ReadAt(pgeOff, int64(rootOffset))
 
@@ -128,16 +139,16 @@ func (d *DiskTree) startupTraversal(rootPageId int32) {
 	// fmt.Println("PAGE =+=+> ", rootPage)
 
 	// set RootNode
-	d.RootNode = rootPage
+	// d.RootNode = rootPage
 	d.RootPage = rootPage.Header.PageId
 }
 
 // Create an in-memory Page from an existing on-disk page. Can be run as a goroutine
-func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
-	fmt.Println("(loadPage) ROOT NODE ==> ", d.RootNode)
-	if d.RootNode != nil {
-		fmt.Println("ROOT NODE HEADER==> ", d.RootNode.Header)
-	}
+func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
+	// fmt.Println("(loadPage) ROOT NODE ==> ", d.RootNode)
+	// if d.RootNode != nil {
+	// 	fmt.Println("ROOT NODE HEADER==> ", d.RootNode.Header)
+	// }
 
 	//offset, err := LookupTable.GetPageOffset(int(pageId))
 
@@ -190,19 +201,19 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 		LeftSibling:  int32(leftChild),
 	}
 
-	fmt.Println("HEADER =========================> ", h)
+	// fmt.Println("HEADER =========================> ", h)
 
 	// isInternal := h.IsSet(7)
 
 	fmt.Println("PAGEID *-*-*-> ", pageData[1:5], pageID)
 	fmt.Println("FLAG => ", flag)
 
-	if maxPageID < pageID {
-		maxPageID = pageID
+	if uint32(d.MaxPageId) < pageID {
+		d.MaxPageId = int32(pageID)
 	}
 
 	//fmt.Println("LOOKUP TABLE => ", LookupTable)
-	fmt.Println("MAX PAGE ID => ", maxPageID)
+	fmt.Println("MAX PAGE ID => ", d.MaxPageId)
 	fmt.Println("ITEM COUNT => ", itemCount)
 	fmt.Println("Upper Offset => ", upperOffset)
 	fmt.Println("Lower Offset => ", lowerOff)
@@ -222,7 +233,7 @@ func (d *DiskTree) loadPage(pageId int32) (*Page, error) {
 	return &p, nil
 }
 
-func (d *DiskTree) flushMetadata() {
+func (d *DiskManager) flushMetadata() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// only use as fixed size buffer - default is 4K which is too much
@@ -238,16 +249,10 @@ func (d *DiskTree) flushMetadata() {
 	binary.LittleEndian.PutUint32(pageCount, uint32(d.PageCount))
 	binary.LittleEndian.PutUint32(maxPageId, uint32(d.MaxPageId))
 
-	if d.RootNode != nil {
-		fmt.Println("(flushMetadata) ROOT NODE PAGE ID ==--------------------> ", d.RootNode.Header)
-		fmt.Println("(flushMetadata) ROOT PAGE ID -=-=-=___________--> ", d.RootPage)
+	if d.RootPage != 0 {
 		binary.LittleEndian.PutUint32(rootPageId, uint32(d.RootPage))
-	} else {
-		fmt.Println("(flushMetadata) ROOTNODE IS NULL ==> ", d.RootNode)
 	}
 
-	fmt.Println("(flushMetadata) ROOT PAGE ID =---------------------> ", rootPageId)
-	fmt.Println("(flushMetadata) MAX PAGE ID =----------------------+> ", maxPageId)
 	// write
 	//  root page ID
 	_, err := wr.Write(rootPageId)
@@ -306,7 +311,7 @@ func (d *DiskTree) flushMetadata() {
 }
 
 // Creates write request for `page` and adds it to queue
-func (d *DiskTree) WriteReq(page *Page, written *chan int32) error {
+func (d *DiskManager) WriteReq(page *Page, written *chan int32) error {
 	if page == nil {
 		*written <- -1
 		return DiskioError{Message: "Page is required"}
@@ -317,6 +322,7 @@ func (d *DiskTree) WriteReq(page *Page, written *chan int32) error {
 		PageId:    uint32(page.Header.PageId),
 		Flushed:   written,
 		WritePage: page,
+		dManager:  d,
 	}
 
 	// Check queue
@@ -341,7 +347,7 @@ func (d *DiskTree) WriteReq(page *Page, written *chan int32) error {
 	return nil
 }
 
-func (d *DiskTree) ForceFlush() {
+func (d *DiskManager) ForceFlush() {
 	if d == nil || d.fd == nil {
 		return
 	}
@@ -357,7 +363,7 @@ func (d *DiskTree) ForceFlush() {
 }
 
 // Creates a read req for `pageId` and adds it to queue
-func (d *DiskTree) ReadReq(pageId uint32, p *chan *Page) error {
+func (d *DiskManager) ReadReq(pageId uint32, p *chan *Page) error {
 	if p == nil {
 		return DiskioError{Message: "Page output channel is required."}
 	}
@@ -370,6 +376,7 @@ func (d *DiskTree) ReadReq(pageId uint32, p *chan *Page) error {
 		Read:     true,
 		ReadPage: p,
 		PageId:   pageId,
+		dManager: d,
 	}
 
 	q, ok := d.Queues.Load(pageId)
@@ -389,14 +396,14 @@ func (d *DiskTree) ReadReq(pageId uint32, p *chan *Page) error {
 	return nil
 }
 
-func (d *DiskTree) incrementFlushedPages() {
+func (d *DiskManager) incrementFlushedPages() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.FlushedPages += 1
 }
 
 // safely close file descriptors
-func (d *DiskTree) Close() {
+func (d *DiskManager) Close() {
 	//LookupTable.Close()
 	PgFreeList.close()
 	d.mu.Lock()
@@ -412,50 +419,44 @@ func (d *DiskTree) Close() {
 }
 
 // Create a new Page. Requires at least two keys and values/pointers. Key should be sorted in a lexicographical order
-func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Page, error) {
+func (d *DiskManager) NewPage(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (int32, *Page, error) {
 	fmt.Println("(NEW) KEYS ==> ", keys)
 	if ((values == nil || len(*values) <= 0) && (len(keys) < DEGREE-1 || len(keys) > ORDER-1)) && !setAsRoot {
-		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
+		return 0, nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
 	}
 
 	if ((childPageIds == nil || len(*childPageIds) <= 0) && (len(keys) < DEGREE || len(keys) > ORDER)) && !setAsRoot {
-		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
+		return 0, nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
 	}
 
 	if values == nil && childPageIds == nil {
-		return nil, DiskioError{Message: "Insufficient input parameters: Either page IDs or values are required to create a new page."}
+		return 0, nil, DiskioError{Message: "Insufficient input parameters: Either page IDs or values are required to create a new page."}
 	}
 
 	log.Printf("VALUES ==> %v\n", values)
 	log.Printf("CHILD PAGE IDS ==> %v\n", childPageIds)
 
 	if (values != nil && len(*values) <= 0) && len(*childPageIds) <= 0 {
-		return nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
+		return 0, nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
 	}
 
 	fmt.Println("GETTING PAGE..")
-	// pge, err := AssignPage()
 
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
-
-	// fmt.Println("RETIEVED NEW NODE PAGE -> ", pge)
 	var rightPtr int32
 
-	DiskBTree.mu.Lock()
-	fmt.Println("(NEW) ROOT NODE ==> ", DiskBTree.RootNode)
+	d.mu.Lock()
+	fmt.Println("(NEW) ROOT NODE ==> ", d.RootPage)
 
-	if DiskBTree.RootNode != nil {
-		fmt.Println("(NEW) ROOT NODE PAGE ID ==> ", DiskBTree.RootNode.Header.PageId)
+	if d.RootPage != 0 {
+		fmt.Println("(NEW) ROOT NODE PAGE ID ==> ", d.RootPage)
 	}
 
 	var newPageId int32
 	newPageId = PgFreeList.pop()
 
 	if newPageId <= 0 {
-		newPageId = DiskBTree.MaxPageId + 1
-		DiskBTree.MaxPageId = newPageId
+		newPageId = d.MaxPageId + 1
+		d.MaxPageId = newPageId
 	}
 
 	h := PageHeader{
@@ -470,7 +471,7 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 
 	// If internal node, set flag
 	if values == nil || len(*values) <= 0 {
-		h.setFlag(7)
+		h.setFlag(IsInternal)
 	}
 
 	// new page
@@ -488,36 +489,38 @@ func New(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot boo
 		p.Header.UpdateRightPtr((*childPageIds)[len(*childPageIds)-1])
 	}
 
-	// Create cells and pointer
-	// p.insertCells(keys, values, childPageIds)
-	//	for i, _ := range keys {
-	//		p.insertNewCells(keys, values, childPageIds, i)
-	//	}
-
 	// Add page count & offset
-	if DiskBTree.RootNode == nil && DiskBTree.PageCount <= 0 {
-		DiskBTree.RootNode = &p
-		// newOffset := 16 + (p.Header.PageId * DiskBTree.PageCount)
-		DiskBTree.RootPage = p.Header.PageId
+	if d.RootPage == 0 && d.PageCount <= 0 {
+		d.RootPage = p.Header.PageId
 	}
 
 	// if new root, set as root node
-	if setAsRoot {
-		DiskBTree.RootPage = p.Header.PageId
-		DiskBTree.RootNode = &p
-	}
+	// if setAsRoot {
+	// 	d.SetAsRoot(p.Header.PageId)
+	// 	// d.RootPage = p.Header.PageId
+	// }
 
 	// p.flush(0, false)
 	// p.flushMany(false)
 
-	DiskBTree.PageCount += 1
-	DiskBTree.mu.Unlock()
-	DiskBTree.flushMetadata()
-	fmt.Println("PAGE COUNT --------> ", DiskBTree.PageCount)
-	fmt.Println("MAX PAGE ID ----------> ", DiskBTree.MaxPageId)
-	fmt.Println("ROOT PAGE ID ==> ", DiskBTree.RootPage)
+	d.PageCount += 1
+	d.mu.Unlock()
+
+	d.flushMetadata() // TODO: Perform this op concurrently
+	fmt.Println("PAGE COUNT --------> ", d.PageCount)
+	fmt.Println("MAX PAGE ID ----------> ", d.MaxPageId)
+	fmt.Println("ROOT PAGE ID ==> ", d.RootPage)
 	fmt.Println("NEW PAGE PAGEID ---------------> ", p.Header.PageId)
-	return &p, nil
+	return newPageId, &p, nil
+}
+
+func (d *DiskManager) CheckRootPageId() uint32 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	root := d.RootPage
+
+	return uint32(root)
 }
 
 // Updates the right most pointer
@@ -527,13 +530,23 @@ func (h *PageHeader) UpdateRightPtr(pageId int32) error {
 	}
 
 	// check if is internal node
-	if !h.IsSet(7) {
+	if !h.IsSet(IsInternal) {
 		return DiskioError{Message: "Invalid node: Only internal nodes can have right pointer in header."}
 	}
 
 	h.RightChild = pageId
 
 	return nil
+}
+
+// Returns right and left siblings respectively
+func (h *PageHeader) GetSiblngs() (rightSibling int32, leftSibling int32) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	rSib := h.RightSibling
+	lSib := h.LeftSibling
+
+	return rSib, lSib
 }
 
 // // Insert cells in new page
@@ -606,36 +619,21 @@ func (h *PageHeader) UpdateRightPtr(pageId int32) error {
 //
 // marks a page as dead, prepares it for deletion
 func (p *Page) MarkAsDead() error {
-	p.Rmu.Lock()
-	defer p.Rmu.Unlock()
-	// Add offset to Free List
-	//added := PgFreeList.add(uint32(p.Header.PageId))
-
-	//if !added {
-	//	return DiskioError{Message: "Unable to add deleted page to free list"}
-	//}
-
-	// FreeSpaceMap = append(FreeSpaceMap, int64(off))
-	// set deleted header
-	p.Header.setFlag(4)
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	p.Header.setFlag(Dead)
 
 	return nil
 }
 
-func (p *Page) SetAsRoot() error {
-	if DiskBTree == nil {
-		return DiskioError{Message: "DiskBTree not initialized"}
-	}
+func (d *DiskManager) SetAsRoot(pageId int32) error {
+	d.mu.Lock()
 
-	DiskBTree.mu.Lock()
-	p.Rmu.Lock()
-	defer p.Rmu.Unlock()
-	defer DiskBTree.mu.Unlock()
+	// d.RootNode = p
+	d.RootPage = pageId
 
-	DiskBTree.RootNode = p
-	DiskBTree.RootPage = p.Header.PageId
-
-	go DiskBTree.flushMetadata()
+	d.mu.Unlock()
+	go d.flushMetadata()
 
 	return nil
 
@@ -643,17 +641,17 @@ func (p *Page) SetAsRoot() error {
 
 // Check if page is marked for deletion
 func (p *Page) IsDeleted() bool {
-	p.Rmu.Lock()
-	defer p.Rmu.Unlock()
-	d := p.Header.IsSet(4)
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	d := p.Header.IsSet(Dead)
 
 	return d
 }
 
 // Synchronizes keys, values and  page IDs in node to items in Page
 func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
-	p.Rmu.Lock()
-	defer p.Rmu.Unlock()
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
 	fmt.Println("(Sync) IN SYNC ==> ")
 	fmt.Println("(Sync) PAGE ID ==> ", p.Header.PageId)
 	fmt.Println("(Sync) KEYS ==> ", keys)
@@ -662,38 +660,27 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 	fmt.Println("(Sync) RIGHT CHILD ==> ", rightSibling)
 	fmt.Println("(Sync) LEFT CHILD ==> ", leftSibling)
 
-	if p.Header.IsSet(4) {
+	if p.Header.IsSet(Dead) {
 		// Dead page, scheduled for deletion
 		fmt.Println("DEAD PAGE, SCHEDULED FOR DELETION.....")
 		// Mark page as dirty
-		p.Header.setFlag(5)
+		p.Header.setFlag(Dirty)
 		return nil
 	}
 
 	isInternal := len(pageIds) > 0
 
 	data := [PAGE_SIZE_BYTES]byte{}
-	// var ptr CellPointer
 	var keySize int
 	var valSize int
 	var cellPtrWriteOff int
-	// cells := make([]Cell, 0)
-	// cellPtrs := make([]CellPointer, 0)
 	cellPtrData := make([]byte, CELL_POINTER_SIZE_BYTE)
 	startOffs := PAGE_SIZE_BYTES - LOWER_PADDING_BYTES
+
 	if isInternal {
 		//
 
 		for i, k := range keys {
-			//	newCell := Cell{
-			//		Flags:     make([]byte, 1),
-			//		KeySize:   int32(len(k)),
-			//		ValueSize: int32(0),
-			//		Key:       k,
-			//		Value:     make([]byte, 0),
-			//		PageId:    pageIds[i],
-			//	}
-
 			keySize = len(k)
 			cellSize := 13 + int32(keySize)
 			off := int32(startOffs) - cellSize
@@ -714,17 +701,9 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 			copy(data[cellPtrWriteOff:cellPtrWriteOff+CELL_POINTER_SIZE_BYTE], cellPtrData)
 			copy(data[off:int(off)+len(cellData)], cellData)
 
-			//ptr = CellPointer{
-			//	Flags:   make([]byte, 1),
-			//	offset:  off,
-			//	CellRef: &newCell,
-			//}
-
 			startOffs = int(off)
 
 			cellData = nil
-			// cells = append(cells, newCell)
-			// cellPtrs = append(cellPtrs, ptr)
 		}
 
 		// update right ptr
@@ -734,16 +713,8 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 		for i, k := range keys {
 			keySize = len(k)
 			valSize = len(vals[i])
-			// newCell := Cell{
-			// 	Flags:     make([]byte, 1),
-			// 	KeySize:   int32(len(k)),
-			// 	ValueSize: int32(len(vals[i])),
-			// 	Key:       k,
-			// 	Value:     vals[i],
-			// 	PageId:    0,
-			// }
-
 			cellSize := 13 + int32(len(k)) + int32(len(vals[i]))
+
 			off := int32(startOffs) - cellSize
 
 			cellData := make([]byte, cellSize)
@@ -764,17 +735,9 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 			copy(data[cellPtrWriteOff:cellPtrWriteOff+CELL_POINTER_SIZE_BYTE], cellPtrData)
 			copy(data[off:int(off)+len(cellData)], cellData)
 
-			// ptr = CellPointer{
-			// 	Flags:   make([]byte, 1),
-			// 	offset:  off,
-			// 	CellRef: &newCell,
-			// }
-
 			startOffs = int(off)
 			cellData = nil
 
-			// cells = append(cells, newCell)
-			// cellPtrs = append(cellPtrs, ptr)
 		}
 	}
 
@@ -788,9 +751,9 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 	p.Header.updateRightSibling(rightSibling)
 	p.Header.updateLeftSibling(leftSibling)
 	// Mark page as dirty
-	p.Header.setFlag(5)
+	p.Header.setFlag(Dirty)
 
-	// add Header
+	// add updated Header
 	copy(data[:HEADER_SIZE_BYTES], p.Header.toBytes())
 
 	p.pgeData = data
@@ -799,46 +762,45 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 }
 
 // Flush page content to disk(do not call sync())
-func (p *Page) flushPage(b chan int32) {
-	p.Rmu.Lock()
-	defer p.Rmu.Unlock()
+func (d *DiskManager) flushPage(p *Page, b chan int32) {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
 
 	// Unmark as dirty
-	p.Header.unsetFlag(5)
+	p.Header.unsetFlag(Dirty)
 
 	// update page header data
 	hdrBytes := p.Header.toBytes()
 	copy(p.pgeData[:HEADER_SIZE_BYTES], hdrBytes)
 
-	if p.Header.IsSet(4) {
+	if p.Header.IsSet(Dead) {
 		// page marked for deletion, overwrite with 0s
 		var isRoot bool
 		p.pgeData = [PAGE_SIZE_BYTES]byte{}
 
-		DiskBTree.mu.RLock()
-		isRoot = DiskBTree.RootNode.Header.PageId == p.Header.PageId
-		n, err := DiskBTree.fd.WriteAt(p.pgeData[:], int64(p.Header.PageId*PAGE_SIZE_BYTES))
+		d.mu.RLock()
+		isRoot = d.RootPage == p.Header.PageId
+		n, err := d.fd.WriteAt(p.pgeData[:], int64(p.Header.PageId*PAGE_SIZE_BYTES))
 
 		if err != nil {
 			panic("Could not write page")
 		}
 
-		DiskBTree.mu.RUnlock()
+		d.mu.RUnlock()
 
-		DiskBTree.mu.Lock()
+		d.mu.Lock()
 
-		if isRoot && DiskBTree.PageCount == 1 {
-			DiskBTree.RootPage = 0
-			DiskBTree.RootNode = nil
+		// if page is root and it's the onlly one, reset root page
+		if isRoot && d.PageCount == 1 {
+			d.RootPage = 0
+			// d.RootNode = nil
 		}
 
-		if DiskBTree.PageCount > 0 {
-			DiskBTree.PageCount -= 1
+		if d.PageCount > 0 {
+			d.PageCount -= 1
 		}
-		DiskBTree.mu.Unlock()
+		d.mu.Unlock()
 
-		// delete from LUT
-		// err = LookupTable.DeletePageOffset(int(p.Header.PageId))
 		// add to free list
 		added := PgFreeList.add(uint32(p.Header.PageId))
 
@@ -851,13 +813,13 @@ func (p *Page) flushPage(b chan int32) {
 		// send to channel
 		b <- int32(n)
 
-		DiskBTree.flushMetadata()
+		d.flushMetadata()
 
 		return
 	}
 
 	// set stored in disk flag and offset to lookup table
-	DiskBTree.incrementFlushedPages()
+	d.incrementFlushedPages()
 	// write page to disk
 	p.Header.mu.RLock()
 	offs := p.Header.PageId * PAGE_SIZE_BYTES
@@ -865,9 +827,9 @@ func (p *Page) flushPage(b chan int32) {
 
 	fmt.Println("WRITING TO OFFSET: ", offs)
 
-	DiskBTree.mu.RLock()
-	n, err := DiskBTree.fd.WriteAt(p.pgeData[:], int64(offs))
-	DiskBTree.mu.RUnlock()
+	d.mu.RLock()
+	n, err := d.fd.WriteAt(p.pgeData[:], int64(offs))
+	d.mu.RUnlock()
 
 	if err != nil {
 		panic("Could not write page")
@@ -876,7 +838,7 @@ func (p *Page) flushPage(b chan int32) {
 	// Unmark as dirty
 	// p.Header.unsetFlag(5)
 	// set stored to disk flag
-	p.Header.setFlag(6)
+	p.Header.setFlag(Written)
 	fmt.Println("flushed page:=> ", p.Header.PageId)
 	// send to channel
 	b <- int32(n)
@@ -888,7 +850,7 @@ func (p *Page) IsInternal() (bool, error) {
 		return false, DiskioError{Message: "No header set for this page"}
 	}
 
-	return p.Header.IsSet(7), nil
+	return p.Header.IsSet(IsInternal), nil
 }
 
 func (p *Page) IsDirty() (bool, error) {
@@ -896,17 +858,20 @@ func (p *Page) IsDirty() (bool, error) {
 		return false, DiskioError{Message: "No header set for this page"}
 	}
 
-	return p.Header.IsSet(5), nil
+	return p.Header.IsSet(Dirty), nil
 }
 
 // returns keys,  values and children from pgeData []byte and error if any
-func (p *Page) GetCellData() ([][]byte, [][]byte, []int32, error) {
-	p.Rmu.RLock()
-	defer p.Rmu.RUnlock()
+func (p *Page) GetCellData() (keys [][]byte, vals [][]byte, children []int32, rightPtr int32, err error) {
+	p.rmu.RLock()
+	defer p.rmu.RUnlock()
 
 	p.Header.mu.RLock()
 	itemCount := p.Header.Items
-	isInternal := p.Header.IsSet(7)
+	isInternal := p.Header.IsSet(IsInternal)
+	rightChild := p.Header.RightChild
+	// rightSib := p.Header.RightSibling
+	// leftSib := p.Header.LeftSibling
 	p.Header.mu.RUnlock()
 
 	var cellOff uint32
@@ -915,8 +880,8 @@ func (p *Page) GetCellData() ([][]byte, [][]byte, []int32, error) {
 	var pageId uint32
 
 	fmt.Println("(GetCellData) ITEM COUNT => ", itemCount)
-	keys := make([][]byte, itemCount)
-	vals := make([][]byte, 0)
+	k := make([][]byte, itemCount)
+	v := make([][]byte, 0)
 	child := make([]int32, 0)
 
 	for i := range itemCount {
@@ -933,17 +898,17 @@ func (p *Page) GetCellData() ([][]byte, [][]byte, []int32, error) {
 			child = append(child, int32(pageId))
 		} else {
 			val := p.pgeData[cellOff+13+keySize : cellOff+13+keySize+valSize]
-			vals = append(vals, val)
+			v = append(v, val)
 		}
 
 		key := p.pgeData[cellOff+13 : cellOff+13+keySize]
 		fmt.Println("(Get Cell data) KEY TO ADD => ", key)
-		keys[i] = key
-		fmt.Println("(Get Cell data) Keys after adding =>", keys)
+		k[i] = key
+		fmt.Println("(Get Cell data) Keys after adding =>", k)
 
 	}
 
-	return keys, vals, child, nil
+	return k, v, child, rightChild, nil
 }
 
 // Convert items in cell to byte array
@@ -1086,7 +1051,7 @@ func (h *PageHeader) updateLeftSibling(pageId uint32) {
 func (h *PageHeader) markAsDead() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.setFlag(4)
+	h.setFlag(Dead)
 }
 
 func (q *JobQueue) run() {
@@ -1126,7 +1091,7 @@ func (q *JobQueue) addJob(job IOReq) {
 func (r *IOReq) execute() {
 	if r.Read {
 		// Read from disk, create Page and return that in channel
-		p, err := DiskBTree.loadPage(int32(r.PageId))
+		p, err := r.dManager.loadPage(int32(r.PageId))
 
 		if err != nil {
 			panic(err.Error())
@@ -1135,11 +1100,11 @@ func (r *IOReq) execute() {
 		*(r.ReadPage) <- p
 	} else {
 		// Write page to disk
-		r.WritePage.flushPage(*r.Flushed)
+		r.dManager.flushPage(r.WritePage, *r.Flushed)
 	}
 }
 
-func init() {
+func NewDiskManager() *DiskManager {
 	fmt.Println("IN INIT()")
 	// InitLookupTable()
 	PgFreeList = NewFreeList()
@@ -1152,8 +1117,8 @@ func init() {
 		log.Fatal(err)
 	}
 
-	DiskBTree = &DiskTree{
-		RootNode:  nil,
+	diskManager := &DiskManager{
+		// RootNode:  nil,
 		RootPage:  0,
 		PageCount: 0,
 		// Queues:    make(map[uint32]*JobQueue),
@@ -1162,7 +1127,7 @@ func init() {
 
 	// Calculate PageCount
 	metadataPage := make([]byte, METADATA_PAGE_SIZE_BYTES)
-	r, err := DiskBTree.fd.Read(metadataPage)
+	r, err := diskManager.fd.Read(metadataPage)
 
 	if err != nil && !errors.Is(err, io.EOF) {
 		fmt.Println("ERR reading data file: ", err.Error())
@@ -1184,16 +1149,16 @@ func init() {
 		binary.LittleEndian.PutUint32(metadataPage[16:], uint32(0))
 		//fmt.Println("METADATA PAGE => ", metadataPage)
 
-		_, err = DiskBTree.fd.Write(metadataPage)
+		_, err = diskManager.fd.Write(metadataPage)
 
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		// Flush
-		err = DiskBTree.fd.Sync()
+		err = diskManager.fd.Sync()
 
-		return
+		return diskManager
 	}
 
 	// fmt.Println("CONTENT ==> ", metadataPage)
@@ -1206,21 +1171,23 @@ func init() {
 	fmt.Println("Root Page ID => ", metadataPage[0:4], rootPgeID)
 
 	fmt.Println("Page Count => ", pageCount)
-	DiskBTree.PageCount = int32(pageCount)
-	DiskBTree.MaxPageId = int32(maxPageId)
+	diskManager.PageCount = int32(pageCount)
+	diskManager.MaxPageId = int32(maxPageId)
 
 	// If root is present, traverse
 	if rootPgeID != 0 {
 		// Create root node
-		// Set DiskTree Variable
+		// Set DiskManager Variable
 		// traverse
-		DiskBTree.startupTraversal(int32(rootPgeID))
+		diskManager.startupTraversal(int32(rootPgeID))
 
-		return
+		return diskManager
 	}
 
-	fmt.Println("DISKBTREE ROOT NODE => ", DiskBTree.RootNode)
-	fmt.Println("Initialized DiskBTree....")
+	fmt.Println("DISKBTREE ROOT NODE => ", diskManager.RootPage)
+	fmt.Println("Initialized d....")
+
+	return diskManager
 }
 
 func newJobQueue() *JobQueue {

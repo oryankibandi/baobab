@@ -12,13 +12,14 @@ import (
 
 type TraversePath struct {
 	n   *Node
-	idx uint32
+	idx uint32 // index followed to get to child node
 }
 
 type BTStack struct {
 	Count int
 	stack map[int]*TraversePath // ID and value. Id is incremented monotonically from 0
 	maxId int
+	root  uint32
 }
 
 func (bt *BTStack) Add(n *TraversePath) (bool, error) {
