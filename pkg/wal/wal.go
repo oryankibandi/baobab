@@ -13,15 +13,16 @@ const (
 	WAL_PAGE_HEADER_SIZE = 8
 	WAL_SEG_FILE_SIZE    = 16777216
 	BLOG_HEADER_SIZE     = 22
-	CHECKPOINT_SIZE      = 5
+	CHECKPOINT_SIZE      = 13
 	LSN_SIZE             = 8
 )
 
 // WAL config
 const (
-	WAL_FLUSH_DELAY = 200      // period after which to flush WAL buffer contents
-	WAL_PATH        = "bb.wal" // file path to use as wal
-	WAL_MAGIC_NO    = 65544    // 4 byte number that stores wal version (2 bytes) & page size (2 bytes)
+	WAL_FLUSH_DELAY = 200         // period after which to flush WAL buffer contents
+	WAL_PATH        = "bb.wal"    // file path to use as wal
+	WAL_CONFIG_PATH = "bb_config" // bb_config file stores LSN of latest checkpoint
+	WAL_MAGIC_NO    = 65544       // 4 byte number that stores wal version (2 bytes) & page size (2 bytes)
 )
 
 const (
@@ -58,8 +59,9 @@ type BLogHeader struct {
 
 // Structure of a Checkpoint
 type CheckPoint struct {
-	flag      byte   // Checkpoint flag
-	redoPoint uint32 // REDO point from which to begin recovery
+	flag          byte   // Checkpoint flag (1 byte)
+	redoPoint     uint32 // REDO point from which to begin recovery (4 bytes)
+	checkpointLSN []byte // 8-byte LSN
 }
 
 // Structure of WAL 8K Page Header
@@ -194,10 +196,10 @@ func (w *WAL) AddPutLog(pageId uint32, key []byte, val []byte) ([]byte, error) {
 		return nil, WalError{Message: "Cannot add empty val in WAL"}
 	}
 
-	lsn := w.walWriter.assignLSN(uint32(kLen) + uint32(vLen))
-
 	// calculate size of log
 	lSize := BLOG_HEADER_SIZE + 9 + kLen + vLen
+
+	lsn := w.walWriter.assignLSN(uint32(lSize))
 
 	hdr := BLogHeader{
 		flag:   make([]byte, 2),
@@ -231,19 +233,28 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 
 	// calculate offset(REDO point)
 	page := binary.LittleEndian.Uint32(latestLSN[:4])
-	offset := binary.LittleEndian.Uint32(latestLSN[4:])
+	redoOffset := binary.LittleEndian.Uint32(latestLSN[4:])
 
-	redoPoint := (page * WAL_PAGE_SIZE) + offset
+	redoPoint := (page * WAL_PAGE_SIZE) + redoOffset
+
+	// get LSN
+	lsn := w.walWriter.assignLSN(CHECKPOINT_SIZE)
 
 	// construct checkpoint
 	cp := CheckPoint{
-		flag:      byte(0),
-		redoPoint: redoPoint,
+		flag:          byte(0),
+		redoPoint:     redoPoint,
+		checkpointLSN: lsn,
 	}
 
 	w.walBuff.Add(&cp)
 
-	log.Println("ADDED CHECKPOINT ++++++++++++++")
+	log.Println("ADDED CHECKPOINT, writing config file ")
+	err := w.walWriter.saveCheckpoint(lsn)
+
+	if err != nil {
+		panic(err)
+	}
 
 	return nil
 }
@@ -256,9 +267,10 @@ func (w *WAL) AddDelLog(pageId uint32, key []byte) ([]byte, error) {
 		return nil, WalError{Message: "Cannot add empty key in WAL"}
 	}
 
-	lsn := w.walWriter.assignLSN(uint32(kLen))
-
 	lSize := BLOG_HEADER_SIZE + 5 + kLen
+
+	lsn := w.walWriter.assignLSN(uint32(lSize))
+
 	hdr := BLogHeader{
 		flag:   make([]byte, 2),
 		lsn:    lsn,

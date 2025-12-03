@@ -5,6 +5,7 @@ data_fl
 
 # WAL file
 *.wal
+bb_config
 
 # binaries
 bin/

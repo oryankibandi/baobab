@@ -3,6 +3,7 @@ package wal
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 )
@@ -14,6 +15,7 @@ type WriteReq struct {
 
 type WalWriter struct {
 	fd        *os.File
+	confFD    *os.File
 	queue     *WriteQueue
 	maxPage   uint32 // Latest page in WAL file
 	maxOffset uint32 // Largest offset in WAL segment
@@ -91,6 +93,36 @@ func (wr *WalWriter) assignLSN(logSize uint32) []byte {
 	return lsn
 }
 
+// Writes the LSN of the latest checkpoint to a separate file for recovery.
+func (wr *WalWriter) saveCheckpoint(lsn []byte) error {
+	wr.mu.Lock()
+	defer wr.mu.Unlock()
+
+	if wr.confFD == nil {
+		return WalError{Message: fmt.Sprintf("No file descriptor for config file: %s", WAL_CONFIG_PATH)}
+	}
+
+	// write lsn to file. Overwrite existing data.
+	err := wr.confFD.Truncate(0)
+
+	if err != nil {
+		panic(fmt.Errorf("Unable to truncate config file: %v", err))
+	}
+	_, err = wr.confFD.Seek(0, 0)
+	if err != nil {
+		panic(fmt.Errorf("Unable to Seek config file: %v", err))
+	}
+
+	n, err := wr.confFD.Write(lsn)
+	if err != nil {
+		panic(fmt.Errorf("Unable to write to config file: %v", err))
+	}
+
+	log.Printf("(saveCheckpoint) Written %d bytes\n", n)
+
+	return nil
+}
+
 // remove and returns the head item from the queue
 func (wq *WriteQueue) unshift() *WriteNode {
 	wq.mu.Lock()
@@ -157,10 +189,18 @@ func NewWalWriter(path string) *WalWriter {
 		panic(fmt.Sprintf("Unable to open wal: %v", err))
 	}
 
+	// open config file with write only flag
+	confFd, err := os.OpenFile(WAL_CONFIG_PATH, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+
+	if err != nil {
+		panic(fmt.Sprintf("Unable to open config file: %d: %v", WAL_CONFIG_PATH, err))
+	}
+
 	jobQueue := WriteQueue{}
 
 	wr := WalWriter{
 		fd:        fd,
+		confFD:    confFd,
 		queue:     &jobQueue,
 		maxPage:   maxPage,
 		maxOffset: maxOff,
