@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	diskmanager "github.com/oryankibandi/baobab/pkg/disk_io"
+	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
 // Ideally, window cache size ≈ 1%, main cache ≈ 99%
@@ -443,9 +444,9 @@ func (c *Cache) MarkFrameDirty(f *Frame) error {
 
 // Creates a new frame and assigns page ID to frame with provided keys and values/child
 // SetAsRoot parameter ensures to set
-func (c *Cache) CreateNewEntry(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Frame, error) {
+func (c *Cache) CreateNewEntry(lsn []byte, keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Frame, error) {
 	// create page
-	pgeId, pge, err := c.diskManager.NewPage(keys, values, childPageIds, setAsRoot)
+	pgeId, pge, err := c.diskManager.NewPage(lsn, keys, values, childPageIds, setAsRoot)
 
 	if err != nil {
 		return nil, err
@@ -484,7 +485,8 @@ func (c *Cache) prepareForEviction(f *Frame) error {
 	f.mu.Lock()
 	f.mu.Unlock()
 	ch := make(chan int32)
-	err := c.diskManager.WriteReq(f.page, &ch)
+	lsnChan := make(chan []byte)
+	err := c.diskManager.WriteReq(f.page, &ch, &lsnChan)
 
 	if err != nil {
 		panic(err.Error())
@@ -513,14 +515,17 @@ func (c *Cache) SetNewRoot(f *Frame) error {
 // Syncs contents to the frame's associated page.
 // Called when the materialized node has been updated
 // through DELETEs, PUTs, Merges or Splits
-func (c *Cache) SyncFrame(f *Frame, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
+func (c *Cache) SyncFrame(f *Frame, lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
+	if len(lsn) != diskmanager.LSN_SIZE_BYTE {
+		panic(fmt.Errorf("Invalid LSN length. Got length %d, expected length %d", len(lsn), diskmanager.LSN_SIZE_BYTE))
+	}
 	f.mu.Lock()
 	if f.page == nil {
 		f.mu.Unlock()
 		return BufferManagerError{Message: "No page associated with frame"}
 	}
 
-	err := f.page.Sync(keys, vals, pageIds, rightSibling, leftSibling)
+	err := f.page.Sync(lsn, keys, vals, pageIds, rightSibling, leftSibling)
 	fmt.Println("DONE SYNCING...")
 
 	if err != nil {
@@ -550,7 +555,7 @@ func (c *Cache) Close() error {
 }
 
 // Create new cache instance\n windowSize, probationSize and protectedSize are sized of the individual segments
-func NewCache(windowSize uint64, mainCacheSize uint64) (*Cache, error) {
+func NewCache(windowSize uint64, mainCacheSize uint64, wal *wal.WAL) (*Cache, error) {
 	if windowSize <= 0 {
 		return nil, errors.New("Window size must be greater than 0")
 	}
@@ -575,7 +580,7 @@ func NewCache(windowSize uint64, mainCacheSize uint64) (*Cache, error) {
 	}
 
 	// create new background writer
-	bg := NewBgWriter(&n)
+	bg := NewBgWriter(&n, wal)
 
 	go bg.Start()
 

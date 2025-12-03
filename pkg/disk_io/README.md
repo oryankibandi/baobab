@@ -34,6 +34,36 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
  +----------------------+  offset 8192
  ```
 
+### Page Header Layout
+```bash
++-----------------------+   offset 0
+|     Flag              |
++-----------------------+   offset 1
+|     Page ID           |
++-----------------------+   offset 5
+|     LSN               |
++-----------------------+   offset 13
+|     Item Count        |
++-----------------------+   offset 17
+|     Free Space        |
++-----------------------+   offset 21
+|     Upper Offset      |
++-----------------------+   offset 25
+|     Lower Offset      |
++-----------------------+   offset 29
+|     Magic No.         |
++-----------------------+   offset 33
+|     Checksum          |
++-----------------------+   offset 35
+|     Right Child       |
++-----------------------+   offset 39
+|     Right Sibling     |
++-----------------------+   offset 43
+|     Left Sibling      |
++-----------------------+   offset 47
+
+```
+
  ### Cell Layout
  ```bash
  0		         1		          5                  9             13        + key_size      + value_size

@@ -9,22 +9,20 @@ import (
 	"log"
 	"os"
 	"sync"
-
-	"github.com/oryankibandi/baobab/pkg/errors"
-	//"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
 const (
 	DEGREE                   = 2
 	ORDER                    = DEGREE * 2
 	PAGE_SIZE_BYTES          = 8192
-	HEADER_SIZE_BYTES        = 39
+	HEADER_SIZE_BYTES        = 47
 	METADATA_PAGE_SIZE_BYTES = 8192 //20
 	LOWER_PADDING_BYTES      = 16
 	CELL_POINTER_SIZE_BYTE   = 5
 	CELL_KEY_SIZE_BYTES      = 4
 	CELL_VAL_SIZE_BYTES      = 4
 	CELL_CHILD_PAGEID_SIZE   = 4
+	LSN_SIZE_BYTE            = 8
 )
 
 // Page Header Flag bits
@@ -57,17 +55,18 @@ type Cell struct {
 
 // Header 31B
 type PageHeader struct {
-	Flags        byte  // 1 Byte
-	PageId       int32 // ID of page. Possibly aligns with number of block/page number on disk
-	Items        int32 // No of items (4 Bytes)
-	FreeSpace    int32 // Amount of free space in bytes (4 Bytes)
-	UpperOffset  int32 //  End of free space
-	LowerOffset  int32 //  Begining of free space
-	MagicNumber  int32 // Magic Number 4 Bytes
-	Checksum     int16 // Checksum 2 Bytes
-	RightChild   int32 // Right most pointer for internal nodes
-	RightSibling int32 // PageId of the right sibling. 0 if none.
-	LeftSibling  int32 // PageId of the left sibling. 0 if none.
+	Flags        byte   // 1 Byte
+	PageId       int32  // ID of page. Possibly aligns with number of block/page number on disk
+	LSN          []byte // 8 byte Log Sequence Number of the latest operation modifying the page
+	Items        int32  // No of items (4 Bytes)
+	FreeSpace    int32  // Amount of free space in bytes (4 Bytes)
+	UpperOffset  int32  //  End of free space
+	LowerOffset  int32  //  Begining of free space
+	MagicNumber  int32  // Magic Number 4 Bytes
+	Checksum     int16  // Checksum 2 Bytes
+	RightChild   int32  // Right most pointer for internal nodes
+	RightSibling int32  // PageId of the right sibling. 0 if none.
+	LeftSibling  int32  // PageId of the left sibling. 0 if none.
 	mu           sync.RWMutex
 }
 
@@ -100,11 +99,12 @@ type DiskManager struct {
 
 // Disk req for reads and writes
 type IOReq struct {
-	Read      bool        // Is read request
-	PageId    uint32      // ID of page to read
-	ReadPage  *chan *Page // if read req, new page read
-	Flushed   *chan int32 // Amount of bytes written.
-	WritePage *Page       // if write req, page to write
+	Read      bool         // Is read request
+	PageId    uint32       // ID of page to read
+	ReadPage  *chan *Page  // if read req, new page read
+	Flushed   *chan int32  // Amount of bytes written.
+	lsnChan   *chan []byte // channel to send back log sequence number of page after flushing. This is used by the background writer to create a checkpoint in WAL
+	WritePage *Page        // if write req, page to write
 	dManager  *DiskManager
 }
 
@@ -174,22 +174,22 @@ func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
 	flag := int(pgeHeader[0])
 
 	fmt.Println("PGE HEADER ===> ", pgeHeader)
-	fmt.Println("MAGIC NO => ", pgeHeader[25:])
 
 	pageID := binary.LittleEndian.Uint32(pgeHeader[1:5])
-	itemCount := binary.LittleEndian.Uint32(pgeHeader[5:9])
-	upperOffset := binary.LittleEndian.Uint32(pgeHeader[13:17])
-	lowerOff := binary.LittleEndian.Uint32(pgeHeader[17:21])
-	freeSpace := binary.LittleEndian.Uint32(pgeHeader[9:13])
-	checksum := binary.LittleEndian.Uint32(pgeHeader[21:25])
-	magicNumber := binary.LittleEndian.Uint16(pgeHeader[25:27])
-	rightPtr := binary.LittleEndian.Uint32(pgeHeader[27:31])
-	rightChild := binary.LittleEndian.Uint32(pgeHeader[31:35])
-	leftChild := binary.LittleEndian.Uint32(pgeHeader[35:])
+	itemCount := binary.LittleEndian.Uint32(pgeHeader[13:17])
+	upperOffset := binary.LittleEndian.Uint32(pgeHeader[21:25])
+	lowerOff := binary.LittleEndian.Uint32(pgeHeader[25:29])
+	freeSpace := binary.LittleEndian.Uint32(pgeHeader[17:21])
+	checksum := binary.LittleEndian.Uint16(pgeHeader[33:35])
+	magicNumber := binary.LittleEndian.Uint32(pgeHeader[29:33])
+	rightPtr := binary.LittleEndian.Uint32(pgeHeader[35:39])
+	rightSib := binary.LittleEndian.Uint32(pgeHeader[39:43])
+	leftSib := binary.LittleEndian.Uint32(pgeHeader[43:])
 
 	h := PageHeader{
 		Flags:        pgeHeader[0],
 		PageId:       int32(pageID),
+		LSN:          pgeHeader[5:13],
 		Items:        int32(itemCount),
 		FreeSpace:    int32(freeSpace),
 		UpperOffset:  int32(upperOffset),
@@ -197,8 +197,8 @@ func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
 		MagicNumber:  int32(magicNumber),
 		Checksum:     int16(checksum),
 		RightChild:   int32(rightPtr),
-		RightSibling: int32(rightChild),
-		LeftSibling:  int32(leftChild),
+		RightSibling: int32(rightSib),
+		LeftSibling:  int32(leftSib),
 	}
 
 	// fmt.Println("HEADER =========================> ", h)
@@ -311,7 +311,7 @@ func (d *DiskManager) flushMetadata() {
 }
 
 // Creates write request for `page` and adds it to queue
-func (d *DiskManager) WriteReq(page *Page, written *chan int32) error {
+func (d *DiskManager) WriteReq(page *Page, written *chan int32, lsnChan *chan []byte) error {
 	if page == nil {
 		*written <- -1
 		return DiskioError{Message: "Page is required"}
@@ -322,6 +322,7 @@ func (d *DiskManager) WriteReq(page *Page, written *chan int32) error {
 		PageId:    uint32(page.Header.PageId),
 		Flushed:   written,
 		WritePage: page,
+		lsnChan:   lsnChan,
 		dManager:  d,
 	}
 
@@ -419,14 +420,14 @@ func (d *DiskManager) Close() {
 }
 
 // Create a new Page. Requires at least two keys and values/pointers. Key should be sorted in a lexicographical order
-func (d *DiskManager) NewPage(keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (int32, *Page, error) {
+func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (int32, *Page, error) {
 	fmt.Println("(NEW) KEYS ==> ", keys)
 	if ((values == nil || len(*values) <= 0) && (len(keys) < DEGREE-1 || len(keys) > ORDER-1)) && !setAsRoot {
-		return 0, nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
+		return 0, nil, DiskioError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
 	}
 
 	if ((childPageIds == nil || len(*childPageIds) <= 0) && (len(keys) < DEGREE || len(keys) > ORDER)) && !setAsRoot {
-		return 0, nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
+		return 0, nil, DiskioError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
 	}
 
 	if values == nil && childPageIds == nil {
@@ -437,8 +438,12 @@ func (d *DiskManager) NewPage(keys [][]byte, values *([][]byte), childPageIds *[
 	log.Printf("CHILD PAGE IDS ==> %v\n", childPageIds)
 
 	if (values != nil && len(*values) <= 0) && len(*childPageIds) <= 0 {
-		return 0, nil, btreeerrors.BTreeError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
+		return 0, nil, DiskioError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
 	}
+	//
+	// 	if len(lsn) != LSN_SIZE_BYTE {
+	// 		return 0, nil, DiskioError{Message: fmt.Sprintf("Invalid LSN length. Got length %d, expected length %d", len(lsn), LSN_SIZE_BYTE)}
+	// 	}
 
 	fmt.Println("GETTING PAGE..")
 
@@ -467,6 +472,10 @@ func (d *DiskManager) NewPage(keys [][]byte, values *([][]byte), childPageIds *[
 		UpperOffset: PAGE_SIZE_BYTES - LOWER_PADDING_BYTES,
 		LowerOffset: HEADER_SIZE_BYTES,
 		RightChild:  rightPtr,
+	}
+
+	if lsn != nil && len(lsn) == LSN_SIZE_BYTE {
+		h.setLSN(lsn)
 	}
 
 	// If internal node, set flag
@@ -554,7 +563,7 @@ func (h *PageHeader) GetSiblngs() (rightSibling int32, leftSibling int32) {
 //	func (p *Page) insertCells(keys [][]byte, vals *([][]byte), pageIds *[]int32) error {
 //		fmt.Println("(INSERT CELL) KEYS => ", keys)
 //		if vals == nil && pageIds == nil {
-//			return btreeerrors.BTreeError{Message: "Values or pageIds required"}
+//			return DiskioError{Message: "Values or pageIds required"}
 //		}
 //
 //		if len(keys) <= 0 || (len(*vals) <= 0 && len(*pageIds) <= 0) {
@@ -641,15 +650,33 @@ func (d *DiskManager) SetAsRoot(pageId int32) error {
 
 // Check if page is marked for deletion
 func (p *Page) IsDeleted() bool {
+	fmt.Println("(IsDeleted) Acquiring page lock...")
 	p.rmu.Lock()
+	fmt.Println("(IsDeleted) Acquired page lock...")
 	defer p.rmu.Unlock()
 	d := p.Header.IsSet(Dead)
 
 	return d
 }
 
+func (p *Page) UpdateLSN(lsn []byte) error {
+	p.rmu.RLock()
+	defer p.rmu.RUnlock()
+	if p.Header == nil {
+		return DiskioError{Message: "(UpdateLSN) No Header attached to page"}
+	}
+
+	p.Header.setLSN(lsn)
+
+	return nil
+}
+
 // Synchronizes keys, values and  page IDs in node to items in Page
-func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
+func (p *Page) Sync(lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
+	if len(lsn) != LSN_SIZE_BYTE {
+		return DiskioError{Message: fmt.Sprintf("Invalid LSN length. Got length %d, expected length %d", len(lsn), LSN_SIZE_BYTE)}
+	}
+
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
 	fmt.Println("(Sync) IN SYNC ==> ")
@@ -761,13 +788,16 @@ func (p *Page) Sync(keys [][]byte, vals [][]byte, pageIds []int32, rightSibling 
 	return nil
 }
 
-// Flush page content to disk(do not call sync())
-func (d *DiskManager) flushPage(p *Page, b chan int32) {
+// Flushes page content to disk(does not call sync())
+// Sends number of bytes written to channel b
+func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
 
 	// Unmark as dirty
 	p.Header.unsetFlag(Dirty)
+
+	seqNo := p.Header.getLSN()
 
 	// update page header data
 	hdrBytes := p.Header.toBytes()
@@ -811,7 +841,8 @@ func (d *DiskManager) flushPage(p *Page, b chan int32) {
 		fmt.Println("CLEARED PAGE ", p.Header.PageId)
 
 		// send to channel
-		b <- int32(n)
+		*b <- int32(n)
+		*lsnChan <- seqNo
 
 		d.flushMetadata()
 
@@ -839,9 +870,11 @@ func (d *DiskManager) flushPage(p *Page, b chan int32) {
 	// p.Header.unsetFlag(5)
 	// set stored to disk flag
 	p.Header.setFlag(Written)
-	fmt.Println("flushed page:=> ", p.Header.PageId)
 	// send to channel
-	b <- int32(n)
+	*b <- int32(n)
+	*lsnChan <- seqNo
+
+	return
 }
 
 // Check wheather the page represents an internal node
@@ -960,15 +993,16 @@ func (h *PageHeader) toBytes() []byte {
 
 	headerBytes[0] = h.Flags
 	binary.LittleEndian.PutUint32(headerBytes[1:5], uint32(h.PageId))
-	binary.LittleEndian.PutUint32(headerBytes[5:9], uint32(h.Items))
-	binary.LittleEndian.PutUint32(headerBytes[9:13], uint32(h.FreeSpace))
-	binary.LittleEndian.PutUint32(headerBytes[13:17], uint32(h.UpperOffset))
-	binary.LittleEndian.PutUint32(headerBytes[17:21], uint32(h.LowerOffset))
-	binary.LittleEndian.PutUint32(headerBytes[21:25], uint32(h.MagicNumber))
-	binary.LittleEndian.PutUint16(headerBytes[25:27], uint16(h.Checksum))
-	binary.LittleEndian.PutUint32(headerBytes[27:31], uint32(h.RightChild))
-	binary.LittleEndian.PutUint32(headerBytes[31:35], uint32(h.RightSibling))
-	binary.LittleEndian.PutUint32(headerBytes[35:], uint32(h.LeftSibling))
+	copy(headerBytes[5:13], h.LSN)
+	binary.LittleEndian.PutUint32(headerBytes[13:17], uint32(h.Items))
+	binary.LittleEndian.PutUint32(headerBytes[17:21], uint32(h.FreeSpace))
+	binary.LittleEndian.PutUint32(headerBytes[21:25], uint32(h.UpperOffset))
+	binary.LittleEndian.PutUint32(headerBytes[25:29], uint32(h.LowerOffset))
+	binary.LittleEndian.PutUint32(headerBytes[29:33], uint32(h.MagicNumber))
+	binary.LittleEndian.PutUint16(headerBytes[33:35], uint16(h.Checksum))
+	binary.LittleEndian.PutUint32(headerBytes[35:39], uint32(h.RightChild))
+	binary.LittleEndian.PutUint32(headerBytes[39:43], uint32(h.RightSibling))
+	binary.LittleEndian.PutUint32(headerBytes[43:], uint32(h.LeftSibling))
 
 	fmt.Println("HEADER TO BYTES => ", headerBytes)
 
@@ -1054,6 +1088,22 @@ func (h *PageHeader) markAsDead() {
 	h.setFlag(Dead)
 }
 
+func (h *PageHeader) setLSN(lsn []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.LSN = lsn
+}
+
+func (h *PageHeader) getLSN() []byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	l := h.LSN
+
+	return l
+}
+
 func (q *JobQueue) run() {
 	q.mu.Lock()
 	q.running = true
@@ -1100,7 +1150,7 @@ func (r *IOReq) execute() {
 		*(r.ReadPage) <- p
 	} else {
 		// Write page to disk
-		r.dManager.flushPage(r.WritePage, *r.Flushed)
+		r.dManager.flushPage(r.WritePage, r.Flushed, r.lsnChan)
 	}
 }
 

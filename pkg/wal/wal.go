@@ -12,8 +12,9 @@ const (
 	WAL_PAGE_SIZE        = 8192
 	WAL_PAGE_HEADER_SIZE = 8
 	WAL_SEG_FILE_SIZE    = 16777216
-	BLOG_HEADER_SIZE     = 18
+	BLOG_HEADER_SIZE     = 22
 	CHECKPOINT_SIZE      = 5
+	LSN_SIZE             = 8
 )
 
 // WAL config
@@ -36,7 +37,7 @@ type OperationType int
 
 // Structure of a log, otherwise known as B-LOG
 type BLog struct {
-	header  *BLogHeader   // 18 byte Header
+	header  *BLogHeader   // 22 byte Header
 	opType  OperationType // Type of operation (1 byte)
 	keySize uint32        // Size of key (4 bytes)
 	key     []byte        // Key (keySize)
@@ -51,6 +52,7 @@ type BLogHeader struct {
 	lsn    []byte // 8 byte log sequence number
 	pageId uint32 // ID of page where this change affects. This will be used to compare LSN during recovery
 	crc    uint32 // Cyclic Redundacy Check number for integrity checks
+	lSize  uint32 // Size of B-LOG
 	mu     sync.Mutex
 }
 
@@ -79,8 +81,9 @@ func (h *BLogHeader) toBytes() [BLOG_HEADER_SIZE]byte {
 
 	copy(hdr[0:2], h.flag)
 	copy(hdr[2:10], h.lsn)
-	binary.LittleEndian.PutUint32(hdr[10:14], h.pageId)
-	binary.LittleEndian.PutUint32(hdr[14:18], h.crc)
+	binary.LittleEndian.PutUint32(hdr[10:14], h.lSize)
+	binary.LittleEndian.PutUint32(hdr[14:18], h.pageId)
+	binary.LittleEndian.PutUint32(hdr[18:22], h.crc)
 
 	log.Println("(toBytes) BLOG HEADER ==> ", hdr)
 
@@ -161,10 +164,10 @@ func (b *BLog) checkLogOverflow(data []byte, page uint32, offset uint32) []byte 
 
 // Returns the raw byte value of the Checkpoint
 func (c *CheckPoint) toBytes() []byte {
-	chckpnt := make([]byte, 0)
+	chckpnt := make([]byte, CHECKPOINT_SIZE)
 
-	chckpnt = append(chckpnt, c.flag)
-	binary.LittleEndian.PutUint32(chckpnt, c.redoPoint)
+	chckpnt[0] = c.flag
+	binary.LittleEndian.PutUint32(chckpnt[1:CHECKPOINT_SIZE], c.redoPoint)
 
 	return chckpnt
 }
@@ -193,11 +196,15 @@ func (w *WAL) AddPutLog(pageId uint32, key []byte, val []byte) ([]byte, error) {
 
 	lsn := w.walWriter.assignLSN(uint32(kLen) + uint32(vLen))
 
+	// calculate size of log
+	lSize := BLOG_HEADER_SIZE + 9 + kLen + vLen
+
 	hdr := BLogHeader{
 		flag:   make([]byte, 2),
 		lsn:    lsn,
 		pageId: pageId,
 		crc:    0, // TBC when adding CRC
+		lSize:  uint32(lSize),
 	}
 
 	log := BLog{
@@ -215,6 +222,32 @@ func (w *WAL) AddPutLog(pageId uint32, key []byte, val []byte) ([]byte, error) {
 	return lsn, nil
 }
 
+// Adds a checkpoint to tail of the list. This checkpoint contains the REDO point where recovery begins.
+// It is primarily called by the background writer
+func (w *WAL) AddCheckpoint(latestLSN []byte) error {
+	if len(latestLSN) != LSN_SIZE {
+		return WalError{Message: "Invalid LSN size"}
+	}
+
+	// calculate offset(REDO point)
+	page := binary.LittleEndian.Uint32(latestLSN[:4])
+	offset := binary.LittleEndian.Uint32(latestLSN[4:])
+
+	redoPoint := (page * WAL_PAGE_SIZE) + offset
+
+	// construct checkpoint
+	cp := CheckPoint{
+		flag:      byte(0),
+		redoPoint: redoPoint,
+	}
+
+	w.walBuff.Add(&cp)
+
+	log.Println("ADDED CHECKPOINT ++++++++++++++")
+
+	return nil
+}
+
 // Adds a DEL B-LOG to WAL buffer, and return LSN
 func (w *WAL) AddDelLog(pageId uint32, key []byte) ([]byte, error) {
 	kLen := len(key)
@@ -225,10 +258,12 @@ func (w *WAL) AddDelLog(pageId uint32, key []byte) ([]byte, error) {
 
 	lsn := w.walWriter.assignLSN(uint32(kLen))
 
+	lSize := BLOG_HEADER_SIZE + 5 + kLen
 	hdr := BLogHeader{
 		flag:   make([]byte, 2),
 		lsn:    lsn,
 		pageId: pageId,
+		lSize:  uint32(lSize),
 		crc:    0, // TBC when adding CRC
 	}
 

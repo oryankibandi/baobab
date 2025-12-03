@@ -15,8 +15,8 @@ type WriteReq struct {
 type WalWriter struct {
 	fd        *os.File
 	queue     *WriteQueue
-	maxPage   uint32
-	maxOffset uint32
+	maxPage   uint32 // Latest page in WAL file
+	maxOffset uint32 // Largest offset in WAL segment
 	mu        sync.Mutex
 }
 

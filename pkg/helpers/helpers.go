@@ -232,3 +232,40 @@ func KeysToBytes[T ~int32](s []T) ([][]byte, error) {
 
 	return b, nil
 }
+
+// Compares to Log Sequence Numbers and returns the greater one, and error if
+// unsuccessful
+func MaxLSN(lsnA []byte, lsnB []byte) ([]byte, error) {
+	if len(lsnA) < 8 {
+		return nil, HelperError{Message: fmt.Sprintf("Invalid length for lsnA. Got length %d\n", len(lsnA))}
+	}
+
+	if len(lsnB) < 8 {
+		return nil, HelperError{Message: fmt.Sprintf("Invalid length for lsnB. Got length %d\n", len(lsnB))}
+	}
+
+	pageA := binary.LittleEndian.Uint32(lsnA[:4])
+	pageB := binary.LittleEndian.Uint32(lsnB[:4])
+
+	if pageA != pageB {
+		// return lsn with greater page
+		if pageA > pageB {
+			return lsnA, nil
+		} else {
+			return lsnB, nil
+		}
+	}
+
+	// use offset to determin greater LSN
+	offsetA := binary.LittleEndian.Uint32(lsnA[4:])
+	offsetB := binary.LittleEndian.Uint32(lsnB[4:])
+
+	if offsetA > offsetA {
+		return lsnA, nil
+	} else if offsetA < offsetB {
+		return lsnB, nil
+	} else {
+		// offsets are equal return first
+		return lsnA, nil
+	}
+}

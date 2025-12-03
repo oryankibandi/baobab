@@ -42,12 +42,14 @@ type NodeOpResponse struct {
 type SplitResponse struct {
 	PromotedSeparatorKey []byte // Key to promote
 	NewNodeId            uint32 // Child Reference to add.
+	OpLSN                []byte // log Sequence Number for the operation
 }
 
 type MergeMetadata struct {
 	rebalanceKey []byte // new key after rebalance. Should replace the parent's separator key. Default to empty if no redistribution happened
 	rightMerge   bool   // if a merge/rebalance  happened with the right sibing
 	merged       bool   // if a merge happened.
+	OpLSN        []byte // LSN number for the operation
 }
 
 type DeleteResponse struct {
@@ -145,12 +147,12 @@ func (n *Node) split() (*Node, []byte, error) {
 }
 
 // Creates a frame for a new node
-func (n *Node) assignFrame(isRoot bool, cache *bf.Cache) (*bf.Frame, error) {
+func (n *Node) assignFrame(lsn []byte, isRoot bool, cache *bf.Cache) (*bf.Frame, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if n.Leaf {
-		fr, err := cache.CreateNewEntry(n.Keys, &n.Values, nil, isRoot)
+		fr, err := cache.CreateNewEntry(lsn, n.Keys, &n.Values, nil, isRoot)
 
 		if err != nil {
 			return nil, err
@@ -161,7 +163,7 @@ func (n *Node) assignFrame(isRoot bool, cache *bf.Cache) (*bf.Frame, error) {
 
 		return fr, nil
 	} else {
-		fr, err := cache.CreateNewEntry(n.Keys, nil, &n.Children, isRoot)
+		fr, err := cache.CreateNewEntry(lsn, n.Keys, nil, &n.Children, isRoot)
 
 		if err != nil {
 			return nil, err
@@ -181,11 +183,19 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 
 	// If empty (new node), add keys and values then sync
 	if len(n.Keys) <= 0 && len(n.Values) <= 0 {
+		// Add to WAL
+		lsn, err := bt.wal.AddPutLog(uint32(n.PageId), key, val)
+
+		if err != nil {
+			panic(err)
+		}
+
 		n.Keys = append(n.Keys, key)
 		n.Values = append(n.Values, val)
 
 		// Sync to page
-		err := bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		fmt.Println("(line 197) lsn --> ", lsn)
+		err = bt.cache.SyncFrame(fr, lsn, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 		fmt.Println("/////// KEYS AFTER INSERT => ", n.Keys)
 
 		if err != nil {
@@ -257,7 +267,7 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 			// n.postSplitCleanup(idx)
 
 			// create  page for right node
-			newRightFr, err := newRightNode.assignFrame(false, bt.cache)
+			newRightFr, err := newRightNode.assignFrame(lsn, false, bt.cache)
 
 			if err != nil {
 				panic(err)
@@ -294,6 +304,7 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 			rp.PromotedSeparatorKey = append([]byte(nil), newRightNode.Keys[0]...)
 			// copy(rp.PromotedSeparatorKey, newRightNode.Keys[0])
 			rp.NewNodeId = uint32(newRightNode.PageId)
+			rp.OpLSN = lsn
 
 			fmt.Println("NEW  NODE ID: ", rp.NewNodeId)
 			fmt.Println("PROMOTED SEPRATOR KEY -> ", rp.PromotedSeparatorKey)
@@ -301,15 +312,15 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 
 			// newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
 
-			err = bt.cache.SyncFrame(newRightFr, newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
+			err = bt.cache.SyncFrame(newRightFr, lsn, newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
 
 			if err != nil {
 				panic(err)
 			}
 
 			// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-
-			err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+			fmt.Println("(line 322) lsn --> ", lsn)
+			err = bt.cache.SyncFrame(fr, lsn, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 			if err != nil {
 				panic(err)
@@ -319,7 +330,7 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 				fmt.Println("SYNCING OLD RIGHT SIBLING...")
 				// oldRightSibling.Page.Sync(oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
 
-				err := bt.cache.SyncFrame(oldRightFr, oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+				err := bt.cache.SyncFrame(oldRightFr, lsn, oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
 
 				if err != nil {
 					panic(err)
@@ -338,8 +349,8 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 		}
 
 		// err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-
-		bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		fmt.Println("(line 351) lsn ------------> ", lsn)
+		bt.cache.SyncFrame(fr, lsn, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 		if err != nil {
 			panic(err)
@@ -528,6 +539,7 @@ func (bt *BTree) deleteValue(n *Node, f *bf.Frame, key []byte, stack *BTStack, m
 		// Check for underflow
 		if len(n.Keys) < DEGREE {
 			fmt.Println("UNDERFLOW DETECTED------------------>")
+			mr.OpLSN = lsn
 			// merge
 			err = bt.handleLeafUnderflow(mr, n, f)
 
@@ -549,8 +561,8 @@ func (bt *BTree) deleteValue(n *Node, f *bf.Frame, key []byte, stack *BTStack, m
 		}
 
 		// sync
-		// err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-		err = bt.cache.SyncFrame(f, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		fmt.Println("(line 563) lsn --> ", lsn)
+		err = bt.cache.SyncFrame(f, lsn, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 		if err != nil {
 			return -1, err
@@ -642,8 +654,8 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 			mr.rebalanceKey = make([]byte, 0)
 
 			// err = n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-
-			bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+			fmt.Println("(line 657) lsn --> ", mr.OpLSN)
+			bt.cache.SyncFrame(fr, mr.OpLSN, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 			if err != nil {
 				panic(fmt.Errorf("Unable to Sync frame: %v", err))
@@ -702,15 +714,15 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 		totVals = nil
 
 		// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-
-		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		fmt.Println("(line 717) lsn --> ", mr.OpLSN)
+		err = bt.cache.SyncFrame(fr, mr.OpLSN, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 		if err != nil {
 			panic(fmt.Errorf("Unable to Sync frame: %v", err))
 		}
 
 		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
-		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+		err = bt.cache.SyncFrame(mergeFr, mr.OpLSN, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
 		if err != nil {
 			panic(fmt.Errorf("Unable to Sync frame: %v", err))
@@ -746,8 +758,8 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 				mergeSibling.LeftSibling = n.LeftSibling
 				leftSib.mu.Unlock()
 
-				// leftSib.Page.Sync(leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
-				err = bt.cache.SyncFrame(frame, leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
+				fmt.Println("(line 761) lsn --> ", mr.OpLSN)
+				err = bt.cache.SyncFrame(frame, mr.OpLSN, leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
 
 				if err != nil {
 					panic(err)
@@ -783,7 +795,7 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 				rightSib.mu.Unlock()
 
 				// rightSib.Page.Sync(rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
-				err = bt.cache.SyncFrame(frame, rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
+				err = bt.cache.SyncFrame(frame, mr.OpLSN, rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
 
 				if err != nil {
 					panic(err)
@@ -813,8 +825,8 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 		}
 
 		// Sync to page
-		// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		fmt.Println("(line 828) lsn --> ", mr.OpLSN)
+		err = bt.cache.SyncFrame(fr, mr.OpLSN, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 		if err != nil {
 			panic(err)
@@ -822,7 +834,7 @@ func (bt *BTree) handleLeafUnderflow(mr *MergeMetadata, n *Node, fr *bf.Frame) e
 
 		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
-		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+		err = bt.cache.SyncFrame(mergeFr, mr.OpLSN, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
 		if err != nil {
 			panic(err)
@@ -925,7 +937,7 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 
 		// err = oldRoot.Page.Sync(oldRoot.Keys, oldRoot.Values, oldRoot.Children, uint32(oldRoot.RightSibling), uint32(oldRoot.LeftSibling))
 
-		err = bt.cache.SyncFrame(rootfr, rootNode.Keys, rootNode.Values, rootNode.Children, uint32(rootNode.RightSibling), uint32(rootNode.LeftSibling))
+		err = bt.cache.SyncFrame(rootfr, mr.OpLSN, rootNode.Keys, rootNode.Values, rootNode.Children, uint32(rootNode.RightSibling), uint32(rootNode.LeftSibling))
 
 		if err != nil {
 			return err
@@ -975,8 +987,8 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 		totKeys = nil
 		totChildren = nil
 
-		// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		fmt.Println("(line 990) lsn --> ", mr.OpLSN)
+		err = bt.cache.SyncFrame(fr, mr.OpLSN, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 		if err != nil {
 			return err
@@ -984,7 +996,7 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 
 		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
-		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+		err = bt.cache.SyncFrame(mergeFr, mr.OpLSN, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
 		if err != nil {
 			return err
@@ -1018,7 +1030,7 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 
 				// leftSib.Page.Sync(leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
 
-				err = bt.cache.SyncFrame(leftSibFr, leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
+				err = bt.cache.SyncFrame(leftSibFr, mr.OpLSN, leftSib.Keys, leftSib.Values, leftSib.Children, uint32(leftSib.RightSibling), uint32(leftSib.LeftSibling))
 
 				if err != nil {
 					return err
@@ -1054,7 +1066,7 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 
 				// rightSib.Page.Sync(rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
 
-				err = bt.cache.SyncFrame(rightSibFr, rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
+				err = bt.cache.SyncFrame(rightSibFr, mr.OpLSN, rightSib.Keys, rightSib.Values, rightSib.Children, uint32(rightSib.RightSibling), uint32(rightSib.LeftSibling))
 
 				if err != nil {
 					panic(err)
@@ -1089,8 +1101,8 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 		mr.merged = true
 
 		// n.Page.Sync(n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-
-		err = bt.cache.SyncFrame(fr, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		fmt.Println("(line 1104) lsn --> ", mr.OpLSN)
+		err = bt.cache.SyncFrame(fr, mr.OpLSN, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 
 		if err != nil {
 			panic(err)
@@ -1098,7 +1110,7 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 
 		// mergeSibling.Page.Sync(mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
-		err = bt.cache.SyncFrame(mergeFr, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
+		err = bt.cache.SyncFrame(mergeFr, mr.OpLSN, mergeSibling.Keys, mergeSibling.Values, mergeSibling.Children, uint32(mergeSibling.RightSibling), uint32(mergeSibling.LeftSibling))
 
 		if err != nil {
 			panic(err)
@@ -1146,7 +1158,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				Values: [][]byte{vals[i]},
 			}
 
-			rootFr, err := rootNode.assignFrame(true, bt.cache)
+			rootFr, err := rootNode.assignFrame(nil, true, bt.cache)
 
 			if err != nil {
 				log.Println(err)
@@ -1165,10 +1177,18 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 				panic(err)
 			}
 
+			// update lsn
+			err = rootFr.UpdatePageLSN(lsn)
+
+			if err != nil {
+				panic(err)
+			}
+
 			rootNode.lsn = lsn
 
 			// sync to frame. New root node has no sibling, set to 0
-			err = bt.cache.SyncFrame(rootFr, rootNode.Keys, rootNode.Values, rootNode.Children, 0, 0)
+			fmt.Println("(line 1189) lsn --> ", lsn)
+			err = bt.cache.SyncFrame(rootFr, lsn, rootNode.Keys, rootNode.Values, rootNode.Children, 0, 0)
 
 			if err != nil {
 				panic(err)
@@ -1305,7 +1325,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						}
 
 						// persist new right node
-						newRightFr, err := newRightNode.assignFrame(false, bt.cache)
+						newRightFr, err := newRightNode.assignFrame(insertRes.OpLSN, false, bt.cache)
 
 						if err != nil {
 							return false, err
@@ -1329,7 +1349,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 							oldRightSibling.mu.Lock()
 							oldRightSibling.LeftSibling = newRightNode.PageId
 
-							err = bt.cache.SyncFrame(oldRightFr, oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
+							err = bt.cache.SyncFrame(oldRightFr, insertRes.OpLSN, oldRightSibling.Keys, oldRightSibling.Values, oldRightSibling.Children, uint32(oldRightSibling.RightSibling), uint32(oldRightSibling.LeftSibling))
 
 							if err != nil {
 								log.Panic(err)
@@ -1354,13 +1374,14 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 						r := SplitResponse{
 							PromotedSeparatorKey: append([]byte(nil), promoted...),
 							NewNodeId:            uint32(newRightNode.PageId),
+							OpLSN:                insertRes.OpLSN,
 						}
 
 						// set new Insert response
 						insertRes = r
 
 						// Sync new child and its right sibling
-						err = bt.cache.SyncFrame(newRightFr, newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
+						err = bt.cache.SyncFrame(newRightFr, insertRes.OpLSN, newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
 
 						if err != nil {
 							log.Panic(err)
@@ -1374,7 +1395,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					}
 
 					// sync parent
-					err = bt.cache.SyncFrame(parentFr, parent.n.Keys, parent.n.Values, parent.n.Children, uint32(parent.n.RightSibling), uint32(parent.n.LeftSibling))
+					err = bt.cache.SyncFrame(parentFr, insertRes.OpLSN, parent.n.Keys, parent.n.Values, parent.n.Children, uint32(parent.n.RightSibling), uint32(parent.n.LeftSibling))
 
 					if err != nil {
 						panic(err)
@@ -1405,7 +1426,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					log.Println("NEW ROOT CHILDREN -----------------------> ", newRoot.Children)
 
 					// assign frame
-					rootFr, err := newRoot.assignFrame(true, bt.cache)
+					rootFr, err := newRoot.assignFrame(insertRes.OpLSN, true, bt.cache)
 
 					if err != nil {
 						log.Panic(err)
@@ -1416,7 +1437,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					log.Println("NEW ROOT PAGE HEADER -----------------------> ", newRoot.PageId)
 
 					// sync
-					err = bt.cache.SyncFrame(rootFr, newRoot.Keys, newRoot.Values, newRoot.Children, uint32(newRoot.RightSibling), uint32(newRoot.LeftSibling))
+					err = bt.cache.SyncFrame(rootFr, insertRes.OpLSN, newRoot.Keys, newRoot.Values, newRoot.Children, uint32(newRoot.RightSibling), uint32(newRoot.LeftSibling))
 
 					if err != nil {
 						panic(fmt.Errorf("Unable to Sync root frame: %v", err))
@@ -1603,7 +1624,7 @@ func (bt *BTree) DeleteValue(keys [][]byte) (bool, error) {
 					panic(err)
 				}
 
-				err = bt.cache.SyncFrame(nodeFr, path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
+				err = bt.cache.SyncFrame(nodeFr, mergeMetadata.OpLSN, path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
 
 				if err != nil {
 					fmt.Println("ERR SYNCING...")
@@ -1617,7 +1638,7 @@ func (bt *BTree) DeleteValue(keys [][]byte) (bool, error) {
 
 				pathFr, _, err := bt.buildPage(uint32(path.n.PageId))
 
-				err = bt.cache.SyncFrame(pathFr, path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
+				err = bt.cache.SyncFrame(pathFr, mergeMetadata.OpLSN, path.n.Keys, path.n.Values, path.n.Children, uint32(path.n.RightSibling), uint32(path.n.LeftSibling))
 
 				if err != nil {
 					fmt.Println("ERR SYNCING...")

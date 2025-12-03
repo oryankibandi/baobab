@@ -19,8 +19,9 @@ type Frame struct {
 	CacheType  LruType
 	page       *diskmanager.Page
 	isDirty    bool
-	isDeleted  bool // If the frame and associated page is marked for  deletion
-	IsInternal bool // true if is an internal node
+	isDeleted  bool   // If the frame and associated page is marked for  deletion
+	IsInternal bool   // true if is an internal node
+	lsn        []byte // LSN of last operation. Added when marking as dirty
 	mu         sync.RWMutex
 }
 
@@ -167,13 +168,16 @@ func (f *Frame) markClean() {
 
 // Check if a frame's page is marked for deletion.
 func (f *Frame) PageIsDead() (bool, error) {
+	log.Println("(PageIsDead) Acquiring frame lock...")
 	f.mu.RLock()
+	log.Println("(PageIsDead) Acquired frame lock...")
 	defer f.mu.RUnlock()
 	if f.page == nil {
 		return false, BufferManagerError{Message: "No page associated with frame."}
 	}
 
-	d := f.page.IsDeleted()
+	// d := f.page.IsDeleted()
+	d := f.isDeleted
 
 	return d, nil
 }
@@ -235,4 +239,22 @@ func (f *Frame) Internal() bool {
 	i := f.IsInternal
 
 	return i
+}
+
+// Updates LSN of a frame's attached page
+func (f *Frame) UpdatePageLSN(lsn []byte) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if f.page == nil {
+		return BufferManagerError{Message: "Unable to update page LSN: No page associated with frame"}
+	}
+
+	err := f.page.UpdateLSN(lsn)
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
