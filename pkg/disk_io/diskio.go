@@ -797,7 +797,7 @@ func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 	// Unmark as dirty
 	p.Header.unsetFlag(Dirty)
 
-	seqNo := p.Header.getLSN()
+	seqNo := p.Header.GetLSN()
 
 	// update page header data
 	hdrBytes := p.Header.toBytes()
@@ -1095,7 +1095,7 @@ func (h *PageHeader) setLSN(lsn []byte) {
 	h.LSN = lsn
 }
 
-func (h *PageHeader) getLSN() []byte {
+func (h *PageHeader) GetLSN() []byte {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 

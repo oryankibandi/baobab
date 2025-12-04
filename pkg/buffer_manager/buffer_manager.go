@@ -73,6 +73,10 @@ func (c *Cache) put(k uint32, v *diskmanager.Page, dirty bool) (*Frame, error) {
 		log.Println("First Entry, adding to window cache----------------")
 		item.UpdateCacheType(Window)
 
+		// set lsn
+		lsn := v.Header.GetLSN()
+		item.lsn = lsn
+
 		c.CacheMap[k] = &item
 
 		// add to lru
@@ -532,6 +536,9 @@ func (c *Cache) SyncFrame(f *Frame, lsn []byte, keys [][]byte, vals [][]byte, pa
 		f.mu.Unlock()
 		return err
 	}
+
+	// update lsn on frame
+	f.lsn = lsn
 	f.mu.Unlock()
 
 	// mark frame as dirty
