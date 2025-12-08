@@ -35,6 +35,61 @@ type WriteNode struct {
 	next *WriteNode
 }
 
+// adds first checkpoint if empty
+func (wr *WalWriter) initializeWriter() error {
+	wr.mu.Lock()
+
+	// check size of wal
+	info, err := wr.fd.Stat()
+
+	if err != nil {
+		panic(err)
+	}
+
+	walSize := info.Size()
+
+	if walSize <= 0 {
+		// if wal is empty, add the first checkpoint
+		lsn := make([]byte, LSN_SIZE)
+
+		// set page and offset in lsn. Offset should consider
+		// size of wal page header
+		binary.LittleEndian.PutUint32(lsn[:4], 0)
+		binary.LittleEndian.PutUint32(lsn[4:], WAL_PAGE_HEADER_SIZE)
+
+		cp := CheckPoint{
+			flag:          0x80,
+			redoPoint:     WAL_PAGE_HEADER_SIZE,
+			checkpointLSN: lsn,
+		}
+
+		data := cp.toBytes()
+		data = append(make([]byte, WAL_PAGE_HEADER_SIZE), data...)
+		_, err := wr.fd.Write(data)
+
+		if err != nil {
+			panic(fmt.Errorf("(walwriter) Unable to write first checkpoint: ", err))
+		}
+
+		// update maxOffset
+		wr.maxOffset = WAL_PAGE_HEADER_SIZE + CHECKPOINT_SIZE
+
+		// save checkpoint position
+		wr.mu.Unlock()
+		err = wr.saveCheckpoint(lsn)
+
+		if err != nil {
+			panic(fmt.Errorf("(walwriter) Unable to save first checkpoint: ", err))
+		}
+
+		return nil
+	}
+
+	wr.mu.Unlock()
+
+	return nil
+}
+
 // Adds a write req to tail of queue
 func (wr *WalWriter) AddJob(data []byte, c *chan int) {
 	wr.queue.mu.Lock()
@@ -78,7 +133,6 @@ func (wr *WalWriter) assignLSN(logSize uint32) []byte {
 
 	binary.LittleEndian.PutUint32(lsn[:4], wr.maxPage)
 	binary.LittleEndian.PutUint32(lsn[4:], wr.maxOffset)
-	fmt.Println("OLD LSN ===> ", lsn)
 
 	// increment
 	newMaxOff := wr.maxOffset + logSize
@@ -207,6 +261,13 @@ func NewWalWriter(path string) *WalWriter {
 		maxOffset: maxOff,
 	}
 
+	// initalize
+	err = wr.initializeWriter()
+
+	if err != nil {
+		panic(err)
+	}
+
 	return &wr
 }
 
@@ -244,8 +305,8 @@ func loadMaxLSN(path string) (maxPage uint32, off uint32) {
 		}
 	}
 
-	fmt.Println("LOADAD PAGE :=> ", page)
-	fmt.Println("LOADAD OFFSET :=> ", offset)
+	fmt.Println("LOADED PAGE :=> ", page)
+	fmt.Println("LOADED OFFSET :=> ", offset)
 
 	return page, offset
 }
