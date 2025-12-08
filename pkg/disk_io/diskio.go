@@ -233,7 +233,7 @@ func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
 	return &p, nil
 }
 
-func (d *DiskManager) flushMetadata() {
+func (d *DiskManager) FlushMetadata() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// only use as fixed size buffer - default is 4K which is too much
@@ -515,7 +515,7 @@ func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), chi
 	d.PageCount += 1
 	d.mu.Unlock()
 
-	d.flushMetadata() // TODO: Perform this op concurrently
+	// d.FlushMetadata() // TODO: Perform this op concurrently
 	fmt.Println("PAGE COUNT --------> ", d.PageCount)
 	fmt.Println("MAX PAGE ID ----------> ", d.MaxPageId)
 	fmt.Println("ROOT PAGE ID ==> ", d.RootPage)
@@ -642,7 +642,7 @@ func (d *DiskManager) SetAsRoot(pageId int32) error {
 	d.RootPage = pageId
 
 	d.mu.Unlock()
-	go d.flushMetadata()
+	// go d.FlushMetadata()
 
 	return nil
 
@@ -686,6 +686,9 @@ func (p *Page) Sync(lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, r
 	fmt.Println("(Sync) IN CHILDREN ==> ", pageIds)
 	fmt.Println("(Sync) RIGHT CHILD ==> ", rightSibling)
 	fmt.Println("(Sync) LEFT CHILD ==> ", leftSibling)
+
+	// update LSN
+	p.Header.LSN = lsn
 
 	if p.Header.IsSet(Dead) {
 		// Dead page, scheduled for deletion
@@ -844,7 +847,7 @@ func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 		*b <- int32(n)
 		*lsnChan <- seqNo
 
-		d.flushMetadata()
+		// d.FlushMetadata()
 
 		return
 	}

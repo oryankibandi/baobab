@@ -13,7 +13,6 @@ import (
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
-// TODO: Store root page ID instead of pointer to node
 type BTree struct {
 	Root  uint32 // Root Page ID
 	mu    sync.RWMutex
@@ -99,7 +98,7 @@ func Initialize[K cmp.Ordered](w *wal.WAL, c *bf.Cache) (*BTree, error) {
 }
 
 // Splits the given node and returns the new created node, promoted key if `n` is an internal node and error
-func (n *Node) split() (*Node, []byte, error) {
+func (n *Node) split(lsn []byte) (*Node, []byte, error) {
 	fmt.Println("KEYS B4 SPLIT => ", n.Keys)
 	if n.Leaf {
 		mid := len(n.Keys) / 2
@@ -117,6 +116,7 @@ func (n *Node) split() (*Node, []byte, error) {
 		}
 
 		rightNode.Values = rightVals
+		rightNode.lsn = lsn
 
 		fmt.Println("KEYS AFTER SPLIT => ", n.Keys)
 		return rightNode, nil, nil
@@ -139,6 +139,7 @@ func (n *Node) split() (*Node, []byte, error) {
 		}
 
 		rightNode.Children = rightChildren
+		rightNode.lsn = lsn
 
 		fmt.Println("(INTERNAL) KEYS AFTER SPLIT => ", n.Keys)
 		fmt.Println("(INTERNAL)(SPLIT) PROMOTED VALUE => ", promotedKey)
@@ -177,25 +178,28 @@ func (n *Node) assignFrame(lsn []byte, isRoot bool, cache *bf.Cache) (*bf.Frame,
 }
 
 // Inserts key and value to node. If is internal node, return page ID of child page. If leaf node insert and return
-func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *SplitResponse, stack *BTStack) (uint32, error) {
+func (bt *BTree) insert(lsn []byte, n *Node, fr *bf.Frame, key []byte, val []byte, rp *SplitResponse, stack *BTStack) (uint32, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	var err error
 	// If empty (new node), add keys and values then sync
 	if len(n.Keys) <= 0 && len(n.Values) <= 0 {
-		// Add to WAL
-		lsn, err := bt.wal.AddPutLog(uint32(n.PageId), key, val)
+		if len(lsn) <= 0 || lsn == nil {
+			// Create BLOG entry in wal
+			lsn, err = bt.wal.AddPutLog(uint32(n.PageId), key, val)
 
-		if err != nil {
-			panic(err)
+			if err != nil {
+				panic(err)
+			}
 		}
 
 		n.Keys = append(n.Keys, key)
 		n.Values = append(n.Values, val)
-
+		n.lsn = lsn
 		// Sync to page
 		fmt.Println("(line 197) lsn --> ", lsn)
-		err = bt.cache.SyncFrame(fr, lsn, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
+		err := bt.cache.SyncFrame(fr, lsn, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
 		fmt.Println("/////// KEYS AFTER INSERT => ", n.Keys)
 
 		if err != nil {
@@ -215,11 +219,13 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 
 	// compare index
 	if n.Leaf {
-		// Create BLOG entry in wal
-		lsn, err := bt.wal.AddPutLog(uint32(n.PageId), key, val)
+		if len(lsn) <= 0 || lsn == nil {
+			// Create BLOG entry in wal
+			lsn, err = bt.wal.AddPutLog(uint32(n.PageId), key, val)
 
-		if err != nil {
-			panic(err)
+			if err != nil {
+				panic(err)
+			}
 		}
 
 		n.lsn = lsn
@@ -252,7 +258,7 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 		// Check overflow
 		if len(n.Keys) > ORDER {
 			log.Println("(insert) OVERFLOW DETECTED...")
-			newRightNode, _, err := n.split()
+			newRightNode, _, err := n.split(lsn)
 			// fmt.Println("AFTER SPLIT-------->")
 			// fmt.Println("KEYS ----> ", newRightNode.Keys)
 			// fmt.Println("VALS ----> ", newRightNode.Values)
@@ -308,6 +314,8 @@ func (bt *BTree) insert(n *Node, fr *bf.Frame, key []byte, val []byte, rp *Split
 
 			fmt.Println("NEW  NODE ID: ", rp.NewNodeId)
 			fmt.Println("PROMOTED SEPRATOR KEY -> ", rp.PromotedSeparatorKey)
+			fmt.Println("NEW RIGHT NODE PAGE ID => ", newRightNode.PageId)
+			fmt.Println("NEW RIGHT NODE LSN => ", newRightNode.lsn)
 			fmt.Println("+---------------------SPLIT DONE ---------------------+")
 
 			// newRightNode.Page.Sync(newRightNode.Keys, newRightNode.Values, newRightNode.Children, uint32(newRightNode.RightSibling), uint32(newRightNode.LeftSibling))
@@ -498,7 +506,7 @@ func (n *Node) rangeSearch(key []byte, nextNodeId *int32) ([]RangeItem, int32, e
 }
 
 // Deletes key and associated value from BTree. If n is an internal node, returns pageID of child to follow, -1 if error and 0 if delete was successful or key doesn't exist.
-func (bt *BTree) deleteValue(n *Node, f *bf.Frame, key []byte, stack *BTStack, mr *MergeMetadata) (int32, error) {
+func (bt *BTree) deleteValue(lsn []byte, n *Node, f *bf.Frame, key []byte, stack *BTStack, mr *MergeMetadata) (int32, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
@@ -524,10 +532,12 @@ func (bt *BTree) deleteValue(n *Node, f *bf.Frame, key []byte, stack *BTStack, m
 		}
 
 		// Create BLOG entry in wal
-		lsn, err := bt.wal.AddDelLog(uint32(n.PageId), key)
+		if lsn == nil || len(lsn) <= 0 {
+			lsn, err = bt.wal.AddDelLog(uint32(n.PageId), key)
 
-		if err != nil {
-			panic(err)
+			if err != nil {
+				panic(err)
+			}
 		}
 
 		n.lsn = lsn
@@ -1130,12 +1140,14 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 	return nil
 }
 
-func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
+func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte, lsn []byte) (bool, error) {
 	for i, _ := range keys {
 		if len(keys[i]) >= 4 {
 			log.Printf("%d Inserting {%v:%v} .................................................................\n", i, binary.LittleEndian.Uint32(keys[i]), string(vals[i]))
+			fmt.Println("RECEIVED LSN ==> ", lsn)
 		} else {
 			log.Printf("%d Inserting {%v:%v} .................................................................\n", i, keys[i], string(vals[i]))
+			fmt.Println("RECEIVED LSN ==> ", lsn)
 
 		}
 		// Get root page and retrieve/create node
@@ -1148,6 +1160,16 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 		insertRes := SplitResponse{}
 		var nodePageId uint32
+
+		// Create wal entry
+		// var err error
+		// if lsn == nil || len(lsn) <= 0 {
+		// 	lsn, err = bt.wal.AddPutLog(uint32(bt.Root), keys[i], vals[i])
+
+		// 	if err != nil {
+		// 		panic(err)
+		// 	}
+		// }
 
 		// fmt.Println("(InsertValue) ROOT => ", bTree.Root)
 		if bt.Root == 0 {
@@ -1170,13 +1192,14 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 			fmt.Println("ROOT NODE ID: => ", bt.Root)
 
-			// add entry to WAL
-			lsn, err := bt.wal.AddPutLog(uint32(bt.Root), keys[i], vals[i])
+			// Create WAL entry
+			if lsn == nil || len(lsn) <= 0 {
+				lsn, err = bt.wal.AddPutLog(uint32(bt.Root), keys[i], vals[i])
 
-			if err != nil {
-				panic(err)
+				if err != nil {
+					panic(err)
+				}
 			}
-
 			// update lsn
 			err = rootFr.UpdatePageLSN(lsn)
 
@@ -1220,18 +1243,6 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					return false, err
 				}
 
-				//				// defer bf.BCache.ReleaseFrame(frame)
-				//
-				//				// create node
-				//				node, err := loadNode(frame)
-				//				fmt.Println("Loaded node ==> ")
-				//
-				//				fmt.Println("NODE KEYS *************> ", node.Keys)
-				//
-				//				if err != nil {
-				//					return false, err
-				//				}
-
 				// release parent frame
 				if oldFrame != nil {
 					fmt.Println("RELEASING OLD FRAME....")
@@ -1250,7 +1261,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 
 				// insert
 				fmt.Printf("(%d)********INSERTING KEY: %v\nINSERTING VAL:%v\n", nodePageId, keys[i], vals[i])
-				nodePageId, err = bt.insert(node, frame, keys[i], vals[i], &insertRes, &st)
+				nodePageId, err = bt.insert(lsn, node, frame, keys[i], vals[i], &insertRes, &st)
 				fmt.Println("INSERTED KEYS")
 
 				if err != nil {
@@ -1318,7 +1329,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 					if len(parent.n.Keys) > ORDER-1 {
 						// handle overflow(internal node)
 						fmt.Println("INTERNAL NODE OVERFLOW........................")
-						newRightNode, promoted, err := parent.n.split()
+						newRightNode, promoted, err := parent.n.split(insertRes.OpLSN)
 
 						if err != nil {
 							return false, err
@@ -1462,7 +1473,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte) (bool, error) {
 	return true, nil
 }
 
-func (bt *BTree) DeleteValue(keys [][]byte) (bool, error) {
+func (bt *BTree) DeleteValue(keys [][]byte, lsn []byte) (bool, error) {
 	for i, _ := range keys {
 		st := BTStack{
 			stack: make(map[int]*TraversePath),
@@ -1510,7 +1521,7 @@ func (bt *BTree) DeleteValue(keys [][]byte) (bool, error) {
 			// delete
 			fmt.Printf("(%d) DELETING KEY: %v\n", nodePageId, keys[i])
 
-			nodePageId, err = bt.deleteValue(node, frame, keys[i], &st, &mergeMetadata)
+			nodePageId, err = bt.deleteValue(lsn, node, frame, keys[i], &st, &mergeMetadata)
 
 			fmt.Printf("NODEPAGEID: %d\n", nodePageId)
 

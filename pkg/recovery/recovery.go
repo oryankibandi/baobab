@@ -1,13 +1,17 @@
 package recovery
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
 
 	"github.com/oryankibandi/baobab/pkg/bp_tree"
 	buffermanager "github.com/oryankibandi/baobab/pkg/buffer_manager"
+	"github.com/oryankibandi/baobab/pkg/helpers"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
@@ -19,7 +23,21 @@ type RecoveryMngr struct {
 	bufferMngr    *buffermanager.Cache
 	BPTreeIndex   *bp_tree.BTree
 	fd            *os.File // WAL file descriptor
+	walSize       int64
 	checkpointLSN []byte
+}
+
+type LogHeaderMetadata struct {
+	lsn     []byte
+	pageId  uint32
+	logSize uint32
+}
+
+type Operation struct {
+	opType wal.OperationType
+	key    []byte
+	val    []byte
+	lsn    []byte
 }
 
 // Reads the logs in WAL, from the REDO point, compares page LSNs with LSN in WAL
@@ -33,19 +51,323 @@ func (rMngr *RecoveryMngr) Recover() error {
 	go startSpinner(stopChan, "Replaying WAL...")
 	defer close(stopChan)
 
-	// TODO: Add recovery procedure
+	// Calculate offset of checkpoint
+	var checkpointOff uint32
+	checkPntPage := binary.LittleEndian.Uint32(rMngr.checkpointLSN[:4])
+	checkPntPageOff := binary.LittleEndian.Uint32(rMngr.checkpointLSN[4:])
+
+	if checkPntPage != 0 {
+		checkpointOff = checkPntPage * checkPntPageOff
+	} else {
+		checkpointOff = checkPntPageOff
+	}
+
+	// Read checkpoint
+	checkPntData := make([]byte, wal.CHECKPOINT_SIZE)
+	n, err := rMngr.fd.ReadAt(checkPntData, int64(checkpointOff))
+
+	if (err != nil && !errors.Is(err, io.EOF)) || n <= 0 {
+		panic(fmt.Errorf("Unable to read checkpoint: ", err))
+	}
+
+	if n < wal.CHECKPOINT_SIZE {
+		panic(fmt.Errorf("Only read %d bytes, expected %d bytes for the checkpoint", n, wal.CHECKPOINT_SIZE))
+	}
+
+	// Extract REDO point
+	redoOff := binary.LittleEndian.Uint32(checkPntData[1:5])
+
+	err = rMngr.walkThroughRecovery(redoOff, uint32(rMngr.walSize))
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func NewRecoveryMngr(bufMngr *buffermanager.Cache, index *bp_tree.BTree) *RecoveryMngr {
+// Walks through the log, from startOff to endOff, comparing each Log's LSN
+// with the associated page's LSN and applying unapplied logs - logs with LSN greater than
+// their respective pages.
+func (rMngr *RecoveryMngr) walkThroughRecovery(startOff uint32, endOff uint32) error {
+	currOff := startOff
+
+	for currOff < endOff {
+		// read header
+		headerMetadata, err := rMngr.readLogHeader(currOff)
+
+		if err != nil {
+			if errors.As(err, &InvalidLogError{}) {
+				// log is a checkpoint, skip to next log
+				currOff += wal.CHECKPOINT_SIZE
+				log.Println("Encountered checkpoint, proceeding...")
+				continue
+			}
+
+			// If reached end of wal, terminate loop
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			return err
+		}
+
+		// retrieve page and compare LSN
+		f, err := rMngr.bufferMngr.Get(headerMetadata.pageId)
+
+		if err != nil {
+			// page does not exist. Crash might have occured before
+			// page was created. Reapply the entry
+
+			log.Println("PAGE NOT FOUND....")
+			op, err := rMngr.readFullLog(currOff, headerMetadata.logSize, headerMetadata.lsn)
+
+			if err != nil {
+				panic(err)
+			}
+
+			rMngr.reapplyLog(op)
+
+			// increment offset
+			currOff += headerMetadata.logSize
+		} else {
+			pLsn, err := f.GetLSN()
+
+			if err != nil {
+				return err
+			}
+
+			reapply, err := helpers.GreaterLSN(headerMetadata.lsn, pLsn)
+
+			if err != nil {
+				log.Println("ERR => ", err)
+				return err
+			}
+
+			// if the log's LSN is greater than the page's LSN, this entry was not persisted hence we need to reapply
+			if reapply {
+				op, err := rMngr.readFullLog(currOff, headerMetadata.logSize, headerMetadata.lsn)
+
+				if err != nil {
+					panic(err)
+				}
+
+				rMngr.reapplyLog(op)
+			}
+
+			// increment offset
+			currOff += headerMetadata.logSize
+
+			// fmt.Println("(walkThroughRecovery) NEXT OFF => ", currOff)
+		}
+	}
+
+	return nil
+}
+
+// reaplies an operation
+func (rMngr *RecoveryMngr) reapplyLog(op Operation) {
+	fmt.Println("Reapplying log operation.....")
+	if len(op.key) <= 0 || op.key == nil {
+		panic(fmt.Errorf("(reapply) Invalid key. Received %v", op.key))
+	}
+
+	if op.opType == wal.PUT {
+		if len(op.val) <= 0 || op.val == nil {
+			panic(fmt.Errorf("(reapply) Invalid value. Received %v", op.val))
+		}
+
+		inserted, err := rMngr.BPTreeIndex.InsertValue([][]byte{op.key}, [][]byte{op.val}, op.lsn)
+
+		if err != nil {
+			panic(fmt.Errorf("Unable to insert value: ", err))
+		}
+
+		if !inserted {
+			panic("Could not insert the value")
+		}
+
+		fmt.Println("Insert successful....")
+	} else {
+		// del operation
+		deleted, err := rMngr.BPTreeIndex.DeleteValue([][]byte{op.key}, op.lsn)
+
+		if err != nil {
+			panic(fmt.Errorf("Unable to delete value: ", err))
+		}
+
+		if !deleted {
+			panic("Could not insert the value")
+		}
+	}
+}
+
+func (rMngr *RecoveryMngr) readLogHeader(off uint32) (LogHeaderMetadata, error) {
+	if rMngr.fd == nil {
+		return LogHeaderMetadata{}, RecoveryError{Message: "File descriptor not provided."}
+	}
+
+	if off < 0 {
+		return LogHeaderMetadata{}, RecoveryError{Message: "Invalid offset provided"}
+	}
+
+	var hdr []byte
+	// check if header crosses page boundary
+	endOff := off + wal.BLOG_HEADER_SIZE
+	pageOff := (endOff) % wal.WAL_PAGE_SIZE
+	multiPage := pageOff >= wal.WAL_PAGE_SIZE
+
+	if multiPage {
+		hdr = make([]byte, wal.BLOG_HEADER_SIZE+wal.WAL_PAGE_HEADER_SIZE)
+	} else {
+		hdr = make([]byte, wal.BLOG_HEADER_SIZE)
+	}
+
+	// read header
+	// fmt.Println("READING LOG AT OFFSET *********************************************> ", off)
+	n, err := rMngr.fd.ReadAt(hdr, int64(off))
+
+	if err != nil && !errors.Is(err, io.EOF) {
+		panic(fmt.Errorf("unable to read log header: ", err))
+	} else if errors.Is(err, io.EOF) {
+		// reached end of log
+		return LogHeaderMetadata{}, err
+	}
+
+	if n <= 0 {
+		panic("invalid header size in file.")
+	}
+
+	// fmt.Println("LOG HEADER ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++> ", hdr)
+
+	// check if is a checkpoint entry
+	if helpers.BitIsSet(hdr[0], wal.LOGTYPE_FLAG_POS) {
+		return LogHeaderMetadata{}, InvalidLogError{Message: "Log is a checkpoint"}
+	}
+
+	if multiPage {
+		// remove WAL page header info
+		idx := wal.BLOG_HEADER_SIZE - (endOff - wal.WAL_PAGE_SIZE)
+		hdr = append(hdr[:idx], hdr[idx+wal.WAL_PAGE_HEADER_SIZE:]...)
+	}
+
+	// extract LSN, pageId and size of the log
+	hdrMetadata := LogHeaderMetadata{
+		lsn:     hdr[1:9],
+		logSize: binary.LittleEndian.Uint32(hdr[9:13]),
+		pageId:  binary.LittleEndian.Uint32(hdr[13:17]),
+	}
+
+	// validate data
+	if len(hdrMetadata.lsn) != wal.LSN_SIZE {
+		panic(fmt.Errorf("Invalid LSN size Received length: %d, expected: %%d", len(hdrMetadata.lsn), wal.LSN_SIZE))
+	}
+
+	if hdrMetadata.pageId <= 0 {
+		panic(fmt.Errorf("Invalid page ID. Received: %d.", hdrMetadata.pageId))
+	}
+
+	return hdrMetadata, nil
+}
+
+// Reads the full log from startOff and returns the operation to be perfoemd.
+func (rMngr *RecoveryMngr) readFullLog(startOff uint32, lSize uint32, lsn []byte) (Operation, error) {
+	if rMngr.fd == nil {
+		return Operation{}, RecoveryError{Message: "File descriptor not provided."}
+	}
+
+	if startOff < 0 {
+		return Operation{}, RecoveryError{Message: "Invalid offset provided"}
+	}
+
+	var bLog []byte
+	// check if header crosses page boundary
+	endOff := startOff + lSize
+	pageOff := (endOff) % wal.WAL_PAGE_SIZE
+	multiPage := pageOff >= wal.WAL_PAGE_SIZE
+
+	if multiPage {
+		bLog = make([]byte, lSize+wal.WAL_PAGE_HEADER_SIZE)
+	} else {
+		bLog = make([]byte, lSize)
+	}
+
+	// read full log
+	n, err := rMngr.fd.ReadAt(bLog, int64(startOff))
+
+	if err != nil {
+		panic(fmt.Errorf("unable to read log: ", err))
+	}
+
+	if n <= 0 {
+		panic("invalid log in file.")
+	}
+
+	if multiPage {
+		// remove WAL page header info
+		idx := lSize - (endOff - wal.WAL_PAGE_SIZE)
+		bLog = append(bLog[:idx], bLog[idx+wal.WAL_PAGE_HEADER_SIZE:]...)
+	}
+
+	op := Operation{
+		lsn: lsn,
+	}
+
+	opType := bLog[wal.BLOG_HEADER_SIZE]
+	if opType == byte(wal.PUT) {
+		op.opType = wal.PUT
+	} else {
+		op.opType = wal.DEL
+	}
+
+	// read key
+	kSize := binary.LittleEndian.Uint32(bLog[wal.BLOG_HEADER_SIZE+1 : wal.BLOG_HEADER_SIZE+5])
+
+	kOff := wal.BLOG_HEADER_SIZE + 5
+	key := bLog[kOff : kOff+int(kSize)]
+	op.key = key
+
+	// read val
+	if op.opType == wal.PUT {
+		vSize := binary.LittleEndian.Uint32(bLog[kOff+int(kSize) : kOff+int(kSize)+4])
+		vOff := kOff + int(kSize) + 4
+
+		val := bLog[vOff : vOff+int(vSize)]
+
+		op.val = val
+	}
+
+	return op, nil
+}
+
+// closes active  file descriptors
+func (rMngr *RecoveryMngr) Close() error {
+	if rMngr.fd == nil {
+		log.Println("No open file descriptors")
+		return nil
+	}
+
+	err := rMngr.fd.Close()
+
+	if err != nil {
+		return RecoveryError{Message: fmt.Sprintf("Unable to shutdown Recovery Manager: ", err)}
+	}
+
+	log.Println("Recovery Manager closed successfully.")
+
+	return nil
+}
+
+func NewRecoveryMngr(bufMngr *buffermanager.Cache, index *bp_tree.BTree) (*RecoveryMngr, error) {
 	stopChan := make(chan struct{})
 	go startSpinner(stopChan, "starting recovery...")
 	defer close(stopChan)
+	time.Sleep(time.Second * 2)
 	// open and read config file
 	fd, err := os.OpenFile(RECOVERY_FILEPATH, os.O_RDONLY, 0644)
 
 	if err != nil {
-		log.Println("Unable to open recovery file: ", err)
-		return nil
+		return nil, RecoveryError{Message: fmt.Sprintf("Unable to open recovery file: ", err)}
 	}
 
 	defer fd.Close()
@@ -55,14 +377,15 @@ func NewRecoveryMngr(bufMngr *buffermanager.Cache, index *bp_tree.BTree) *Recove
 
 	n, err := fd.Read(latestLSN)
 
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		panic(err)
 	}
 
+	log.Printf("(NEW  RECOVERY MANAGER) Read %d bytes\n", n)
 	// if no checkpoint stored, return
 	if n <= 0 {
 		log.Println("No recovery checkpoint stored. Proceeding...")
-		return nil
+		return nil, nil
 	}
 
 	// Open wal file in read only mode
@@ -72,14 +395,25 @@ func NewRecoveryMngr(bufMngr *buffermanager.Cache, index *bp_tree.BTree) *Recove
 		panic(fmt.Errorf("(recovery) Unable to open WAL file: ", err))
 	}
 
+	// read and store size of wal file
+	info, err := walFd.Stat()
+
+	if err != nil {
+		panic(err)
+	}
+
+	s := info.Size()
+	log.Printf("WAL size: %d bytes\n", s)
+
 	recMngr := RecoveryMngr{
 		fd:            walFd,
 		bufferMngr:    bufMngr,
 		BPTreeIndex:   index,
+		walSize:       s,
 		checkpointLSN: latestLSN,
 	}
 
-	return &recMngr
+	return &recMngr, nil
 }
 
 func startSpinner(stop chan struct{}, message string) {
@@ -90,6 +424,7 @@ func startSpinner(stop chan struct{}, message string) {
 		select {
 		case <-stop:
 			fmt.Printf("\rDone\n")
+			return
 		default:
 			fmt.Printf("\r%c %s", spin[i%len(spin)], message)
 			i++

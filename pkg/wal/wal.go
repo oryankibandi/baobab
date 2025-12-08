@@ -12,7 +12,7 @@ const (
 	WAL_PAGE_SIZE        = 8192
 	WAL_PAGE_HEADER_SIZE = 8
 	WAL_SEG_FILE_SIZE    = 16777216
-	BLOG_HEADER_SIZE     = 22
+	BLOG_HEADER_SIZE     = 21
 	CHECKPOINT_SIZE      = 13
 	LSN_SIZE             = 8
 )
@@ -28,6 +28,11 @@ const (
 const (
 	PUT OperationType = iota
 	DEL
+)
+
+// Log and Checkpoint Flag positions
+const (
+	LOGTYPE_FLAG_POS = 7
 )
 
 type nodeValue interface {
@@ -49,7 +54,7 @@ type BLog struct {
 
 // Structure of the B-LOG header
 type BLogHeader struct {
-	flag   []byte // 2 byte header flags
+	flag   byte   // 1 byte header flags
 	lsn    []byte // 8 byte log sequence number
 	pageId uint32 // ID of page where this change affects. This will be used to compare LSN during recovery
 	crc    uint32 // Cyclic Redundacy Check number for integrity checks
@@ -81,11 +86,11 @@ func (h *BLogHeader) toBytes() [BLOG_HEADER_SIZE]byte {
 	defer h.mu.Unlock()
 	var hdr [BLOG_HEADER_SIZE]byte
 
-	copy(hdr[0:2], h.flag)
-	copy(hdr[2:10], h.lsn)
-	binary.LittleEndian.PutUint32(hdr[10:14], h.lSize)
-	binary.LittleEndian.PutUint32(hdr[14:18], h.pageId)
-	binary.LittleEndian.PutUint32(hdr[18:22], h.crc)
+	hdr[0] = h.flag
+	copy(hdr[1:9], h.lsn)
+	binary.LittleEndian.PutUint32(hdr[9:13], h.lSize)
+	binary.LittleEndian.PutUint32(hdr[13:17], h.pageId)
+	binary.LittleEndian.PutUint32(hdr[17:21], h.crc)
 
 	log.Println("(toBytes) BLOG HEADER ==> ", hdr)
 
@@ -105,8 +110,8 @@ func (b *BLog) toBytes() []byte {
 	copy(bLogData, hdr[:])
 
 	// Get pageId and Offset
-	pgeId := binary.LittleEndian.Uint32(hdr[2:6])
-	off := binary.LittleEndian.Uint32(hdr[6:10])
+	pgeId := binary.LittleEndian.Uint32(hdr[1:5])
+	off := binary.LittleEndian.Uint32(hdr[5:9])
 
 	// data
 	bLogData = append(bLogData, byte(b.opType))
@@ -170,6 +175,7 @@ func (c *CheckPoint) toBytes() []byte {
 
 	chckpnt[0] = c.flag
 	binary.LittleEndian.PutUint32(chckpnt[1:CHECKPOINT_SIZE], c.redoPoint)
+	chckpnt = append(chckpnt[:5], c.checkpointLSN...)
 
 	return chckpnt
 }
@@ -202,7 +208,7 @@ func (w *WAL) AddPutLog(pageId uint32, key []byte, val []byte) ([]byte, error) {
 	lsn := w.walWriter.assignLSN(uint32(lSize))
 
 	hdr := BLogHeader{
-		flag:   make([]byte, 2),
+		flag:   0x0, // Initialized with first bit flag unset for logs
 		lsn:    lsn,
 		pageId: pageId,
 		crc:    0, // TBC when adding CRC
@@ -242,7 +248,7 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 
 	// construct checkpoint
 	cp := CheckPoint{
-		flag:          byte(0),
+		flag:          0x80, // 1000 0000
 		redoPoint:     redoPoint,
 		checkpointLSN: lsn,
 	}
@@ -272,7 +278,7 @@ func (w *WAL) AddDelLog(pageId uint32, key []byte) ([]byte, error) {
 	lsn := w.walWriter.assignLSN(uint32(lSize))
 
 	hdr := BLogHeader{
-		flag:   make([]byte, 2),
+		flag:   0x0,
 		lsn:    lsn,
 		pageId: pageId,
 		lSize:  uint32(lSize),
@@ -292,7 +298,7 @@ func (w *WAL) AddDelLog(pageId uint32, key []byte) ([]byte, error) {
 	return lsn, nil
 }
 
-// Flusheds wal buffer contents to wal segment.
+// Flushes wal buffer contents to wal segment.
 // This can be called:
 // 1. By a background wal buffer writer periodically
 // 2. After a transaction is commited

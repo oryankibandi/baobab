@@ -78,6 +78,7 @@ func (wr *WalWriter) assignLSN(logSize uint32) []byte {
 
 	binary.LittleEndian.PutUint32(lsn[:4], wr.maxPage)
 	binary.LittleEndian.PutUint32(lsn[4:], wr.maxOffset)
+	fmt.Println("OLD LSN ===> ", lsn)
 
 	// increment
 	newMaxOff := wr.maxOffset + logSize
@@ -89,6 +90,13 @@ func (wr *WalWriter) assignLSN(logSize uint32) []byte {
 	} else {
 		wr.maxOffset = newMaxOff
 	}
+
+	// TODO: Delete next session
+	l := make([]byte, 8)
+	binary.LittleEndian.PutUint32(l[:4], wr.maxPage)
+	binary.LittleEndian.PutUint32(l[4:], wr.maxOffset)
+	fmt.Println("NEW LSN ===> ", l)
+	//////////////////////////////
 
 	return lsn
 }
@@ -190,7 +198,7 @@ func NewWalWriter(path string) *WalWriter {
 	}
 
 	// open config file with write only flag
-	confFd, err := os.OpenFile(WAL_CONFIG_PATH, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	confFd, err := os.OpenFile(WAL_CONFIG_PATH, os.O_CREATE|os.O_WRONLY, 0644)
 
 	if err != nil {
 		panic(fmt.Sprintf("Unable to open config file: %d: %v", WAL_CONFIG_PATH, err))

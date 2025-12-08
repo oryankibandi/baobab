@@ -269,3 +269,49 @@ func MaxLSN(lsnA []byte, lsnB []byte) ([]byte, error) {
 		return lsnA, nil
 	}
 }
+
+// Compares to Log Sequence Numbers and returns true if lsnA is greater than lsnB,
+// else false, and error if unsuccessful
+func GreaterLSN(lsnA []byte, lsnB []byte) (bool, error) {
+	if len(lsnA) < 8 {
+		return false, HelperError{Message: fmt.Sprintf("Invalid length for lsnA. Got length %d\n", len(lsnA))}
+	}
+
+	if len(lsnB) < 8 {
+		return false, HelperError{Message: fmt.Sprintf("Invalid length for lsnB. Got length %d\n", len(lsnB))}
+	}
+
+	pageA := binary.LittleEndian.Uint32(lsnA[:4])
+	pageB := binary.LittleEndian.Uint32(lsnB[:4])
+
+	if pageA != pageB {
+		// return lsn with greater page
+		if pageA > pageB {
+			return true, nil
+		} else {
+			return false, nil
+		}
+	}
+
+	// use offset to determine greater LSN
+	offsetA := binary.LittleEndian.Uint32(lsnA[4:])
+	offsetB := binary.LittleEndian.Uint32(lsnB[4:])
+
+	if offsetA > offsetB {
+		return true, nil
+	} else {
+		return false, nil
+	}
+}
+
+// Checks if a bit at the provided position(pos) is set.
+func BitIsSet(flag byte, pos int) bool {
+	var mask byte
+	mask = 1 << byte(pos)
+
+	// Check if set
+	r := flag & mask
+
+	return r > 0
+
+}

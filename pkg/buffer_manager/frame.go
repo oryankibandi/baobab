@@ -243,8 +243,8 @@ func (f *Frame) Internal() bool {
 
 // Updates LSN of a frame's attached page
 func (f *Frame) UpdatePageLSN(lsn []byte) error {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
 	if f.page == nil {
 		return BufferManagerError{Message: "Unable to update page LSN: No page associated with frame"}
@@ -256,5 +256,27 @@ func (f *Frame) UpdatePageLSN(lsn []byte) error {
 		return err
 	}
 
+	f.lsn = lsn
+
 	return nil
+}
+
+// Returns Log Sequence Number of the frame. This is the same LSN as the page.
+func (f *Frame) GetLSN() ([]byte, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if f.page == nil {
+		return nil, BufferManagerError{Message: "No page associated with frame"}
+	}
+
+	if f.lsn == nil {
+		return nil, BufferManagerError{Message: "Invalid lsn on frame."}
+	}
+
+	log.Println("(GetLSN) Frame ==> ", f)
+	pLsn := f.page.Header.GetLSN()
+	log.Println("(GetLSN) PAGE LSN ==> ", pLsn)
+
+	return f.lsn, nil
 }

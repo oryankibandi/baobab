@@ -65,6 +65,10 @@ func (c *Cache) put(k uint32, v *diskmanager.Page, dirty bool) (*Frame, error) {
 	// log.Println("NEW FRAME PREV ====================> ", item.Prev)
 	// log.Println("NEW FRAME NEXT ====================>", item.Next)
 
+	lsn := v.Header.GetLSN()
+	// set lsn
+	item.lsn = lsn
+
 	// Check if item already exists
 	val, ok := c.CacheMap[k]
 	if !ok {
@@ -72,10 +76,6 @@ func (c *Cache) put(k uint32, v *diskmanager.Page, dirty bool) (*Frame, error) {
 		// First time entry
 		log.Println("First Entry, adding to window cache----------------")
 		item.UpdateCacheType(Window)
-
-		// set lsn
-		lsn := v.Header.GetLSN()
-		item.lsn = lsn
 
 		c.CacheMap[k] = &item
 
@@ -475,6 +475,13 @@ func (c *Cache) CreateNewEntry(lsn []byte, keys [][]byte, values *([][]byte), ch
 	f, err := c.put(uint32(pge.Header.PageId), pge, true)
 	log.Println("Added new page to cache...")
 
+	// Set LSN
+	err = f.UpdatePageLSN(lsn)
+
+	if err != nil {
+		panic(err)
+	}
+
 	return f, nil
 }
 
@@ -523,6 +530,7 @@ func (c *Cache) SyncFrame(f *Frame, lsn []byte, keys [][]byte, vals [][]byte, pa
 	if len(lsn) != diskmanager.LSN_SIZE_BYTE {
 		panic(fmt.Errorf("Invalid LSN length. Got length %d, expected length %d", len(lsn), diskmanager.LSN_SIZE_BYTE))
 	}
+
 	f.mu.Lock()
 	if f.page == nil {
 		f.mu.Unlock()
@@ -550,6 +558,16 @@ func (c *Cache) SyncFrame(f *Frame, lsn []byte, keys [][]byte, vals [][]byte, pa
 	if err != nil {
 		return err
 	}
+
+	return nil
+}
+
+// calls disk manager to flush metadata to metadata page
+func (c *Cache) flushMetadata() error {
+	c.rmu.RLock()
+	defer c.rmu.RUnlock()
+
+	c.diskManager.FlushMetadata()
 
 	return nil
 }

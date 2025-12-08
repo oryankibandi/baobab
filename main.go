@@ -25,6 +25,7 @@ import (
 
 	"github.com/oryankibandi/baobab/pkg/bp_tree"
 	buffermanager "github.com/oryankibandi/baobab/pkg/buffer_manager"
+	"github.com/oryankibandi/baobab/pkg/recovery"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
@@ -259,7 +260,7 @@ func addKey(tree *bp_tree.BTree) http.HandlerFunc {
 		}
 
 		fmt.Printf("Key: %v\nVal: %v\n", payload.Key, payload.Val)
-		tree.InsertValue([][]byte{[]byte(payload.Key)}, [][]byte{[]byte(payload.Val)})
+		tree.InsertValue([][]byte{[]byte(payload.Key)}, [][]byte{[]byte(payload.Val)}, nil)
 		writeJSON(w, http.StatusOK, payload)
 
 		return
@@ -280,7 +281,7 @@ func removeKey(tree *bp_tree.BTree) http.HandlerFunc {
 			return
 		}
 
-		del, err := tree.DeleteValue([][]byte{[]byte(key)})
+		del, err := tree.DeleteValue([][]byte{[]byte(key)}, nil)
 
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, ErrResp{Error: err.Error()})
@@ -427,6 +428,24 @@ func main() {
 	if btree.Root != 0 {
 		log.Println("BTree Root => ", btree.Root)
 	}
+
+	// start recovery
+	rMngr, err := recovery.NewRecoveryMngr(cache, btree)
+
+	if err != nil {
+		panic("could not initialize recovery")
+	}
+
+	if rMngr != nil {
+		err = rMngr.Recover()
+
+		if err != nil {
+			panic(err)
+		}
+
+		rMngr.Close()
+	}
+
 	duration := time.Since(start)
 	fmt.Println()
 	fmt.Println("Done in ", duration)

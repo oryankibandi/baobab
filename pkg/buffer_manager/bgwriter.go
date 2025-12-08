@@ -33,7 +33,6 @@ func (bw *BgWriter) Start() {
 	go bw.watchFreeList()
 
 	for {
-
 		if bw.cache.diryList.dPageLru.isEmpty() {
 			// no dirty page
 			fmt.Println("No dirty frame... ")
@@ -109,11 +108,14 @@ func (bw *BgWriter) Start() {
 			fmt.Println("RECEIVED LSN FROM CHAN => ", lsn)
 			// compare and update LSN
 			LSN.mu.Lock()
+
 			newLSN, err := helpers.MaxLSN(LSN.maxLSN, lsn)
 
 			if err != nil {
 				panic(fmt.Errorf("Unable to get max LSN in bgwriter: %v", err))
 			}
+			fmt.Printf("(MaxLSN) Comparing LSNs:a) %v  (b) %v\t MAx: %v\n", LSN.maxLSN, lsn, newLSN)
+
 			LSN.maxLSN = newLSN
 			LSN.mu.Unlock()
 
@@ -126,6 +128,14 @@ func (bw *BgWriter) Start() {
 				bw.mu.Unlock()
 				break
 			}
+
+			// flush metadata
+			err = bw.cache.flushMetadata()
+
+			if err != nil {
+				panic(err)
+			}
+
 			bw.mu.Unlock()
 
 			// mark frame  as clean
