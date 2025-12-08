@@ -91,13 +91,6 @@ func (wr *WalWriter) assignLSN(logSize uint32) []byte {
 		wr.maxOffset = newMaxOff
 	}
 
-	// TODO: Delete next session
-	l := make([]byte, 8)
-	binary.LittleEndian.PutUint32(l[:4], wr.maxPage)
-	binary.LittleEndian.PutUint32(l[4:], wr.maxOffset)
-	fmt.Println("NEW LSN ===> ", l)
-	//////////////////////////////
-
 	return lsn
 }
 
