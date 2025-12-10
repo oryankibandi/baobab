@@ -132,6 +132,7 @@ func (w *WTinyLfu) evictWindow(c *Cache) error {
 		return WTinyLFUError{Message: "Window cache is not full"}
 	}
 
+	// FIX: Handle edge case when lru is empty(all frames pinned)
 	windVictim := w.windowCache.Pop()
 	mainCacheVictim := w.probationCache.Pop()
 

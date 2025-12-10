@@ -31,3 +31,29 @@ func TestMax(t *testing.T) {
 		})
 	}
 }
+
+func TestGreaterLSN(t *testing.T) {
+	tests := []struct {
+		name        string
+		lsnA        []byte
+		lsnB        []byte
+		expectedMax bool
+	}{
+		{name: "max_1", lsnA: []byte{0x5, 0, 0, 0, 0x8, 0xa, 0, 0}, lsnB: []byte{0x6, 0, 0, 0, 0xff, 0, 0, 0}, expectedMax: false},
+		{name: "max_2", lsnA: []byte{0x2, 0, 0, 0, 0xe6, 0x4, 0, 0}, lsnB: []byte{0x3, 0, 0, 0, 0x87, 0x14, 0, 0}, expectedMax: false},
+		{name: "max_3", lsnA: []byte{0x2, 0, 0, 0, 0xfe, 0x1f, 0, 0}, lsnB: []byte{0x3, 0, 0, 0, 0x9, 0, 0, 0}, expectedMax: false},
+		{name: "max_3", lsnA: []byte{0x3, 0, 0, 0, 0x9, 0, 0, 0}, lsnB: []byte{0x2, 0, 0, 0, 0xfe, 0x1f, 0, 0}, expectedMax: true},
+		{name: "same_page_lsn", lsnA: []byte{0x5, 0, 0, 0, 0xe9, 0x11, 0, 0}, lsnB: []byte{0x5, 0, 0, 0, 0x94, 0x11, 0, 0}, expectedMax: true},
+		{name: "equal_lsn", lsnA: []byte{0x5, 0, 0, 0, 0xe9, 0x11, 0, 0}, lsnB: []byte{0x5, 0, 0, 0, 0xe9, 0x11, 0, 0}, expectedMax: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m, err := GreaterLSN(test.lsnA, test.lsnB)
+
+			assert.NoError(t, err)
+
+			assert.Equal(t, test.expectedMax, m, fmt.Errorf("Expected max: %v\n, got: %v\n", test.expectedMax, m))
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -369,9 +370,9 @@ func runServer(tree *bp_tree.BTree) {
 	}
 
 	go func() {
-		fmt.Println("🚀🚀🚀🚀🚀🚀🚀  Server running on http://localhost:8080")
+		slog.Info("🚀🚀🚀🚀🚀🚀🚀  Server running on http://localhost:8080")
 		if err := srv.ListenAndServe(); err != nil {
-			fmt.Println("Error starting server:", err)
+			slog.Error("Error starting server:", "err", err)
 		}
 	}()
 
@@ -380,23 +381,23 @@ func runServer(tree *bp_tree.BTree) {
 
 	<-stop
 
-	fmt.Println("Shutting down BTree...")
+	slog.Info("Shutting down BTree...")
 	go func() {
-		fmt.Println("Creating goroutine dump")
+		slog.Info("Creating goroutine dump")
 		_ = dumpStacks("goroutine-dump_4.txt")
 	}()
 
 	tree.Shutdown()
 
-	fmt.Println("Gracefully shutting down...")
+	slog.Info("Gracefully shutting down...")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		fmt.Println("Forced shutdown:", err)
+		slog.Error("Forced shutdown:", "Err", err)
 	}
 
-	fmt.Println("Done.")
+	slog.Info("Done.")
 }
 
 func main() {
@@ -405,7 +406,7 @@ func main() {
 	trace.Start(f)
 	defer trace.Stop()
 	start := time.Now()
-	// fmt.Println("Hello world")
+	// slog.Info("Hello world")
 	wal := wal.NewWal()
 
 	if wal == nil {
@@ -418,7 +419,7 @@ func main() {
 		panic(fmt.Errorf("Could not initialize cache: %v", err))
 	}
 
-	fmt.Println("(main) => NEW WAL ==> ", wal)
+	slog.Info("(main)", "NEW WAL", wal)
 	btree, err := bp_tree.Initialize[int32](wal, cache)
 
 	if err != nil {
@@ -447,8 +448,7 @@ func main() {
 	}
 
 	duration := time.Since(start)
-	fmt.Println()
-	fmt.Println("Done in ", duration)
+	slog.Info("Done in ", "duration", duration.String())
 
 	go runProfiler()
 	runServer(btree)

@@ -48,7 +48,7 @@ func (rMngr *RecoveryMngr) Recover() error {
 	}
 
 	stopChan := make(chan struct{})
-	go startSpinner(stopChan, "Replaying WAL...")
+	go startSpinner(stopChan, "Replaying WAL...\n")
 	defer close(stopChan)
 
 	// Calculate offset of checkpoint
@@ -67,7 +67,7 @@ func (rMngr *RecoveryMngr) Recover() error {
 	n, err := rMngr.fd.ReadAt(checkPntData, int64(checkpointOff))
 
 	if (err != nil && !errors.Is(err, io.EOF)) || n <= 0 {
-		panic(fmt.Errorf("Unable to read checkpoint: ", err))
+		panic(fmt.Errorf("Unable to read checkpoint: %v", err))
 	}
 
 	if n < wal.CHECKPOINT_SIZE {
@@ -77,6 +77,7 @@ func (rMngr *RecoveryMngr) Recover() error {
 	// Extract REDO point
 	redoOff := binary.LittleEndian.Uint32(checkPntData[1:5])
 
+	fmt.Println("REDO POINT: ", redoOff)
 	err = rMngr.walkThroughRecovery(redoOff, uint32(rMngr.walSize))
 
 	if err != nil {
@@ -180,7 +181,7 @@ func (rMngr *RecoveryMngr) reapplyLog(op Operation) {
 		inserted, err := rMngr.BPTreeIndex.InsertValue([][]byte{op.key}, [][]byte{op.val}, op.lsn)
 
 		if err != nil {
-			panic(fmt.Errorf("Unable to insert value: ", err))
+			panic(fmt.Errorf("Unable to insert value: %v", err))
 		}
 
 		if !inserted {
@@ -193,7 +194,7 @@ func (rMngr *RecoveryMngr) reapplyLog(op Operation) {
 		deleted, err := rMngr.BPTreeIndex.DeleteValue([][]byte{op.key}, op.lsn)
 
 		if err != nil {
-			panic(fmt.Errorf("Unable to delete value: ", err))
+			panic(fmt.Errorf("Unable to delete value: %v", err))
 		}
 
 		if !deleted {
@@ -228,7 +229,7 @@ func (rMngr *RecoveryMngr) readLogHeader(off uint32) (LogHeaderMetadata, error) 
 	n, err := rMngr.fd.ReadAt(hdr, int64(off))
 
 	if err != nil && !errors.Is(err, io.EOF) {
-		panic(fmt.Errorf("unable to read log header: ", err))
+		panic(fmt.Errorf("unable to read log header: %v", err))
 	} else if errors.Is(err, io.EOF) {
 		// reached end of log
 		return LogHeaderMetadata{}, err
@@ -260,7 +261,7 @@ func (rMngr *RecoveryMngr) readLogHeader(off uint32) (LogHeaderMetadata, error) 
 
 	// validate data
 	if len(hdrMetadata.lsn) != wal.LSN_SIZE {
-		panic(fmt.Errorf("Invalid LSN size Received length: %d, expected: %%d", len(hdrMetadata.lsn), wal.LSN_SIZE))
+		panic(fmt.Errorf("Invalid LSN size Received length: %d, expected: %d", len(hdrMetadata.lsn), wal.LSN_SIZE))
 	}
 
 	if hdrMetadata.pageId <= 0 {
@@ -296,7 +297,7 @@ func (rMngr *RecoveryMngr) readFullLog(startOff uint32, lSize uint32, lsn []byte
 	n, err := rMngr.fd.ReadAt(bLog, int64(startOff))
 
 	if err != nil {
-		panic(fmt.Errorf("unable to read log: ", err))
+		panic(fmt.Errorf("unable to read log: %v", err))
 	}
 
 	if n <= 0 {
@@ -350,7 +351,7 @@ func (rMngr *RecoveryMngr) Close() error {
 	err := rMngr.fd.Close()
 
 	if err != nil {
-		return RecoveryError{Message: fmt.Sprintf("Unable to shutdown Recovery Manager: ", err)}
+		return RecoveryError{Message: fmt.Sprintf("Unable to shutdown Recovery Manager: %v", err)}
 	}
 
 	log.Println("Recovery Manager closed successfully.")
@@ -367,7 +368,7 @@ func NewRecoveryMngr(bufMngr *buffermanager.Cache, index *bp_tree.BTree) (*Recov
 	fd, err := os.OpenFile(RECOVERY_FILEPATH, os.O_RDONLY, 0644)
 
 	if err != nil {
-		return nil, RecoveryError{Message: fmt.Sprintf("Unable to open recovery file: ", err)}
+		return nil, RecoveryError{Message: fmt.Sprintf("Unable to open recovery file: %v", err)}
 	}
 
 	defer fd.Close()
@@ -392,7 +393,7 @@ func NewRecoveryMngr(bufMngr *buffermanager.Cache, index *bp_tree.BTree) (*Recov
 	walFd, err := os.OpenFile(wal.WAL_PATH, os.O_RDONLY, 0644)
 
 	if err != nil {
-		panic(fmt.Errorf("(recovery) Unable to open WAL file: ", err))
+		panic(fmt.Errorf("(recovery) Unable to open WAL file: %v", err))
 	}
 
 	// read and store size of wal file
