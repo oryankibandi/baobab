@@ -36,36 +36,38 @@ type Cache struct {
 }
 
 // Adds a page to cache, setting k as key. k is the unique page ID.
-func (c *Cache) put(k uint32, v *diskmanager.Page, dirty bool) (*Frame, error) {
+func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 	c.rmu.Lock()
 	// formattedKey := toKey(k)
 	// internal page
-	isInternal, err := v.IsInternal()
+	isInternal, err := p.IsInternal()
 
 	if err != nil {
 		return nil, err
 	}
 
+	var delKeys []uint32
+
 	item := Frame{
-		page:       v,
+		page:       p,
 		Key:        k,
 		IsInternal: isInternal,
 	}
 
+	// A newly created page will be marked as dirty so the background
+	// writer can flush it to disk
 	if dirty {
 		err = c.MarkFrameDirty(&item)
 
 		if err != nil {
-			log.Panic(err)
+			panic(err)
 		}
-
-		// item.MarkDirty()
 	}
 
 	// log.Println("NEW FRAME PREV ====================> ", item.Prev)
 	// log.Println("NEW FRAME NEXT ====================>", item.Next)
 
-	lsn := v.Header.GetLSN()
+	lsn := p.GetLSN()
 	// set lsn
 	item.lsn = lsn
 
@@ -75,23 +77,24 @@ func (c *Cache) put(k uint32, v *diskmanager.Page, dirty bool) (*Frame, error) {
 		// TODO: Check free frames first, if none evict first
 		// First time entry
 		log.Println("First Entry, adding to window cache----------------")
-		item.UpdateCacheType(Window)
+		// item.UpdateCacheType(Window)
 
 		c.CacheMap[k] = &item
 
 		// add to lru
-		err := c.wTinyLfu.AddItem(c, &item)
+		delKeys, err = c.wTinyLfu.AddItem(&item)
 
 		if err != nil {
 			panic(err)
 		}
+
 	} else {
 		// update value
 		log.Println("Item Exists, incrementing count........")
 		log.Println("EXISTING FRAME PREV ====================> ", val.prev)
 		log.Println("EXISTING FRAME NEXT ====================>", val.next)
 
-		val.UpdatePage(v)
+		val.UpdatePage(p)
 
 		// increment count
 		go c.wTinyLfu.Increment(&item)
@@ -100,6 +103,15 @@ func (c *Cache) put(k uint32, v *diskmanager.Page, dirty bool) (*Frame, error) {
 	// if err != nil {
 	// 	panic(err.Error())
 	// }
+
+	// If there are items that have been evicted, delete them from map
+	if delKeys != nil && len(delKeys) > 0 {
+		for _, k := range delKeys {
+			delete(c.CacheMap, k)
+		}
+
+		delKeys = nil
+	}
 
 	log.Println("Printing stats ....")
 	c.rmu.Unlock()
@@ -315,7 +327,7 @@ func (c *Cache) Get(pageId uint32) (*Frame, error) {
 
 // Releases a frame in use by unpinning and reinserting to LRU.
 // Called when a thread is done with a frame
-func (c *Cache) ReleaseFrame(f *Frame) error {
+func (c *Cache) ReleaseFrame(f *Frame, flushed bool) error {
 	addToLru, err := f.UnpinFrame()
 
 	if err != nil {
@@ -323,9 +335,17 @@ func (c *Cache) ReleaseFrame(f *Frame) error {
 	}
 
 	if addToLru {
-		err = c.wTinyLfu.reAddToLru(f)
+		del, err := c.wTinyLfu.reAddToLru(f)
+
 		if err != nil {
 			return err
+		}
+
+		if del && flushed {
+			// borrowed frame has been reclaimed and flushed. Delete
+			c.rmu.Lock()
+			delete(c.CacheMap, f.GetKey())
+			c.rmu.Unlock()
 		}
 	}
 

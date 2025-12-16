@@ -1,8 +1,10 @@
 package buffermanager
 
 import (
+	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -13,13 +15,19 @@ const (
 
 type LruType int
 
+// Lru represents the doubly-linked list(D) structure that maintains items with
+// a Least Recently Used(LRU) eviction policy. Recently accessed items
+// are moved to head of the DLL so that least recentyl used items are
+// always at the tail
 type Lru struct {
-	Head     *Frame
-	Tail     *Frame
-	Count    uint64
-	Capacity uint64
-	Full     bool
-	mu       sync.RWMutex
+	Head           *Frame
+	Tail           *Frame
+	Count          uint64
+	Capacity       uint64
+	borrowedFrames atomic.Uint64 // number of borrowed frames
+	Full           bool
+	segName        string // name of the segment.  Window, probation or protected
+	mu             sync.RWMutex
 }
 
 // Remove least recently used
@@ -82,26 +90,45 @@ func (l *Lru) Add(f *Frame) *Frame {
 	// log.Println("ITEM >> ", f)
 	l.mu.Lock()
 	log.Println("OBTAINED LRU LOCK >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-	f.mu.Lock()
-	log.Println("OBTAINED FRAME LOCK >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+	//  f.mu.Lock()
+	// log.Println("OBTAINED FRAME LOCK >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 	defer l.mu.Unlock()
-	defer f.mu.Unlock()
+	// defer f.mu.Unlock()
 	log.Println("ITEM >> ", f)
 	log.Println("ITEM COUNT B4:>>>>>>>>> ", l.Count)
 
 	if l.Head == f {
-		panic("(Add) Frame is already head of lru list")
+		panic(fmt.Errorf("%s (Add) Frame is already head of lru list", l.segName))
 	}
 
 	if l.Tail == f {
-		panic("(Add) Frame is already tail of lru list")
+		log.Println("TAIL => ", l.Tail)
+		log.Println("FRAME => ", f)
+		log.Printf("%s Count: %d\n", l.segName, l.Count)
+		log.Printf("%s Capacity: %d\n", l.segName, l.Capacity)
+		log.Printf("%s Full: %t\n", l.segName, l.Full)
+		panic(fmt.Errorf("%s (Add) Frame is already tail of lru list", l.segName))
+	}
+
+	// update lru type
+	switch l.segName {
+	case "window":
+		f.UpdateCacheType(Window)
+	case "protected":
+		f.UpdateCacheType(Protected)
+	case "probation":
+		f.UpdateCacheType(Probation)
+	default:
+		// invalid segName
+		panic(fmt.Errorf("(lru) Invalid segName: %s", l.segName))
 	}
 
 	if l.Count <= 0 {
 		l.Head = f
 		l.Tail = f
-		f.next = nil
-		f.prev = nil
+		// f.setNextPtr(nil)
+		// f.setPrevPtr(nil)
+		f.setPtrs(nil, nil)
 		l.Count++
 
 		l.Full = l.Count >= l.Capacity
@@ -114,7 +141,7 @@ func (l *Lru) Add(f *Frame) *Frame {
 	if l.Head != nil {
 		l.Head.mu.Lock()
 		l.Head.prev = f
-		f.next = l.Head
+		f.setNextPtr(l.Head)
 		l.Head.mu.Unlock()
 	}
 
@@ -148,12 +175,18 @@ func (l *Lru) Delete(n *Frame) *Frame {
 	}
 
 	if n.prev == nil && n.next != nil {
+		if n.next == l.Head {
+			panic("Cannot set next pointer as itself.")
+		}
 		l.Head = n.next
 	}
 
 	if n.prev != nil {
 		n.prev.mu.Lock()
 		if n.next != nil {
+			if n.prev == n.next {
+				panic("Cannot set next pointer as itself.")
+			}
 			n.prev.next = n.next
 		} else {
 			n.prev.next = nil
@@ -249,6 +282,9 @@ func (l *Lru) SetMostRecent(f *Frame) {
 	}
 
 	// Add to head ot DLL
+	if f.next == l.Head {
+		panic("Cannot set next pointer as itself.")
+	}
 	f.next = l.Head
 
 	log.Println("(SETMOSTRECENT) GETTING LOCK FOR HEAD => l.Head")
@@ -274,7 +310,9 @@ func (l *Lru) RemoveFrame(f *Frame) error {
 
 	log.Println("lru.RemoveFrame()")
 	l.mu.Lock()
+	log.Println("(lru.RemoveFrame): obtained lock for lru...")
 	f.mu.Lock()
+	log.Println("(lru.RemoveFrame): obtained lock for frame...")
 	defer l.mu.Unlock()
 	defer f.mu.Unlock()
 
@@ -296,9 +334,9 @@ func (l *Lru) RemoveFrame(f *Frame) error {
 		}
 	}
 
-	if l.Count > 0 {
-		l.Count -= 1
-	}
+	// if l.Count > 0 {
+	// 	l.Count -= 1
+	// }
 
 	// f.mu.RUnlock()
 	log.Println("(RemoveFrame) CURR LRU COUNT  B4 PinFrame => ", l.Count)
@@ -348,17 +386,36 @@ func (l *Lru) GetTailKey() uint32 {
 func (l *Lru) ReAddFrame(f *Frame) error {
 	log.Println("lru.ReAddFrame()")
 	l.mu.Lock()
+	log.Println("(lru.ReAddFrame): obtained lock for LRU")
 	f.mu.Lock()
+	log.Println("(lru.ReAddFrame): obtained lock for Frame")
 	defer l.mu.Unlock()
 	defer f.mu.Unlock()
 
+	if l.Head == f {
+		panic("(lru.ReAddFrame) Frame already part of lru")
+	}
+
+	if l.Tail == f {
+		panic("(lru.ReAddFrame) Frame already part of lru")
+	}
+
 	if l.Count <= 0 {
+		log.Println("(lru.ReAddFrame): DONE(no item)")
 		return BufferManagerError{Message: "No item in LRU"}
 	}
 
 	if l.Head != nil {
+		if f == l.Head {
+			panic("Cannot set next pointer as itself.")
+		}
+
 		f.next = l.Head
+		log.Println("(lru.ReAddFrame) l.Head ==> ", l.Head)
+		log.Println("(lru.ReAddFrame) f ==> ", f)
+		log.Println("(lru.ReAddFrame) Getting lock for l.Head")
 		l.Head.mu.Lock()
+		log.Println("(lru.ReAddFrame) Obtained lock for l.Head")
 		l.Head.prev = f
 		l.Head.mu.Unlock()
 	} else {
@@ -368,6 +425,7 @@ func (l *Lru) ReAddFrame(f *Frame) error {
 	if l.Count == 1 {
 		l.Tail = f
 	}
+	log.Println("(lru.ReAddFrame): DONE")
 
 	return nil
 }
@@ -379,11 +437,39 @@ func (l *Lru) IsFull() bool {
 	return l.Full
 }
 
+// Increments the number of borrowed frames
+func (l *Lru) borrow() error {
+	l.borrowedFrames.Add(1)
+
+	return nil
+}
+
+// Increments the number of borrowed frames
+func (l *Lru) returnBorrowedFrame() error {
+	b := l.borrowedFrames.Load()
+
+	if b <= 0 {
+		return LRUError{Message: "(lru) No borrowed frames"}
+	}
+
+	l.borrowedFrames.CompareAndSwap(b, b-1)
+
+	return nil
+}
+
+// Returns true if LRU list has borrowed frames
+func (l *Lru) hasBorrowedFrames() bool {
+	b := l.borrowedFrames.Load()
+
+	return b > 0
+}
+
 // Create new instance of LRU Linked List
-func NewLRU(capacity uint64) *Lru {
+func NewLRU(capacity uint64, name string) *Lru {
 	return &Lru{
 		Count:    0,
 		Capacity: capacity,
+		segName:  name,
 		Full:     false,
 	}
 }

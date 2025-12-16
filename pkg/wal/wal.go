@@ -2,6 +2,7 @@ package wal
 
 import (
 	"encoding/binary"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -78,6 +79,7 @@ type WALPageHeader struct {
 type WAL struct {
 	walBuff   *WALBuffer
 	walWriter *WalWriter
+	walReader *WalReader
 }
 
 // Returns the raw byte  value of the B-LOG heeader
@@ -174,7 +176,7 @@ func (c *CheckPoint) toBytes() []byte {
 	chckpnt := make([]byte, CHECKPOINT_SIZE)
 
 	chckpnt[0] = c.flag
-	binary.LittleEndian.PutUint32(chckpnt[1:CHECKPOINT_SIZE], c.redoPoint)
+	binary.LittleEndian.PutUint32(chckpnt[1:5], c.redoPoint)
 	chckpnt = append(chckpnt[:5], c.checkpointLSN...)
 
 	return chckpnt
@@ -237,11 +239,18 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 		return WalError{Message: "Invalid LSN size"}
 	}
 
-	// calculate offset(REDO point)
+	// get log size
+	s, err := w.walReader.getLogSize(latestLSN)
+
+	if err != nil {
+		panic(fmt.Errorf("(wal) Unalblt to get size of log at LSN: %v", latestLSN))
+	}
+
+	// calculate offset(REDO point). This should be after the latest applied log
 	page := binary.LittleEndian.Uint32(latestLSN[:4])
 	redoOffset := binary.LittleEndian.Uint32(latestLSN[4:])
 
-	redoPoint := (page * WAL_PAGE_SIZE) + redoOffset
+	redoPoint := (page * WAL_PAGE_SIZE) + redoOffset + s
 
 	// get LSN
 	lsn := w.walWriter.assignLSN(CHECKPOINT_SIZE)
@@ -256,7 +265,7 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 	w.walBuff.Add(&cp)
 
 	log.Println("ADDED CHECKPOINT, writing config file ")
-	err := w.walWriter.saveCheckpoint(lsn)
+	err = w.walWriter.saveCheckpoint(lsn)
 
 	if err != nil {
 		panic(err)
@@ -344,6 +353,7 @@ func NewWal() *WAL {
 	wal := WAL{
 		walBuff:   NewWalBuff(),
 		walWriter: NewWalWriter(WAL_PATH),
+		walReader: NewWalReader(WAL_PATH),
 	}
 
 	go wal.walBgWriter()
