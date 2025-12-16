@@ -1,6 +1,7 @@
 package buffermanager
 
 import (
+	"fmt"
 	"log"
 	"sync"
 
@@ -56,7 +57,7 @@ func (f *Frame) pinFrame() error {
 			f.prev.mu.Unlock()
 		}
 
-		if f.next != nil {
+		if f.next != nil && f.next != f {
 			log.Println("(pinFrame) Geting lock for next frame...->", f.next)
 			f.next.mu.Lock()
 			log.Println("(pinFrame) Obtained lock for next frame...")
@@ -68,6 +69,7 @@ func (f *Frame) pinFrame() error {
 	f.pins += 1
 	f.next = nil
 	f.prev = nil
+	log.Println("(pinFrame) DONE.")
 
 	return nil
 }
@@ -275,8 +277,46 @@ func (f *Frame) GetLSN() ([]byte, error) {
 	}
 
 	log.Println("(GetLSN) Frame ==> ", f)
-	pLsn := f.page.Header.GetLSN()
+	pLsn := f.page.GetLSN()
 	log.Println("(GetLSN) PAGE LSN ==> ", pLsn)
 
 	return f.lsn, nil
+}
+
+func (f *Frame) setNextPtr(fr *Frame) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f == fr {
+		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own next pointer. \nFrame -> %v\nProvided next -> %v\n", f, fr))
+	}
+
+	f.next = fr
+}
+
+func (f *Frame) setPrevPtr(fr *Frame) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f == fr {
+		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own prev pointer. \nFrame -> %v\nProvided prev -> %v\n", f, fr))
+	}
+
+	f.prev = fr
+}
+
+func (f *Frame) setPtrs(prev *Frame, next *Frame) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f == prev {
+		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own prev pointer. \nFrame -> %v\nProvided prev -> %v\n", f, prev))
+	}
+
+	if f == next {
+		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own next pointer. \nFrame -> %v\nProvided next -> %v\n", f, next))
+	}
+
+	f.prev = prev
+	f.next = next
 }

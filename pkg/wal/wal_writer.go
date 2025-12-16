@@ -14,8 +14,8 @@ type WriteReq struct {
 }
 
 type WalWriter struct {
-	fd        *os.File
-	confFD    *os.File
+	fd        *os.File // Write Only file descriptor for wal file
+	confFD    *os.File // Write Only file descriptor for config file. This file stores the latest checkpoint in WAL
 	queue     *WriteQueue
 	maxPage   uint32 // Latest page in WAL file
 	maxOffset uint32 // Largest offset in WAL segment
@@ -68,7 +68,7 @@ func (wr *WalWriter) initializeWriter() error {
 		_, err := wr.fd.Write(data)
 
 		if err != nil {
-			panic(fmt.Errorf("(walwriter) Unable to write first checkpoint: ", err))
+			panic(fmt.Errorf("(walwriter) Unable to write first checkpoint: %v", err))
 		}
 
 		// update maxOffset
@@ -79,7 +79,7 @@ func (wr *WalWriter) initializeWriter() error {
 		err = wr.saveCheckpoint(lsn)
 
 		if err != nil {
-			panic(fmt.Errorf("(walwriter) Unable to save first checkpoint: ", err))
+			panic(fmt.Errorf("(walwriter) Unable to save first checkpoint: %v", err))
 		}
 
 		return nil
@@ -248,7 +248,7 @@ func NewWalWriter(path string) *WalWriter {
 	confFd, err := os.OpenFile(WAL_CONFIG_PATH, os.O_CREATE|os.O_WRONLY, 0644)
 
 	if err != nil {
-		panic(fmt.Sprintf("Unable to open config file: %d: %v", WAL_CONFIG_PATH, err))
+		panic(fmt.Sprintf("Unable to open config file: %s: %v", WAL_CONFIG_PATH, err))
 	}
 
 	jobQueue := WriteQueue{}
@@ -305,8 +305,8 @@ func loadMaxLSN(path string) (maxPage uint32, off uint32) {
 		}
 	}
 
-	fmt.Println("LOADED PAGE :=> ", page)
-	fmt.Println("LOADED OFFSET :=> ", offset)
+	fmt.Println("(walwriter) LOADED PAGE :=> ", page)
+	fmt.Println("(walwriter) LOADED OFFSET :=> ", offset)
 
 	return page, offset
 }
