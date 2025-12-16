@@ -48,114 +48,132 @@ func (bw *BgWriter) Start() {
 		}{maxLSN: make([]byte, 8)}
 
 		for fDirty != nil {
-			// remove frame from LRU
-			err := bw.cache.RemoveItemFromLru(fDirty.frame)
+			bw.wg.Add(1)
+			go func(f *pDirty) {
+				defer bw.wg.Done()
+				// remove frame from LRU
+				err := bw.cache.RemoveItemFromLru(f.frame)
 
-			// err := f.PinFrame()
+				fmt.Println("(bgwriter) Frame Pinned")
+				// err := f.PinFrame()
 
-			if err != nil {
-				panic(fmt.Sprintf("Unable to pin frame: %v", err))
-			}
-
-			if d := fDirty.frame.IsDirty(); !d {
-				err = bw.cache.ReleaseFrame(fDirty.frame)
 				if err != nil {
-					panic(err)
+					panic(fmt.Sprintf("Unable to pin frame: %v", err))
 				}
-				continue
-			}
 
-			bw.mu.Lock()
-			bw.writtenPages++
-			bw.mu.Unlock()
-
-			c := make(chan int32)
-			lsnChan := make(chan []byte)
-			err = bw.cache.diskManager.WriteReq(fDirty.frame.page, &c, &lsnChan)
-
-			if err != nil {
-				panic(err.Error())
-			}
-
-			n := <-c
-
-			if n >= 0 {
-				fmt.Printf("(bgwriter) Written %d byte(s).\n", n)
-
-				// Check if page is marked for deletion
-				if d, err := fDirty.frame.PageIsDead(); err == nil && d {
-					fmt.Println("(bgwriter) Page marked for deletion, removing from cache")
-					// release shared reader lock temporarily  to gain exclusive lock in bw.cache.Delete()
-					// bw.cache.rmu.RUnlock()
-					// remove from buffer pool
-					bw.cache.Delete(uint32(fDirty.frame.page.Header.PageId), false)
-					// bw.cache.rmu.RLock()
-				} else if err != nil {
-					fmt.Println("(bgwriter) Page not marked for deletion")
-					panic(err)
+				if d := f.frame.IsDirty(); !d {
+					fmt.Println("(bgwriter) Frame not dirty, releasing...")
+					err = bw.cache.ReleaseFrame(f.frame, true)
+					if err != nil {
+						panic(err)
+					}
+					// continue
+					return
 				}
 
 				bw.mu.Lock()
-				bw.writtenBytes += uint32(n)
+				bw.writtenPages++
 				bw.mu.Unlock()
-			} else {
-				fmt.Println("(bgwriter) Unable to write to disk")
-			}
-			// Get written page LSN
-			fmt.Println("WAITING FOR LSN CHANNEL....")
-			lsn := <-lsnChan
 
-			fmt.Println("RECEIVED LSN FROM CHAN => ", lsn)
-			// compare and update LSN
-			LSN.mu.Lock()
+				c := make(chan int32)
+				lsnChan := make(chan []byte)
+				err = bw.cache.diskManager.WriteReq(f.frame.page, &c, &lsnChan)
 
-			newLSN, err := helpers.MaxLSN(LSN.maxLSN, lsn)
+				if err != nil {
+					panic(err.Error())
+				}
 
-			if err != nil {
-				panic(fmt.Errorf("Unable to get max LSN in bgwriter: %v", err))
-			}
-			fmt.Printf("(MaxLSN) Comparing LSNs:a) %v  (b) %v\t MAx: %v\n", LSN.maxLSN, lsn, newLSN)
+				fmt.Println("(bgwriter) waiting for write completion from disk manager...")
+				n := <-c
+				fmt.Println("(bgwriter) Received write completion  signal...")
 
-			LSN.maxLSN = newLSN
-			LSN.mu.Unlock()
+				if n >= 0 {
+					fmt.Printf("(bgwriter) Written %d byte(s).\n", n)
 
-			fmt.Println("RECEIVED MAX LSN ==> ", lsn)
-			// If flushed MAX_PAGES, break
-			bw.mu.Lock()
-			if bw.writtenPages >= MAX_PAGES {
+					// Check if page is marked for deletion
+					if d, err := f.frame.PageIsDead(); err == nil && d {
+						fmt.Println("(bgwriter) Page marked for deletion, removing from cache")
+						// release shared reader lock temporarily  to gain exclusive lock in bw.cache.Delete()
+						// bw.cache.rmu.RUnlock()
+						// remove from buffer pool
+						bw.cache.Delete(uint32(f.frame.page.Header.PageId), false)
+						// bw.cache.rmu.RLock()
+					} else if err != nil {
+						fmt.Println("(bgwriter) Page not marked for deletion")
+						panic(err)
+					}
 
-				bw.writtenPages = 0
+					bw.mu.Lock()
+					bw.writtenBytes += uint32(n)
+					bw.mu.Unlock()
+				} else {
+					fmt.Println("(bgwriter) Unable to write to disk")
+				}
+				// Get written page LSN
+				fmt.Println("WAITING FOR LSN CHANNEL....")
+				lsn := <-lsnChan
+
+				fmt.Println("RECEIVED LSN FROM CHAN => ", lsn)
+				// compare and update LSN
+				LSN.mu.Lock()
+
+				newLSN, err := helpers.MaxLSN(LSN.maxLSN, lsn)
+
+				if err != nil {
+					panic(fmt.Errorf("Unable to get max LSN in bgwriter: %v", err))
+				}
+				fmt.Printf("(MaxLSN) Comparing LSNs:a) %v  (b) %v\t MAx: %v\n", LSN.maxLSN, lsn, newLSN)
+
+				LSN.maxLSN = newLSN
+				LSN.mu.Unlock()
+
+				fmt.Println("RECEIVED MAX LSN ==> ", lsn)
+				// If flushed MAX_PAGES, break
+				bw.mu.Lock()
+				if bw.writtenPages >= MAX_PAGES {
+
+					bw.writtenPages = 0
+					bw.mu.Unlock()
+					// break
+					return
+				}
+
+				// flush metadata
+				// err = bw.cache.flushMetadata()
+
+				// if err != nil {
+				// 	panic(err)
+				// }
+
 				bw.mu.Unlock()
-				break
-			}
 
-			// flush metadata
-			err = bw.cache.flushMetadata()
+				// mark frame  as clean
+				f.frame.markClean()
 
-			if err != nil {
-				panic(err)
-			}
+				// unpin frame
+				err = bw.cache.ReleaseFrame(f.frame, true)
 
-			bw.mu.Unlock()
-
-			// mark frame  as clean
-			fDirty.frame.markClean()
-
-			// unpin frame
-			err = bw.cache.ReleaseFrame(fDirty.frame)
-
-			if err != nil {
-				panic(fmt.Sprintf("Unable to release frame: %v", err))
-			}
+				if err != nil {
+					panic(fmt.Sprintf("Unable to release frame: %v", err))
+				}
+			}(fDirty)
 
 			fDirty = bw.cache.diryList.popDirtyPage()
+		}
+
+		bw.wg.Wait()
+		// flush metadata
+		err := bw.cache.flushMetadata()
+
+		if err != nil {
+			panic(err)
 		}
 
 		// call Sync() to flush buffer contents to disk
 		bw.cache.flushWritten()
 
 		// Add checkpoint
-		err := bw.wal.AddCheckpoint(LSN.maxLSN)
+		err = bw.wal.AddCheckpoint(LSN.maxLSN)
 
 		if err != nil {
 			panic(fmt.Errorf("Unable to add checkoint: %v", err))

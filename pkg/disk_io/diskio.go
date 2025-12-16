@@ -344,6 +344,7 @@ func (d *DiskManager) WriteReq(page *Page, written *chan int32, lsnChan *chan []
 	}
 
 	q.(*JobQueue).addJob(writeReq)
+	fmt.Println("(WriteReq) Job added....")
 
 	return nil
 }
@@ -671,6 +672,20 @@ func (p *Page) UpdateLSN(lsn []byte) error {
 	return nil
 }
 
+// Retrieves the Log Sequence Number of the page block
+func (p *Page) GetLSN() []byte {
+	p.rmu.RLock()
+	defer p.rmu.RUnlock()
+
+	if p.Header == nil {
+		panic("No header associated with page")
+	}
+
+	lsn := p.Header.getLSN()
+
+	return lsn
+}
+
 // Synchronizes keys, values and  page IDs in node to items in Page
 func (p *Page) Sync(lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
 	if len(lsn) != LSN_SIZE_BYTE {
@@ -794,13 +809,16 @@ func (p *Page) Sync(lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, r
 // Flushes page content to disk(does not call sync())
 // Sends number of bytes written to channel b
 func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
+	fmt.Println("(flushPage) Flushing page...")
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
 
+	fmt.Println("acquired page locks... ")
 	// Unmark as dirty
 	p.Header.unsetFlag(Dirty)
 
-	seqNo := p.Header.GetLSN()
+	// retrieve LSN. Already acquired page locks so we can access from the header to avoid deadlocks if we called page.GetLSN()
+	seqNo := p.Header.getLSN()
 
 	// update page header data
 	hdrBytes := p.Header.toBytes()
@@ -811,7 +829,7 @@ func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 		var isRoot bool
 		p.pgeData = [PAGE_SIZE_BYTES]byte{}
 
-		d.mu.RLock()
+		d.mu.Lock()
 		isRoot = d.RootPage == p.Header.PageId
 		n, err := d.fd.WriteAt(p.pgeData[:], int64(p.Header.PageId*PAGE_SIZE_BYTES))
 
@@ -819,11 +837,7 @@ func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 			panic("Could not write page")
 		}
 
-		d.mu.RUnlock()
-
-		d.mu.Lock()
-
-		// if page is root and it's the onlly one, reset root page
+		// if page is root and it's the only one, reset root page
 		if isRoot && d.PageCount == 1 {
 			d.RootPage = 0
 			// d.RootNode = nil
@@ -832,6 +846,7 @@ func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 		if d.PageCount > 0 {
 			d.PageCount -= 1
 		}
+
 		d.mu.Unlock()
 
 		// add to free list
@@ -1098,7 +1113,7 @@ func (h *PageHeader) setLSN(lsn []byte) {
 	h.LSN = lsn
 }
 
-func (h *PageHeader) GetLSN() []byte {
+func (h *PageHeader) getLSN() []byte {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 

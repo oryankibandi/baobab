@@ -47,7 +47,7 @@ func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
 }
 
 // Increments count from a Get request.
-// A Get request is different in that a frame will be pinned(rmoved from LRU)
+// A Get request is different in that a frame will be pinned(removed from LRU)
 // hence there is no need to move it to head of LRU as it will be readded during
 // unpinning.
 func (w *WTinyLfu) GetIncrement(f *Frame) error {
@@ -94,6 +94,7 @@ func (w *WTinyLfu) handlePinFrame(f *Frame) error {
 	default:
 		log.Println("No LRU associated with frame.")
 	}
+	fmt.Println("(handlePinFrame) DONE.")
 
 	return nil
 }
@@ -127,48 +128,80 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 }
 
 // Evicts an item from the window cache. This is called when the w-cache is full.
-func (w *WTinyLfu) evictWindow(c *Cache) error {
+func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	if !w.windowCache.IsFull() {
-		return WTinyLFUError{Message: "Window cache is not full"}
+		return nil, WTinyLFUError{Message: "Window cache is not full"}
 	}
 
-	// FIX: Handle edge case when lru is empty(all frames pinned)
 	windVictim := w.windowCache.Pop()
+
+	if windVictim == nil {
+		// all items pinned, borrow frame
+		err := w.windowCache.borrow()
+
+		if err != nil {
+			panic(err)
+		}
+
+		return nil, nil
+	}
+
+	// If main cache not full, send window victim to main cache
+	if !w.probationCache.IsFull() {
+		// add window victim to main cache
+		w.probationCache.Add(windVictim)
+
+		return nil, nil
+	}
+
 	mainCacheVictim := w.probationCache.Pop()
 
+	if mainCacheVictim == nil {
+		panic("No main victim in probation segment")
+	}
+
 	// compare counts of window victim and main cache victim
-	windCount, err := w.tinyFilter.CheckItemCount(toBytes(windVictim.GetKey()))
+	windKey := windVictim.GetKey()
+	windCount, err := w.tinyFilter.CheckItemCount(toBytes(windKey))
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	mainCacheCount, err := w.tinyFilter.CheckItemCount(toBytes(windVictim.GetKey()))
+	mainKey := mainCacheVictim.GetKey()
+	mainCacheCount, err := w.tinyFilter.CheckItemCount(toBytes(mainKey))
 
 	if err != nil {
-		return err
+		return nil, err
 	}
+
+	// del keys
+	var delKeys []uint32
 
 	if windCount > mainCacheCount {
 		// evict & forget main cache item
-		err = c.Delete(mainCacheVictim.GetKey(), false)
+		// err = c.Delete(mainCacheVictim.GetKey(), false)
 
-		if err != nil {
-			panic(err)
-		}
+		// if err != nil {
+		// 	panic(err)
+		// }
+		delKeys = append(delKeys, mainKey)
 
 		// Add window victim to probation
+		windVictim.UpdateCacheType(Probation)
 		w.probationCache.Add(windVictim)
 	} else {
 		// evict and forget window cache item
-		err = c.Delete(windVictim.GetKey(), false)
+		//	err = c.Delete(windVictim.GetKey(), false)
 
-		if err != nil {
-			panic(err)
-		}
+		//	if err != nil {
+		//		panic(err)
+		//	}
+
+		delKeys = append(delKeys, windKey)
 	}
 
-	return nil
+	return delKeys, nil
 }
 
 // Evict an item from main cache(probation). Called when protected is full.
@@ -194,36 +227,43 @@ func (w *WTinyLfu) evictMainCache() error {
 	return nil
 }
 
-func (w *WTinyLfu) RemoveItemFromLru(f *Frame) error {
-	if f == nil {
-		panic("(RemoveItemFromLru)frame is required")
-	}
+//
+// func (w *WTinyLfu) RemoveItemFromLru(f *Frame) error {
+// 	if f == nil {
+// 		panic("(RemoveItemFromLru)frame is required")
+// 	}
+//
+// 	cType := f.GetCacheType()
+//
+// 	switch cType {
+// 	case Window:
+// 		w.windowCache.RemoveFrame(f)
+// 	case Protected:
+// 		w.protectedCache.RemoveFrame(f)
+// 	default:
+// 		w.probationCache.RemoveFrame(f)
+// 	}
+//
+// 	return nil
+// }
 
-	cType := f.GetCacheType()
-
-	switch cType {
-	case Window:
-		w.windowCache.RemoveFrame(f)
-	case Protected:
-		w.protectedCache.RemoveFrame(f)
-	default:
-		w.probationCache.RemoveFrame(f)
-	}
-
-	return nil
-}
-
-// Adds a new item to Cache. By default, all new items are added to the window cache
-func (w *WTinyLfu) AddItem(c *Cache, f *Frame) error {
+// Adds a new item to Cache.
+// By default, all new items are added to the window cache.
+// If window segment is full, an item is evicted or added to main cache
+// Returns a slice of uint32 keys that have been evicted and error if any
+func (w *WTinyLfu) AddItem(f *Frame) ([]uint32, error) {
 	if f == nil {
 		panic("(AddItem)frame is required")
 	}
 
 	f.UpdateCacheType(Window)
 
+	// keys that might be evicted if window is full
+	var evictKeys []uint32
+	var err error
 	if w.windowCache.IsFull() {
 		// evict window cache first
-		err := w.evictWindow(c)
+		evictKeys, err = w.evictWindow()
 
 		if err != nil {
 			panic(err)
@@ -232,7 +272,7 @@ func (w *WTinyLfu) AddItem(c *Cache, f *Frame) error {
 
 	w.windowCache.Add(f)
 
-	return nil
+	return evictKeys, nil
 }
 
 func (w *WTinyLfu) deleteFromLru(f *Frame) error {
@@ -254,26 +294,41 @@ func (w *WTinyLfu) deleteFromLru(f *Frame) error {
 }
 
 // Readds item to LRU. Called during unpinning.
-func (w *WTinyLfu) reAddToLru(f *Frame) error {
+// if the lru list the frame is a part of has borrowed frames
+// decrement borrowed frames
+// return del=true.
+func (w *WTinyLfu) reAddToLru(f *Frame) (del bool, err error) {
 	cType := f.GetCacheType()
 
 	switch cType {
 	case Probation:
 		fmt.Println("ADDING TO PROBATION.....")
 		// err = c.probationCache.ReAddFrame(f)
-		w.probationCache.Add(f)
+		w.probationCache.ReAddFrame(f)
 	case Protected:
 		fmt.Println("ADDING TO PROTETED.....")
 		// err = c.protectedCache.ReAddFrame(f)
-		w.protectedCache.Add(f)
+		w.protectedCache.ReAddFrame(f)
 		fmt.Println("ADDED TO PROTECTED.....")
 	default:
 		fmt.Println("ADDING TO WINDOW.....")
-		// err = c.windowCache.ReAddFrame(f)
-		w.windowCache.Add(f)
+		// Check if has borrowed frames
+		if w.windowCache.hasBorrowedFrames() {
+			fmt.Println("HAS BORROWED FRAMES")
+			// do not readd
+			err := w.windowCache.returnBorrowedFrame()
+
+			if err != nil {
+				panic(err)
+			}
+
+			return true, nil
+		}
+
+		w.windowCache.ReAddFrame(f)
 	}
 
-	return nil
+	return false, nil
 }
 
 // List metadata i.e no. of items in all segments
@@ -303,9 +358,9 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	}
 
 	w := WTinyLfu{
-		windowCache:    NewLRU(windowSize),
-		probationCache: NewLRU(uint64(MAIN_CACHE_RATIO * float64(mainCacheSize))),
-		protectedCache: NewLRU(uint64((1 - MAIN_CACHE_RATIO) * float64(mainCacheSize))),
+		windowCache:    NewLRU(windowSize, "window"),
+		probationCache: NewLRU(uint64(MAIN_CACHE_RATIO*float64(mainCacheSize)), "probation"),
+		protectedCache: NewLRU(uint64((1-MAIN_CACHE_RATIO)*float64(mainCacheSize)), "protected"),
 		tinyFilter:     tiny.New(),
 	}
 

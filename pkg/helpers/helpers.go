@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"time"
 )
 
 const (
@@ -314,4 +315,24 @@ func BitIsSet(flag byte, pos int) bool {
 
 	return r > 0
 
+}
+
+// Prints a loading spinner to std output until a stop message is sent
+// to the stop channel -> close(stop)
+func StartSpinner(stop chan struct{}, message string) {
+	spin := []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+	i := 0
+
+	for {
+		select {
+		case <-stop:
+			fmt.Printf("\rDone \033[K\n")
+			return
+		default:
+			fmt.Printf("%s", message)
+			fmt.Printf("\r%c ", spin[i%len(spin)])
+			i++
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 }
