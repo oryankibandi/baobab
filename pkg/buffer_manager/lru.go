@@ -15,7 +15,7 @@ const (
 
 type LruType int
 
-// Lru represents the doubly-linked list(D) structure that maintains items with
+// Lru represents the doubly-linked list(DLL) structure that maintains items with
 // a Least Recently Used(LRU) eviction policy. Recently accessed items
 // are moved to head of the DLL so that least recentyl used items are
 // always at the tail
