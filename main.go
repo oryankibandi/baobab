@@ -410,7 +410,7 @@ func main() {
 	// slog.Info("Hello world")
 
 	// initialize logger
-	l := logger.NewLogger(logger.DEBUG, 1)
+	l := logger.NewLogger("", logger.DEBUG, 1)
 
 	if l == nil {
 		panic("Unable to initialize logger")
@@ -428,7 +428,7 @@ func main() {
 		panic(fmt.Errorf("Could not initialize cache: %v", err))
 	}
 
-	l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("NEW WAL: %v", wal))
+	l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("NEW WAL: %v", wal), nil)
 	btree, err := bp_tree.Initialize[int32](wal, cache)
 
 	if err != nil {
@@ -437,14 +437,14 @@ func main() {
 
 	if btree.Root != 0 {
 		log.Println("BTree Root => ", btree.Root)
-		l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("BTree Root: %v", btree.Root))
+		l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("BTree Root: %v", btree.Root), nil)
 	}
 
 	// start recovery
 	rMngr, err := recovery.NewRecoveryMngr(cache, btree)
 
 	if err != nil {
-		l.Write("main", "main()", logger.LevelError, "Could not initialize recovery")
+		l.Write("main", "main()", logger.LevelError, "Could not initialize recovery", nil)
 		panic("could not initialize recovery")
 	}
 
@@ -460,7 +460,7 @@ func main() {
 
 	duration := time.Since(start)
 	// slog.Info("Done in ", "duration", duration.String())
-	l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("Done in: %s", duration.String()))
+	l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("Done in: %s", duration.String()), nil)
 
 	go runProfiler()
 	runServer(btree)

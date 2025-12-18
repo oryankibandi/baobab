@@ -11,9 +11,10 @@ import (
 // New logs are added to tail while maintaining exclusive lock on the queue
 
 type LogReq struct {
-	log  LogItem
-	next *LogReq
-	mu   sync.Mutex
+	log     LogItem
+	next    *LogReq
+	retChan *chan bool
+	mu      sync.Mutex
 }
 
 type LogItem struct {
@@ -38,9 +39,9 @@ func (lr *LogReq) setNext(n *LogReq) {
 }
 
 // Adds a new log request, r, to the LogQueue
-func (q *LogQueue) addItem(r *LogReq) *LogReq {
+func (q *LogQueue) addItem(r *LogReq) (*LogReq, error) {
 	if r == nil {
-		panic("(logger) Log request cannot be nil.")
+		return nil, LoggerError{Message: "(logger) Log request cannot be nil."}
 	}
 
 	q.mu.Lock()
@@ -54,7 +55,7 @@ func (q *LogQueue) addItem(r *LogReq) *LogReq {
 
 		q.itemCount.Add(1)
 
-		return r
+		return r, nil
 	}
 
 	// Since count is greater than 0, head and tail should not be nil
@@ -70,7 +71,7 @@ func (q *LogQueue) addItem(r *LogReq) *LogReq {
 	q.tail = r
 	q.itemCount.Add(1)
 
-	return r
+	return r, nil
 }
 
 // Removes and returns the oldest log request (head of linked list)

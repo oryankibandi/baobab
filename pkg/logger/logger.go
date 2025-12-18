@@ -45,18 +45,16 @@ const (
 	LevelError slog.Level = 8
 )
 
-const (
-	LOG_FILE = "baobab.log"
-)
-
 var (
 	bLogger        *BaobabLogger
 	once           sync.Once
 	defaultLogMode LogMode = DEBUG
+	logFile        string  = "baobab.log"
+	mu             sync.Mutex
 )
 
 // Creates a write requests and adds it to queue
-func (l *BaobabLogger) Write(pkg string, fn string, level slog.Level, msg string) error {
+func (l *BaobabLogger) Write(pkg string, fn string, level slog.Level, msg string, rChan *chan bool) error {
 	// 1. construct log req
 	lItem := LogItem{
 		pkg:      pkg,
@@ -66,11 +64,26 @@ func (l *BaobabLogger) Write(pkg string, fn string, level slog.Level, msg string
 	}
 
 	lReq := LogReq{
-		log: lItem,
+		log:     lItem,
+		retChan: rChan,
 	}
 
 	// 2. Send log to queue
-	l.queue.addItem(&lReq)
+	_, err := l.queue.addItem(&lReq)
+
+	if err != nil {
+		// create error log
+		errLog := LogReq{
+			log: LogItem{
+				pkg:      "testing",
+				fn:       "addItem()",
+				logLevel: LevelError,
+				msg:      err.Error(),
+			},
+		}
+		l.queue.addItem(&errLog)
+		return err
+	}
 
 	// 3. Start queue if is not running
 	shouldRun := !l.running.Load()
@@ -104,53 +117,77 @@ func (l *BaobabLogger) run() {
 			default:
 				l.logger.Error(fmt.Sprintf("Invalid log level. Received: %v", r.log.logLevel))
 			}
+
+			if r.retChan != nil {
+				*r.retChan <- true
+			}
 			l.mu.Unlock()
 		}
 	}
 }
 
+// Resets logger. Next call to constructor will return a new instance.
+func (l *BaobabLogger) Close() error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	bLogger = nil
+
+	return nil
+}
+
 // Returns a single instance of the logger to all processes
 // and sets mode as log mode and lSize as the max size of log
 // file before rolling
-func NewLogger(mode LogMode, lSize uint64) *BaobabLogger {
+func NewLogger(logFilePath string, mode LogMode, lSize uint64) *BaobabLogger {
 	if lSize == 0 {
 		panic("Invalid log size provided.")
 	}
 
-	once.Do(func() {
-		var level slog.Level
+	mu.Lock()
+	defer mu.Unlock()
 
-		if mode == PRODUCTION {
-			level = LevelInfo
-		} else {
-			level = LevelDebug
-		}
+	// If instance already initialized, return it
+	if bLogger != nil {
+		return bLogger
+	}
 
-		lumberjackLogger := &lumberjack.Logger{
-			Filename:   LOG_FILE,
-			MaxSize:    int(lSize), // MB
-			MaxBackups: 3,
-			MaxAge:     28, // days
-			Compress:   true,
-		}
+	var level slog.Level
 
-		// create a multiwriter to std out and log file
-		wr := io.MultiWriter(os.Stdout, lumberjackLogger)
+	if mode == PRODUCTION {
+		level = LevelInfo
+	} else {
+		level = LevelDebug
+	}
 
-		handler := slog.NewTextHandler(wr, &slog.HandlerOptions{Level: level})
+	if len(logFilePath) > 0 {
+		logFile = logFilePath
+	}
 
-		logger := slog.New(handler)
+	lumberjackLogger := &lumberjack.Logger{
+		Filename:   logFile,
+		MaxSize:    int(lSize), // MB
+		MaxBackups: 3,
+		MaxAge:     28, // days
+		Compress:   true,
+	}
 
-		// set log mode
-		defaultLogMode = mode
+	// create a multiwriter to std out and log file
+	wr := io.MultiWriter(os.Stdout, lumberjackLogger)
 
-		bLogger = &BaobabLogger{
-			queue:      newLogQueue(),
-			logMode:    mode,
-			logger:     logger,
-			maxLogSize: lSize,
-		}
-	})
+	handler := slog.NewTextHandler(wr, &slog.HandlerOptions{Level: level})
+
+	logger := slog.New(handler)
+
+	// set log mode
+	defaultLogMode = mode
+
+	bLogger = &BaobabLogger{
+		queue:      newLogQueue(),
+		logMode:    mode,
+		logger:     logger,
+		maxLogSize: lSize,
+	}
 
 	return bLogger
 }
