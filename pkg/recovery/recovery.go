@@ -30,6 +30,15 @@ type LogHeaderMetadata struct {
 	lsn     []byte
 	pageId  uint32
 	logSize uint32
+
+	// The multiPage field indicates if a header spans multiple pages.
+	// If a log header is written across multiple pages, starts within
+	// a page (within 8K) and it's length spans beyond the page size,
+	// we factor in the WAL page header which occupies the first 8 bytes
+	// of every page. This is useful when walking through the WAL and
+	// reading the log entries so as to factor in wal page header when
+	// setting the offsets.
+	multiPage bool
 }
 
 type Operation struct {
@@ -37,6 +46,10 @@ type Operation struct {
 	key    []byte
 	val    []byte
 	lsn    []byte
+
+	// The multiPage field, similar to LogHeaderMetadata,
+	// indicates if a log entry spans multiple pages.
+	multiPage bool
 }
 
 // Reads the logs in WAL, from the REDO point, compares page LSNs with LSN in WAL
@@ -74,6 +87,8 @@ func (rMngr *RecoveryMngr) Recover() error {
 		panic(fmt.Errorf("Unable to read checkpoint: %v", err))
 	}
 
+	fmt.Println("READ CHECKPOINT DATA --> ", checkPntData)
+
 	if n < wal.CHECKPOINT_SIZE {
 		panic(fmt.Errorf("Only read %d bytes, expected %d bytes for the checkpoint", n, wal.CHECKPOINT_SIZE))
 	}
@@ -95,10 +110,12 @@ func (rMngr *RecoveryMngr) Recover() error {
 // with the associated page's LSN and applying unapplied logs - logs with LSN greater than
 // their respective pages.
 func (rMngr *RecoveryMngr) walkThroughRecovery(startOff uint32, endOff uint32) error {
+	var isMultiPage bool
 	currOff := startOff
 
 	for currOff < endOff {
 		// read header
+		fmt.Println("CURR oFFSET ---> ", currOff)
 		headerMetadata, err := rMngr.readLogHeader(currOff)
 
 		if err != nil {
@@ -117,6 +134,10 @@ func (rMngr *RecoveryMngr) walkThroughRecovery(startOff uint32, endOff uint32) e
 			return err
 		}
 
+		if headerMetadata.multiPage {
+			isMultiPage = true
+		}
+
 		// retrieve page and compare LSN
 		f, err := rMngr.bufferMngr.Get(headerMetadata.pageId)
 
@@ -131,10 +152,20 @@ func (rMngr *RecoveryMngr) walkThroughRecovery(startOff uint32, endOff uint32) e
 				panic(err)
 			}
 
+			if op.multiPage {
+				isMultiPage = true
+			}
+
 			rMngr.reapplyLog(op)
 
 			// increment offset
-			currOff += headerMetadata.logSize
+			if isMultiPage {
+				fmt.Println("Is Multipage Log entry...")
+				currOff += (headerMetadata.logSize + wal.WAL_PAGE_HEADER_SIZE)
+				fmt.Println("Next Offset -> ", currOff)
+			} else {
+				currOff += headerMetadata.logSize
+			}
 		} else {
 			pLsn, err := f.GetLSN()
 
@@ -158,14 +189,24 @@ func (rMngr *RecoveryMngr) walkThroughRecovery(startOff uint32, endOff uint32) e
 					panic(err)
 				}
 
+				if op.multiPage {
+					isMultiPage = true
+				}
+
 				rMngr.reapplyLog(op)
 			}
 
 			// increment offset
-			currOff += headerMetadata.logSize
-
-			// fmt.Println("(walkThroughRecovery) NEXT OFF => ", currOff)
+			if isMultiPage {
+				fmt.Println("Is Multipage Log entry...")
+				currOff += (headerMetadata.logSize + wal.WAL_PAGE_HEADER_SIZE)
+				fmt.Println("Next Offset -> ", currOff)
+			} else {
+				currOff += headerMetadata.logSize
+			}
 		}
+
+		isMultiPage = false
 	}
 
 	return nil
@@ -248,6 +289,8 @@ func (rMngr *RecoveryMngr) readLogHeader(off uint32) (LogHeaderMetadata, error) 
 		panic("invalid header size in file.")
 	}
 
+	fmt.Println("(readLogHeader) Read log header -> ", hdr)
+
 	// fmt.Println("LOG HEADER ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++> ", hdr)
 
 	// check if is a checkpoint entry
@@ -263,9 +306,10 @@ func (rMngr *RecoveryMngr) readLogHeader(off uint32) (LogHeaderMetadata, error) 
 
 	// extract LSN, pageId and size of the log
 	hdrMetadata := LogHeaderMetadata{
-		lsn:     hdr[1:9],
-		logSize: binary.LittleEndian.Uint32(hdr[9:13]),
-		pageId:  binary.LittleEndian.Uint32(hdr[13:17]),
+		lsn:       hdr[1:9],
+		logSize:   binary.LittleEndian.Uint32(hdr[9:13]),
+		pageId:    binary.LittleEndian.Uint32(hdr[13:17]),
+		multiPage: multiPage,
 	}
 
 	// validate data
@@ -301,6 +345,9 @@ func (rMngr *RecoveryMngr) readFullLog(startOff uint32, lSize uint32, lsn []byte
 	} else {
 		bLog = make([]byte, lSize)
 	}
+	fmt.Println("bLog Length --> ", len(bLog))
+	fmt.Println("lSize ----> ", lSize)
+	fmt.Println("Reading from offset ---> ", startOff)
 
 	// read full log
 	n, err := rMngr.fd.ReadAt(bLog, int64(startOff))
@@ -323,9 +370,11 @@ func (rMngr *RecoveryMngr) readFullLog(startOff uint32, lSize uint32, lsn []byte
 	}
 
 	op := Operation{
-		lsn: lsn,
+		lsn:       lsn,
+		multiPage: multiPage,
 	}
 
+	fmt.Println("lSize => ", lSize)
 	opType := bLog[wal.BLOG_HEADER_SIZE]
 	if opType == byte(wal.PUT) {
 		op.opType = wal.PUT
@@ -335,6 +384,7 @@ func (rMngr *RecoveryMngr) readFullLog(startOff uint32, lSize uint32, lsn []byte
 
 	// read key
 	kSize := binary.LittleEndian.Uint32(bLog[wal.BLOG_HEADER_SIZE+1 : wal.BLOG_HEADER_SIZE+5])
+	fmt.Println("kSize -> ", kSize)
 
 	kOff := wal.BLOG_HEADER_SIZE + 5
 	key := bLog[kOff : kOff+int(kSize)]

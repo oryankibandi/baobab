@@ -87,11 +87,11 @@ type Page struct {
 
 type DiskManager struct {
 	// RootNode     *Page
-	RootPage     int32 // Root Page ID
-	PageCount    int32 // 4 bytes No. of pages
-	FlushedPages int32 // No of pages flushed to disk. Default to PageCount on startup
-	MaxPageId    int32 // 4 bytes Max Page ID issued monotinically (starts from 1)
-	Queues       sync.Map
+	RootPage     int32    // Root Page ID
+	PageCount    int32    // 4 bytes No. of pages
+	FlushedPages int32    // No of pages flushed to disk. Default to PageCount on startup
+	MaxPageId    int32    // 4 bytes Max Page ID issued monotinically (starts from 1)
+	Queues       sync.Map // {PageId: *JobQueue}
 	fd           *os.File
 	wg           sync.WaitGroup
 	mu           sync.RWMutex
@@ -99,16 +99,18 @@ type DiskManager struct {
 
 // Disk req for reads and writes
 type IOReq struct {
-	Read      bool         // Is read request
-	PageId    uint32       // ID of page to read
-	ReadPage  *chan *Page  // if read req, new page read
-	Flushed   *chan int32  // Amount of bytes written.
-	lsnChan   *chan []byte // channel to send back log sequence number of page after flushing. This is used by the background writer to create a checkpoint in WAL
-	WritePage *Page        // if write req, page to write
+	Read      bool        // Is read request
+	PageId    uint32      // ID of page to read
+	ReadPage  *chan *Page // if read req, new page read
+	Flushed   chan int32  // Amount of bytes written.
+	lsnChan   chan []byte // channel to send back log sequence number of page after flushing. This is used by the background writer to create a checkpoint in WAL
+	WritePage *Page       // if write req, page to write
 	dManager  *DiskManager
 }
 
 type JobQueue struct {
+	// PageId/Block Id for which this job is for
+	pageId  uint32
 	jobs    []IOReq
 	running bool
 	mu      sync.Mutex
@@ -145,20 +147,11 @@ func (d *DiskManager) startupTraversal(rootPageId int32) {
 
 // Create an in-memory Page from an existing on-disk page. Can be run as a goroutine
 func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
-	// fmt.Println("(loadPage) ROOT NODE ==> ", d.RootNode)
-	// if d.RootNode != nil {
-	// 	fmt.Println("ROOT NODE HEADER==> ", d.RootNode.Header)
-	// }
-
-	//offset, err := LookupTable.GetPageOffset(int(pageId))
-
 	offset := pageId * PAGE_SIZE_BYTES
-	//if err != nil {
-	//	return nil, DiskioError{Message: "Cannot retrieve page offset"}
-	//}
 
 	pageData := make([]byte, PAGE_SIZE_BYTES)
 
+	fmt.Println("(loadPage) Reading at offet -> ", offset)
 	_, err := d.fd.ReadAt(pageData, int64(offset))
 
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -166,7 +159,6 @@ func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
 	}
 
 	fmt.Println("READING FROM OFFSET => ", offset)
-	// fmt.Println("PAGEID DATA -*-*->", pageData)
 	fmt.Println("PAGE DATA LEN -> ", len(pageData))
 
 	// Page Header items
@@ -311,15 +303,15 @@ func (d *DiskManager) FlushMetadata() {
 }
 
 // Creates write request for `page` and adds it to queue
-func (d *DiskManager) WriteReq(page *Page, written *chan int32, lsnChan *chan []byte) error {
+func (d *DiskManager) WriteReq(page *Page, pageId uint32, written chan int32, lsnChan chan []byte) error {
 	if page == nil {
-		*written <- -1
+		written <- -1
 		return DiskioError{Message: "Page is required"}
 	}
 
 	writeReq := IOReq{
 		Read:      false,
-		PageId:    uint32(page.Header.PageId),
+		PageId:    pageId,
 		Flushed:   written,
 		WritePage: page,
 		lsnChan:   lsnChan,
@@ -328,14 +320,14 @@ func (d *DiskManager) WriteReq(page *Page, written *chan int32, lsnChan *chan []
 
 	// Check queue
 	// d.mu.RLock()
-	q, ok := d.Queues.Load(uint32(page.Header.PageId))
+	q, ok := d.Queues.Load(pageId)
 	// d.mu.RUnlock()
 
 	if !ok {
 		// Create queue
-		jQ := newJobQueue()
+		jQ := newJobQueue(pageId)
 		// d.mu.Lock()
-		d.Queues.Store(uint32(page.Header.PageId), jQ)
+		d.Queues.Store(pageId, jQ)
 		// d.mu.Unlock()
 
 		jQ.addJob(writeReq)
@@ -366,9 +358,13 @@ func (d *DiskManager) ForceFlush() {
 
 // Creates a read req for `pageId` and adds it to queue
 func (d *DiskManager) ReadReq(pageId uint32, p *chan *Page) error {
+	fmt.Println("(ReadReq) Reading page -> ", pageId)
 	if p == nil {
+		fmt.Println("(ReadReq) ERROR: CHANNEL IS NIL -> ", p)
 		return DiskioError{Message: "Page output channel is required."}
 	}
+
+	fmt.Println("(diskmanager) Read Req on page -> ", pageId)
 
 	if pageId == 0 {
 		// read metadata page
@@ -385,7 +381,8 @@ func (d *DiskManager) ReadReq(pageId uint32, p *chan *Page) error {
 
 	if !ok {
 		// Create queue
-		jQ := newJobQueue()
+		fmt.Println("(diskmanager.ReadReq()) No queue, creating...")
+		jQ := newJobQueue(pageId)
 		d.Queues.Store(pageId, jQ)
 
 		jQ.addJob(rReq)
@@ -808,7 +805,7 @@ func (p *Page) Sync(lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, r
 
 // Flushes page content to disk(does not call sync())
 // Sends number of bytes written to channel b
-func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
+func (d *DiskManager) flushPage(p *Page, b chan int32, lsnChan chan []byte) {
 	fmt.Println("(flushPage) Flushing page...")
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
@@ -859,8 +856,10 @@ func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 		fmt.Println("CLEARED PAGE ", p.Header.PageId)
 
 		// send to channel
-		*b <- int32(n)
-		*lsnChan <- seqNo
+		b <- int32(n)
+		if lsnChan != nil {
+			lsnChan <- seqNo
+		}
 
 		// d.FlushMetadata()
 
@@ -876,7 +875,9 @@ func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 
 	fmt.Println("WRITING TO OFFSET: ", offs)
 
+	fmt.Println("ACQURING LOCK ON DISK MANAGER -> ")
 	d.mu.RLock()
+	fmt.Println("ACQURED LOCK ON DISK MANAGER -> ")
 	n, err := d.fd.WriteAt(p.pgeData[:], int64(offs))
 	d.mu.RUnlock()
 
@@ -884,18 +885,28 @@ func (d *DiskManager) flushPage(p *Page, b *chan int32, lsnChan *chan []byte) {
 		panic("Could not write page")
 	}
 
+	fmt.Printf("WRITTEN PAGE %d to DISK\n", p.Header.PageId)
+
 	// Unmark as dirty
 	// p.Header.unsetFlag(5)
 	// set stored to disk flag
+	fmt.Println("SETTING FLAG...")
 	p.Header.setFlag(Written)
+	fmt.Println("SET FLAG SUCCESSFULLY...")
 	// send to channel
-	*b <- int32(n)
-	*lsnChan <- seqNo
+	fmt.Println("SENDING BYTES TO CHANNEL....")
+	b <- int32(n)
+	fmt.Println("SENDING SEQNO TO CHANNEL....")
+	fmt.Println("LSNCHAN -> ", lsnChan)
+	if lsnChan != nil {
+		lsnChan <- seqNo
+	}
+	fmt.Println("SUCCESSFULLY SEND DATA TO CHANNELS....")
 
 	return
 }
 
-// Check wheather the page represents an internal node
+// Check whether the page represents an internal node
 func (p *Page) IsInternal() (bool, error) {
 	if p.Header == nil {
 		return false, DiskioError{Message: "No header set for this page"}
@@ -1123,17 +1134,26 @@ func (h *PageHeader) getLSN() []byte {
 }
 
 func (q *JobQueue) run() {
+	fmt.Println("(run) acquiring queue lock() to set running=true...")
 	q.mu.Lock()
+	fmt.Printf("(run) acquired queue lock() to set running=true on page ID  %d...\n", q.pageId)
 	q.running = true
 	q.mu.Unlock()
 
 	var job IOReq
 	for {
+		fmt.Println("(run) acquiring queue lock()...")
 		q.mu.Lock()
+		fmt.Println("(run) acquired queue lock()...")
 		if len(q.jobs) == 0 {
+			fmt.Println("(run) exiting run goroutine...")
 			q.running = false
 			q.mu.Unlock()
+
+			fmt.Println("(run) is running -> ", q.running)
 			return // all jobs done
+		} else if len(q.jobs) < 0 {
+			panic("Invalid state. Length of jobs is negative")
 		}
 
 		job = q.jobs[0]
@@ -1145,31 +1165,73 @@ func (q *JobQueue) run() {
 }
 
 func (q *JobQueue) addJob(job IOReq) {
+	fmt.Println("(addJob) adding job to queue")
+	fmt.Println("(addJob) Acquiring queue lock....")
 	q.mu.Lock()
+	fmt.Println("(addJob) Acquired queue lock....")
 	q.jobs = append(q.jobs, job)
 	shouldStart := !q.running
 	q.mu.Unlock()
+	fmt.Println("(addJob) Should start running? -> ", shouldStart)
+
+	// FIX: Remove debug code below
+	q.mu.Lock()
+	fmt.Println("(addJob) Queue running -> ", q.running)
+	q.mu.Unlock()
 
 	if shouldStart {
+		fmt.Println("Queue not running, starting job...")
 		go q.run()
 	}
 }
 
 // executes queue job
 func (r *IOReq) execute() {
+	fmt.Println("(execute) diskmanager.execute()...")
 	if r.Read {
 		// Read from disk, create Page and return that in channel
+		fmt.Println("(execute) executing read request...")
 		p, err := r.dManager.loadPage(int32(r.PageId))
 
 		if err != nil {
 			panic(err.Error())
 		}
+		fmt.Println("(execute) sending back read page...")
 
 		*(r.ReadPage) <- p
 	} else {
 		// Write page to disk
+		fmt.Printf("(execute) executing write request -> %d...\n", r.PageId)
 		r.dManager.flushPage(r.WritePage, r.Flushed, r.lsnChan)
+		fmt.Printf("(execute) executed write request -> %d...\n", r.PageId)
 	}
+	fmt.Println("(execute) diskmanager.execute() DONE.")
+}
+
+// Generates new page header for test purpose only
+func newTestPageHeader(pgeId int32, rightPtr int32) *PageHeader {
+	h := PageHeader{
+		Flags:       byte(32), // 0010000
+		PageId:      pgeId,
+		Items:       0,
+		FreeSpace:   PAGE_SIZE_BYTES - HEADER_SIZE_BYTES,
+		UpperOffset: PAGE_SIZE_BYTES - LOWER_PADDING_BYTES,
+		LowerOffset: HEADER_SIZE_BYTES,
+		RightChild:  rightPtr,
+	}
+
+	return &h
+}
+
+// Generates new page for test use only
+func NewTestPage(pageId int32) *Page {
+	h := newTestPageHeader(pageId, 0)
+	p := Page{
+		Header:  h,
+		pgeData: [PAGE_SIZE_BYTES]byte{},
+	}
+
+	return &p
 }
 
 func NewDiskManager() *DiskManager {
@@ -1258,8 +1320,9 @@ func NewDiskManager() *DiskManager {
 	return diskManager
 }
 
-func newJobQueue() *JobQueue {
+func newJobQueue(pageId uint32) *JobQueue {
 	return &JobQueue{
+		pageId:  pageId,
 		jobs:    make([]IOReq, 0),
 		running: false,
 	}

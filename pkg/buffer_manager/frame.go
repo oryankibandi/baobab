@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	diskmanager "github.com/oryankibandi/baobab/pkg/disk_io"
 )
@@ -13,16 +14,16 @@ import (
 // to retrieve it from disk. It also buffers changes to page before
 // they are persisted to disk by the background writer
 type Frame struct {
-	pins       uint32
+	pins       atomic.Uint32
 	prev       *Frame
 	next       *Frame
 	Key        uint32 // Key is the page ID
 	CacheType  LruType
 	page       *diskmanager.Page
 	isDirty    bool
-	isDeleted  bool   // If the frame and associated page is marked for  deletion
-	IsInternal bool   // true if is an internal node
-	lsn        []byte // LSN of last operation. Added when marking as dirty
+	isDeleted  atomic.Bool // If the frame and associated page is marked for  deletion
+	IsInternal bool        // true if is an internal node
+	lsn        []byte      // LSN of last operation. Added when marking as dirty
 	mu         sync.RWMutex
 }
 
@@ -37,9 +38,10 @@ type PgeMin struct {
 	LeftSibling  int32
 }
 
-// Pins frame
+// Pins frame. Frame lock should be acquired before calling this method.
+// Updates pointers of adjascent frames as well as the provided frame
 func (f *Frame) pinFrame() error {
-	if f.pins < 0 {
+	if f.pins.Load() < 0 {
 		panic("(PinFrame) Pin count is less than zero.")
 	}
 
@@ -48,27 +50,43 @@ func (f *Frame) pinFrame() error {
 	//	defer f.mu.Unlock()
 	log.Println("(PinFrame) Obtained Frame Lock...")
 	log.Println("CURR FRAME => ", f)
-	if f.pins == 0 {
+	if f.pins.Load() == 0 {
 		// first time pin, remove from LRU
 		if f.prev != nil {
 			f.prev.mu.Lock()
 			log.Println("(pinFrame) Obtained lock for prev frame...")
+			// FIX: Remove debug block below
+			if f.prev == f.next {
+				panic(fmt.Errorf("(pinFrame) invalid pointers. f.prev == f.next\nf.prev.prev -> %v \n f.prev -> %v\nf -> %v\nf.next -> %v\nf.next.next -> %v", f.prev.prev, f.prev, f, f.next, f.next.next))
+			}
+
 			f.prev.next = f.next
 			f.prev.mu.Unlock()
 		}
 
-		if f.next != nil && f.next != f {
+		// FIX:: Remove f.next != f condition after bug fix
+		if f.next != nil && f.next == f {
+			panic("(pinFrame) FRAME POINTING TO ITSELF AS NEXT Ptr")
+		}
+
+		if f.next != nil {
 			log.Println("(pinFrame) Geting lock for next frame...->", f.next)
 			f.next.mu.Lock()
 			log.Println("(pinFrame) Obtained lock for next frame...")
+			// FIX:Remove block cde below
+			if f.next == f.prev {
+				panic(fmt.Errorf("(pinFrame) invalid pointers. f.next == f.prev\n f.next -> %v\nf.prev -> %v\nf -> %v", f.next, f.prev, f))
+			}
+
 			f.next.prev = f.prev
 			f.next.mu.Unlock()
 		}
 	}
 
-	f.pins += 1
+	f.pins.Add(1)
 	f.next = nil
 	f.prev = nil
+	fmt.Println("(pinframe) frame after pin -> ", f)
 	log.Println("(pinFrame) DONE.")
 
 	return nil
@@ -92,24 +110,39 @@ func (f *Frame) GetPage() *diskmanager.Page {
 	return p
 }
 
-// Unpins a frame and if no other pins exists,
-// returns if it should be added back to LRU
+// Decrements pin count and if no other pins exists,
+// returns true if it should be added back to LRU
 func (f *Frame) UnpinFrame() (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if f.pins <= 0 {
-		// already unpinned
-		return false, nil
+	//	pinCount := f.pins.Load()
+	//	if pinCount <= 0 {
+	//		// already unpinned
+	//		return false, nil
+	//	}
+	//
+	//	f.pins.Store(pinCount - 1)
+	//
+	//	pinCount = f.pins.Load()
+	//
+	//	if pinCount <= 0 {
+	//		return true, nil
+	//	}
+	//
+	//	return false, nil
+
+	for {
+		c := f.pins.Load()
+
+		if c <= 0 {
+			return false, nil
+		}
+
+		if f.pins.CompareAndSwap(c, c-1) {
+			return true, nil
+		}
 	}
-
-	f.pins -= 1
-
-	if f.pins <= 0 {
-		return true, nil
-	}
-
-	return false, nil
 }
 
 func (f *Frame) GetCacheType() LruType {
@@ -162,6 +195,7 @@ func (f *Frame) markDirty() {
 
 // Mark the frame as clean. This means all updates have been flushed.
 func (f *Frame) markClean() {
+	fmt.Println("(markClean) Marking frame as clean...")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -170,26 +204,19 @@ func (f *Frame) markClean() {
 
 // Check if a frame's page is marked for deletion.
 func (f *Frame) PageIsDead() (bool, error) {
-	log.Println("(PageIsDead) Acquiring frame lock...")
-	f.mu.RLock()
-	log.Println("(PageIsDead) Acquired frame lock...")
-	defer f.mu.RUnlock()
 	if f.page == nil {
 		return false, BufferManagerError{Message: "No page associated with frame."}
 	}
 
 	// d := f.page.IsDeleted()
-	d := f.isDeleted
+	d := f.isDeleted.Load()
 
 	return d, nil
 }
 
 // marks a frame and associated page as dead(to be deleted)
 func (f *Frame) MarkAsDead() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.isDeleted = true
+	f.isDeleted.Store(true)
 
 	err := f.page.MarkAsDead()
 
@@ -319,4 +346,13 @@ func (f *Frame) setPtrs(prev *Frame, next *Frame) {
 
 	f.prev = prev
 	f.next = next
+}
+
+func (f *Frame) GetPinCount() uint32 {
+	if f == nil {
+		panic("(GetPinCount) No frame provided")
+	}
+	p := f.pins.Load()
+
+	return p
 }

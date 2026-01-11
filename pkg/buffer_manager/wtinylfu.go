@@ -22,26 +22,29 @@ func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
 
 	cType := f.GetCacheType()
 
-	if cType == Probation {
+	switch cType {
+	case Probation:
 		// promote to protected.
 		err := w.promoteToProtected(f)
 
 		if err != nil {
 			panic(err)
 		}
-	} else if cType == Protected {
+	case Protected:
 		w.protectedCache.SetMostRecent(f)
-	} else {
+	default:
 		w.windowCache.SetMostRecent(f)
 	}
 
 	k := f.GetKey()
 
-	err := w.tinyFilter.IncrementItem(toBytes(k))
+	go func(key []byte) {
+		err := w.tinyFilter.IncrementItem(key)
 
-	if err != nil {
-		panic(err)
-	}
+		if err != nil {
+			panic(err)
+		}
+	}(toBytes(k))
 
 	return false, nil
 }
@@ -107,6 +110,10 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 		return WTinyLFUError{Message: "(promoteToProtected) Only frames in probation LRU can be promoted to protected LRU."}
 	}
 
+	// remove from probationCache and reset pointers
+	w.probationCache.Delete(f)
+	f.setPtrs(nil, nil)
+
 	if w.protectedCache.IsFull() {
 		// remove LRU item from protected
 		protVictim := w.protectedCache.Pop()
@@ -129,11 +136,16 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 
 // Evicts an item from the window cache. This is called when the w-cache is full.
 func (w *WTinyLfu) evictWindow() ([]uint32, error) {
+	fmt.Println("w.evictWindow()")
+	fmt.Println("EVICTING WINDOW CACHE...")
 	if !w.windowCache.IsFull() {
+		log.Printf("(evictWindow) Window Cache Is Not Full: COUNT -> %d\t CAPACITY -> %d\n", w.windowCache.GetCount(), w.windowCache.GetCapacity())
 		return nil, WTinyLFUError{Message: "Window cache is not full"}
 	}
 
+	fmt.Println("Pop() tail  item in window cache....")
 	windVictim := w.windowCache.Pop()
+	fmt.Println("(evictWindow) WindowVictim -> ", windVictim)
 
 	if windVictim == nil {
 		// all items pinned, borrow frame
@@ -145,6 +157,7 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 
 		return nil, nil
 	}
+	fmt.Println("(w.evictWindow()) windVictim not nil, evicting...")
 
 	// If main cache not full, send window victim to main cache
 	if !w.probationCache.IsFull() {
@@ -262,6 +275,7 @@ func (w *WTinyLfu) AddItem(f *Frame) ([]uint32, error) {
 	var evictKeys []uint32
 	var err error
 	if w.windowCache.IsFull() {
+		fmt.Println("(cache.AddItem()) WindowCache Is Full, evicting...")
 		// evict window cache first
 		evictKeys, err = w.evictWindow()
 
@@ -280,40 +294,43 @@ func (w *WTinyLfu) deleteFromLru(f *Frame) error {
 
 	switch cType {
 	case Protected:
-		log.Println("(Protected) Evicting... ")
+		fmt.Println("(Protected) Evicting... ")
 		w.protectedCache.Delete(f)
 	case Probation:
-		log.Println("(Probation) Evicting: ")
+		fmt.Println("(Probation) Evicting: ")
 		w.probationCache.Delete(f)
 	default:
-		log.Println("(Window) Evicting: ")
+		fmt.Println("(Window) Evicting: ")
 		w.windowCache.Delete(f)
 	}
 
 	return nil
 }
 
-// Readds item to LRU. Called during unpinning.
-// if the lru list the frame is a part of has borrowed frames
-// decrement borrowed frames
-// return del=true.
-func (w *WTinyLfu) reAddToLru(f *Frame) (del bool, err error) {
+// Readds frame `f` to LRU. Called during unpinning.
+// If the lru list the frame is a part of has borrowed frames,
+// decrement borrowed frames return del=true.
+// `flushed` indicates whether the frame has already been flushed, in
+// which case there is no need to return borrowed frames and evict the
+// window segment. This is true when the requests comes from the background
+// writer.
+func (w *WTinyLfu) reAddToLru(f *Frame, flushed bool) (del bool, deletedKeys []uint32, err error) {
 	cType := f.GetCacheType()
 
 	switch cType {
 	case Probation:
-		fmt.Println("ADDING TO PROBATION.....")
+		fmt.Println("READDING TO PROBATION.....")
 		// err = c.probationCache.ReAddFrame(f)
 		w.probationCache.ReAddFrame(f)
 	case Protected:
-		fmt.Println("ADDING TO PROTETED.....")
+		fmt.Println("READDING TO PROTECTED -> ", f)
 		// err = c.protectedCache.ReAddFrame(f)
 		w.protectedCache.ReAddFrame(f)
-		fmt.Println("ADDED TO PROTECTED.....")
+		fmt.Println("READDED TO PROTECTED.....")
 	default:
-		fmt.Println("ADDING TO WINDOW.....")
+		fmt.Println("READDING TO WINDOW.....")
 		// Check if has borrowed frames
-		if w.windowCache.hasBorrowedFrames() {
+		if w.windowCache.hasBorrowedFrames() && !flushed {
 			fmt.Println("HAS BORROWED FRAMES")
 			// do not readd
 			err := w.windowCache.returnBorrowedFrame()
@@ -322,13 +339,26 @@ func (w *WTinyLfu) reAddToLru(f *Frame) (del bool, err error) {
 				panic(err)
 			}
 
-			return true, nil
+			// ReAdd item to head of lru
+			w.windowCache.ReAddFrame(f)
+			// 1f full, evict an item
+			if w.windowCache.IsFull() {
+				delKeys, err := w.evictWindow()
+
+				if err != nil {
+					return false, nil, err
+				}
+
+				return true, delKeys, nil
+			}
+
+			return false, nil, nil
 		}
 
 		w.windowCache.ReAddFrame(f)
 	}
 
-	return false, nil
+	return false, nil, nil
 }
 
 // List metadata i.e no. of items in all segments
@@ -341,11 +371,13 @@ func (w *WTinyLfu) Stat() {
 	probCap := w.probationCache.GetCapacity()
 	protCap := w.protectedCache.GetCapacity()
 
-	log.Println("------------------------------------------------------------------")
-	log.Printf("WINDOW COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", winCount, w.windowCache.IsFull(), winCap, (float64(winCount)/float64(winCap))*100)
-	log.Printf("PROBATION COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", probCount, w.probationCache.IsFull(), probCap, (float64(probCount)/float64(probCap))*100)
-	log.Printf("PROTECTED COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", protCount, w.protectedCache.IsFull(), protCap, (float64(protCount)/float64(protCap))*100)
-	log.Println("------------------------------------------------------------------")
+	msg := "------------------------------------------------------------------\n"
+	msg += fmt.Sprintf("WINDOW COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", winCount, w.windowCache.IsFull(), winCap, (float64(winCount)/float64(winCap))*100)
+	msg += fmt.Sprintf("PROBATION COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", probCount, w.probationCache.IsFull(), probCap, (float64(probCount)/float64(probCap))*100)
+	msg += fmt.Sprintf("PROTECTED COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", protCount, w.protectedCache.IsFull(), protCap, (float64(protCount)/float64(protCap))*100)
+	msg += fmt.Sprintf("------------------------------------------------------------------\n")
+
+	fmt.Println(msg)
 }
 
 func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {

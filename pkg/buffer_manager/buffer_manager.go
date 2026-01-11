@@ -37,7 +37,14 @@ type Cache struct {
 
 // Adds a page to cache, setting k as key. k is the unique page ID.
 func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
+	fmt.Println("cache.Put")
 	c.rmu.Lock()
+
+	// FIX: Remove debug code below
+	fmt.Println("(cache.put()) PUT NEW PAGE ============================================================================================> ", k)
+
+	fmt.Println("")
+
 	// formattedKey := toKey(k)
 	// internal page
 	isInternal, err := p.IsInternal()
@@ -63,9 +70,6 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 			panic(err)
 		}
 	}
-
-	// log.Println("NEW FRAME PREV ====================> ", item.Prev)
-	// log.Println("NEW FRAME NEXT ====================>", item.Next)
 
 	lsn := p.GetLSN()
 	// set lsn
@@ -97,7 +101,7 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 		val.UpdatePage(p)
 
 		// increment count
-		go c.wTinyLfu.Increment(&item)
+		c.wTinyLfu.Increment(&item)
 	}
 
 	// if err != nil {
@@ -107,7 +111,8 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 	// If there are items that have been evicted, delete them from map
 	if delKeys != nil && len(delKeys) > 0 {
 		for _, k := range delKeys {
-			delete(c.CacheMap, k)
+			// delete(c.CacheMap, k)
+			c.Delete(k, true)
 		}
 
 		delKeys = nil
@@ -119,152 +124,6 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 	return &item, nil
 }
 
-// Add new item to window cache
-//
-//	func (c *Cache) addToWindowCache(key uint32, item *Frame) *Frame {
-//		c.rmu.Lock()
-//		defer c.rmu.Unlock()
-//		// update LRU type
-//		item.UpdateCacheType(lru.Window)
-//		if !c.windowCache.IsFull() {
-//			// Cache not full, add
-//			node := c.windowCache.Add(item)
-//			c.frameCount++
-//
-//			if c.freeFrames > 0 {
-//				c.freeFrames--
-//			}
-//
-//			return node
-//		} else {
-//			// cache is full, need to evict
-//			windowVictim := c.windowCache.Pop()
-//
-//			if windowVictim == nil {
-//				msg := fmt.Sprintf("NO ITEM IN WINDOW CACHE.Frame Count => %d", int(c.frameCount))
-//				fmt.Println()
-//				panic(msg)
-//			}
-//
-//			// if probation not full, add victim to probation, otherwise evict
-//			if !c.probationCache.IsFull() {
-//				// Add window victim to main cache
-//				// windowVictim.CacheType = lru.Probation
-//				windowVictim.UpdateCacheType(lru.Probation)
-//				c.probationCache.Add(windowVictim)
-//
-//				// Add new item to window cache
-//				n := c.windowCache.Add(item)
-//
-//				return n
-//			} else {
-//				// evict from probation
-//				mainCacheVictim := c.probationCache.Pop()
-//
-//				// compare the two, and evict one with lower count
-//				windCount, err := c.tinyFilter.CheckItemCount(toBytes(key))
-//
-//				if err != nil {
-//					panic(err.Error())
-//				}
-//
-//				mainCacheCount, err := c.tinyFilter.CheckItemCount(toBytes(mainCacheVictim.Key))
-//
-//				if err != nil {
-//					panic(err.Error())
-//				}
-//
-//				if windCount > mainCacheCount {
-//					// admit window victim to main cache and evict & delete main cache victim
-//					// windowVictim.CacheType = lru.Probation
-//					windowVictim.UpdateCacheType(lru.Probation)
-//					c.probationCache.Add(windowVictim)
-//
-//					log.Println("(Probation) Evicting: ", string(mainCacheVictim.Key))
-//
-//					// flush page first before eviction
-//					mainCacheVictim.PrepareForEviction()
-//
-//					delete(c.CacheMap, mainCacheVictim.Key)
-//					// c.CacheMap.Delete(mainCacheVictim.Item.Key)
-//				} else {
-//					// evict window victim and add new item
-//					c.probationCache.Add(mainCacheVictim)
-//
-//					log.Println("(Window) Evicting: ", string(windowVictim.Key))
-//					windowVictim.PrepareForEviction()
-//					delete(c.CacheMap, windowVictim.Key)
-//					// c.CacheMap.Delete(windowVictim.Item.Key)
-//				}
-//
-//				n := c.windowCache.Add(item)
-//
-//				return n
-//			}
-//		}
-//	}
-//
-// promote item from probation
-//
-//	func (c *Cache) promoteItemFromProbation(candidate *Frame) *Frame {
-//		// c.rmu.Lock()
-//		// defer c.rmu.Unlock()
-//		log.Println("Promoting to protected: ", string(candidate.Key))
-//		// 1. Check if protected is full, if not full add to protected
-//		if !c.protectedCache.IsFull() {
-//			log.Println("Protected cache is not full...")
-//			candidate.UpdateCacheType(lru.Protected)
-//			log.Println("Updated cache type...")
-//			// candidate.CacheType = lru.Protected
-//			log.Println("Adding to protected cache...")
-//			n := c.protectedCache.Add(candidate)
-//
-//			log.Println("(Probation) Evicting: ", string(candidate.Key))
-//			c.probationCache.Delete(candidate)
-//
-//			return n
-//		}
-//		log.Println("Protected is full, evicting...")
-//		// 2. If protected is full, compare LRU from protected with candidate
-//		// protectedVictim := c.protectedCache.Tail // TODO: Ensure this is accessed in a concurrency safe manner
-//		protectedTailKey := c.protectedCache.GetTailKey()
-//		candidateKey := candidate.GetKey()
-//
-//		candidateCount, err := c.tinyFilter.CheckItemCount(toBytes(candidateKey))
-//
-//		if err != nil {
-//			panic(err.Error())
-//		}
-//
-//		protectedCount, err := c.tinyFilter.CheckItemCount(toBytes(protectedTailKey))
-//
-//		if err != nil {
-//			panic(err.Error())
-//		}
-//
-//		if candidateCount > protectedCount {
-//			// Demote protected cache victim to probation and add candidate to protected
-//			p := c.protectedCache.Pop()
-//
-//			log.Println("(Probation) Evicting: ", string(candidateKey))
-//			pr := c.probationCache.Delete(candidate)
-//
-//			n := c.protectedCache.Add(pr)
-//			c.probationCache.Add(p)
-//
-//			// update metadata
-//			// pr.CacheType = lru.Protected
-//			pr.UpdateCacheType(lru.Protected)
-//			// p.CacheType = lru.Probation
-//			p.UpdateCacheType(lru.Probation)
-//
-//			return n
-//		} else {
-//			// Just update recency of the node in the DLL
-//			c.probationCache.SetMostRecent(candidate)
-//			return candidate
-//		}
-//	}
 func (c *Cache) RemoveItemFromLru(f *Frame) error {
 	err := c.wTinyLfu.handlePinFrame(f)
 
@@ -285,12 +144,14 @@ func (c *Cache) Get(pageId uint32) (*Frame, error) {
 
 	if ok {
 		// increment count & pin frame
+		fmt.Println("Item found, doing a GetIncrement()")
 		c.wTinyLfu.GetIncrement(val)
 		c.rmu.RUnlock()
 
 		return val, nil
 	} else {
 		// Retrieve item from disk
+		fmt.Println("Item not found, reading from disk")
 		ch := make(chan *diskmanager.Page)
 		err := c.diskManager.ReadReq(uint32(pageId), &ch)
 
@@ -298,7 +159,9 @@ func (c *Cache) Get(pageId uint32) (*Frame, error) {
 			return nil, err
 		}
 
+		fmt.Println("(bufferManager.Get()) Waiting for read req to complete..")
 		pge := <-ch
+		fmt.Println("(bufferManager.Get() Read request done.")
 
 		if pge == nil {
 			return nil, BufferManagerError{Message: "Page not found"}
@@ -335,17 +198,32 @@ func (c *Cache) ReleaseFrame(f *Frame, flushed bool) error {
 	}
 
 	if addToLru {
-		del, err := c.wTinyLfu.reAddToLru(f)
+		del, delKeys, err := c.wTinyLfu.reAddToLru(f, flushed)
 
 		if err != nil {
 			return err
 		}
 
-		if del && flushed {
-			// borrowed frame has been reclaimed and flushed. Delete
-			c.rmu.Lock()
-			delete(c.CacheMap, f.GetKey())
-			c.rmu.Unlock()
+		// FIX: Handle when frame is borrowed during traversal - not b  bgwriter. ONlt the bgwriter sets flushed=true
+		// if del && flushed {
+		// 	// borrowed frame has been reclaimed and flushed. Delete
+		// 	fmt.Println("(ReleaseFrame) Borrowed frame has been freed and flushed...")
+		// 	c.rmu.Lock()
+		// 	delete(c.CacheMap, f.GetKey())
+		// 	c.rmu.Unlock()
+		// }
+
+		if del && delKeys != nil && len(delKeys) > 0 {
+			// flush and delete keys
+			for _, k := range delKeys {
+				c.rmu.Lock()
+				err := c.Delete(k, true)
+				c.rmu.Unlock()
+
+				if err != nil {
+					panic(err)
+				}
+			}
 		}
 	}
 
@@ -435,8 +313,10 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 		return err
 	}
 
+	// TODO: Check if frame is dirty
 	if flush {
 		err = c.prepareForEviction(val)
+		fmt.Println("(Delete) prepared for eviction...")
 
 		if err != nil {
 			panic(err)
@@ -451,6 +331,7 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 		c.frameCount++
 	}
 
+	fmt.Println("c.Delete() DONE>..")
 	return nil
 }
 
@@ -461,6 +342,7 @@ func (c *Cache) GetRootPageId() uint32 {
 // marks a frame as dirty and adds it to dirty list LRU
 func (c *Cache) MarkFrameDirty(f *Frame) error {
 	f.markDirty()
+	fmt.Println("(MarkDirtyFrame) Adding frame to dirty list")
 	c.diryList.addDirtyFrame(f)
 
 	return nil
@@ -493,7 +375,7 @@ func (c *Cache) CreateNewEntry(lsn []byte, keys [][]byte, values *([][]byte), ch
 	// Add to buffer
 	log.Println("Adding new page to cache...")
 	f, err := c.put(uint32(pge.Header.PageId), pge, true)
-	log.Println("Added new page to cache...")
+	log.Printf("Added new page to cache. Page ID: %d\nframe -> %v", pge.Header.PageId, f)
 
 	// Set LSN
 	err = f.UpdatePageLSN(lsn)
@@ -513,11 +395,22 @@ func (c *Cache) flushWritten() {
 // Prepares page for eviction by flushing page to disk
 func (c *Cache) prepareForEviction(f *Frame) error {
 	log.Println("lru.PrepareForEviction()")
+	if f == nil {
+		return BufferManagerError{"Provided frame is nil."}
+	}
+
 	f.mu.Lock()
-	f.mu.Unlock()
+	defer f.mu.Unlock()
+	if !f.isDirty {
+		// frame not dirty, skip flushing to disk
+		fmt.Println("(prepareForEviction) frame not dirty, skipping flushing")
+
+		return nil
+	}
+
 	ch := make(chan int32)
-	lsnChan := make(chan []byte)
-	err := c.diskManager.WriteReq(f.page, &ch, &lsnChan)
+	// lsnChan := make(chan []byte)
+	err := c.diskManager.WriteReq(f.page, f.Key, ch, nil)
 
 	if err != nil {
 		panic(err.Error())
@@ -526,6 +419,9 @@ func (c *Cache) prepareForEviction(f *Frame) error {
 	n := <-ch
 
 	log.Printf("(PrepareForEviction) Flushed %d page\n", n)
+
+	// l := <-lsnChan
+	// fmt.Println("Received LSN -> ", l)
 
 	return nil
 }
@@ -571,9 +467,9 @@ func (c *Cache) SyncFrame(f *Frame, lsn []byte, keys [][]byte, vals [][]byte, pa
 
 	// mark frame as dirty
 	// f.MarkDirty()
-	fmt.Println("MARKING FRAMS AS DIRTY...")
+	fmt.Println("(SyncFrame) MARKING FRAMS AS DIRTY...")
 	err = c.MarkFrameDirty(f)
-	fmt.Println("MARKED FRAME AS DIRTY...")
+	fmt.Println("(SyncFrame) MARKED FRAME AS DIRTY...")
 
 	if err != nil {
 		return err

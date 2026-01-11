@@ -410,13 +410,13 @@ func main() {
 	// slog.Info("Hello world")
 
 	// initialize logger
-	l := logger.NewLogger("", logger.DEBUG, 1)
+	l := logger.NewLogger("", logger.PRODUCTION, 1)
 
 	if l == nil {
 		panic("Unable to initialize logger")
 	}
 
-	wal := wal.NewWal()
+	wal := wal.NewWal(l)
 
 	if wal == nil {
 		panic(fmt.Errorf("Could not initialize WAL"))
@@ -429,7 +429,7 @@ func main() {
 	}
 
 	l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("NEW WAL: %v", wal), nil)
-	btree, err := bp_tree.Initialize[int32](wal, cache)
+	btree, err := bp_tree.NewIndex(wal, cache, l)
 
 	if err != nil {
 		panic(err.Error())

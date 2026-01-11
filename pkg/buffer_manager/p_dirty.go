@@ -1,6 +1,7 @@
 package buffermanager
 
 import (
+	"fmt"
 	"log"
 	"sync"
 )
@@ -102,6 +103,9 @@ func (dl *dirtyPageLRU) moveToHead(pD *pDirty) error {
 
 	if dl.head == pD {
 		// already head of list
+		if pD.prev != nil {
+			panic(fmt.Errorf("(moveToHead) head has a prev pointer. pD.prev -> %v", pD.prev))
+		}
 		log.Println("(moveToHead) ALready head  of lru...")
 		return nil
 	}
@@ -212,8 +216,9 @@ func (dp *dPages) addDirtyFrame(f *Frame) {
 	log.Println("Adding frame to dirty list....")
 	dp.mu.RLock()
 	// check hash map
-	log.Println("Checking if frame is in dirty map...")
-	pD, ok := dp.dPageMap[f.Key]
+	fKey := f.GetKey()
+	log.Printf("Checking if frame (KEY: %d) is in dirty map...\n", fKey)
+	pD, ok := dp.dPageMap[fKey]
 	dp.mu.RUnlock()
 
 	if ok {
@@ -221,7 +226,7 @@ func (dp *dPages) addDirtyFrame(f *Frame) {
 		// move to head of LRU list
 		log.Println("Frame is in dirty map...")
 		err := dp.dPageLru.moveToHead(pD)
-		log.Println("FRAME MOVED TO HEAD...")
+		log.Printf("FRAME (KEY: %d) MOVED TO HEAD...\n", fKey)
 
 		if err != nil {
 			log.Panic(err)
@@ -234,7 +239,7 @@ func (dp *dPages) addDirtyFrame(f *Frame) {
 		}
 
 		dp.mu.Lock()
-		dp.dPageMap[f.Key] = &p
+		dp.dPageMap[f.GetKey()] = &p
 		dp.mu.Unlock()
 
 		// Add to LRU

@@ -2,14 +2,17 @@ package wal
 
 import (
 	"sync"
+
+	"github.com/oryankibandi/baobab/pkg/logger"
 )
 
 // WAL BUffer is the in memory storage of WAL B-LOGS. It is in the
 // form of a linked list
 type WALBuffer struct {
-	head *node // head of the buffer
-	tail *node // tail of the buffer
-	mu   sync.Mutex
+	head   *node // head of the buffer
+	tail   *node // tail of the buffer
+	mu     sync.Mutex
+	logger *logger.BaobabLogger
 }
 
 type node struct {
@@ -73,8 +76,10 @@ func (walBuf *WALBuffer) flushWal() ([]byte, error) {
 	return data, nil
 }
 
-func NewWalBuff() *WALBuffer {
-	wBuff := WALBuffer{}
+func NewWalBuff(l *logger.BaobabLogger) *WALBuffer {
+	wBuff := WALBuffer{
+		logger: l,
+	}
 
 	return &wBuff
 }

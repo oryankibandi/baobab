@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"sync"
+
+	"github.com/oryankibandi/baobab/pkg/logger"
 )
 
 type WriteReq struct {
@@ -20,6 +22,7 @@ type WalWriter struct {
 	maxPage   uint32 // Latest page in WAL file
 	maxOffset uint32 // Largest offset in WAL segment
 	mu        sync.Mutex
+	logger    *logger.BaobabLogger
 }
 
 type WriteQueue struct {
@@ -64,11 +67,18 @@ func (wr *WalWriter) initializeWriter() error {
 		}
 
 		data := cp.toBytes()
-		data = append(make([]byte, WAL_PAGE_HEADER_SIZE), data...)
+		// data = append(make([]byte, WAL_PAGE_HEADER_SIZE), data...)
 		_, err := wr.fd.Write(data)
 
 		if err != nil {
 			panic(fmt.Errorf("(walwriter) Unable to write first checkpoint: %v", err))
+		}
+
+		// sync
+		err = wr.fd.Sync()
+
+		if err != nil {
+			panic(fmt.Errorf("(walwriter) Unable to sync first checkpoint: %v", err))
 		}
 
 		// update maxOffset
@@ -159,10 +169,10 @@ func (wr *WalWriter) saveCheckpoint(lsn []byte) error {
 
 	// write lsn to file. Overwrite existing data.
 	err := wr.confFD.Truncate(0)
-
 	if err != nil {
 		panic(fmt.Errorf("Unable to truncate config file: %v", err))
 	}
+
 	_, err = wr.confFD.Seek(0, 0)
 	if err != nil {
 		panic(fmt.Errorf("Unable to Seek config file: %v", err))
@@ -171,6 +181,11 @@ func (wr *WalWriter) saveCheckpoint(lsn []byte) error {
 	n, err := wr.confFD.Write(lsn)
 	if err != nil {
 		panic(fmt.Errorf("Unable to write to config file: %v", err))
+	}
+
+	err = wr.confFD.Sync()
+	if err != nil {
+		panic(fmt.Errorf("Unable to sync to config file: %v", err))
 	}
 
 	log.Printf("(saveCheckpoint) Written %d bytes\n", n)
@@ -234,7 +249,15 @@ func (wr *WriteReq) writeWal(fd *os.File) bool {
 }
 
 // Create new WAL Writer
-func NewWalWriter(path string) *WalWriter {
+func NewWalWriter(path string, l *logger.BaobabLogger) *WalWriter {
+	if l == nil {
+		panic("Invalid logger instance.")
+	}
+
+	if len(path) <= 0 {
+		panic(fmt.Sprintf("Invalid path provided: %s", path))
+	}
+
 	// Read & calculate max page and offset
 	maxPage, maxOff := loadMaxLSN(path)
 
@@ -259,6 +282,7 @@ func NewWalWriter(path string) *WalWriter {
 		queue:     &jobQueue,
 		maxPage:   maxPage,
 		maxOffset: maxOff,
+		logger:    l,
 	}
 
 	// initalize
