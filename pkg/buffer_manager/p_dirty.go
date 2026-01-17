@@ -275,6 +275,23 @@ func (dp *dPages) popDirtyPage() *pDirty {
 	return p
 }
 
+func (dp *dPages) removePage(id uint32) {
+	dp.mu.Lock()
+	defer dp.mu.Unlock()
+
+	p, ok := dp.dPageMap[id]
+
+	if ok {
+		delete(dp.dPageMap, id)
+
+		err := dp.dPageLru.removeFromLru(p)
+
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
 func NewDirtyPageList() *dPages {
 	dP := dPages{
 		dPageLru: &dirtyPageLRU{},

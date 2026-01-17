@@ -41,10 +41,6 @@ type PgeMin struct {
 // Pins frame. Frame lock should be acquired before calling this method.
 // Updates pointers of adjascent frames as well as the provided frame
 func (f *Frame) pinFrame() error {
-	if f.pins.Load() < 0 {
-		panic("(PinFrame) Pin count is less than zero.")
-	}
-
 	log.Println("(PinFrame) Obtaining Frame Lock...")
 	//	f.mu.Lock()
 	//	defer f.mu.Unlock()
@@ -113,9 +109,6 @@ func (f *Frame) GetPage() *diskmanager.Page {
 // Decrements pin count and if no other pins exists,
 // returns true if it should be added back to LRU
 func (f *Frame) UnpinFrame() (bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	//	pinCount := f.pins.Load()
 	//	if pinCount <= 0 {
 	//		// already unpinned
@@ -132,15 +125,18 @@ func (f *Frame) UnpinFrame() (bool, error) {
 	//
 	//	return false, nil
 
+	fmt.Println("UNPINNING FRAME WITH KEY -> ", f)
 	for {
 		c := f.pins.Load()
 
 		if c <= 0 {
+			log.Println("Pin count <= 0")
 			return false, nil
 		}
 
 		if f.pins.CompareAndSwap(c, c-1) {
-			return true, nil
+			// if updated pin count is zero, return true
+			return c-1 <= 0, nil
 		}
 	}
 }
@@ -318,6 +314,10 @@ func (f *Frame) setNextPtr(fr *Frame) {
 		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own next pointer. \nFrame -> %v\nProvided next -> %v\n", f, fr))
 	}
 
+	if f.prev == fr && (f.prev != nil && fr != nil) {
+		panic(fmt.Errorf("(setNextPtr) Frame has prev pointer same as next ptr. \nprev -> %v\nnext -> %v\n", f.prev, fr))
+	}
+
 	f.next = fr
 }
 
@@ -327,6 +327,10 @@ func (f *Frame) setPrevPtr(fr *Frame) {
 
 	if f == fr {
 		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own prev pointer. \nFrame -> %v\nProvided prev -> %v\n", f, fr))
+	}
+
+	if f.next == fr && (f.next != nil && fr != nil) {
+		panic(fmt.Errorf("(setPrevPtr) frame has prev pointer equal to next pointer. \nprev -> %v\next -> %v\n", fr, f.next))
 	}
 
 	f.prev = fr

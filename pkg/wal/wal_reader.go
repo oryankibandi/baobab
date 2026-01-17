@@ -93,7 +93,7 @@ func (wReader *WalReader) readLogHeader(off uint32) (uint32, error) {
 		hdr = append(hdr[:idx], hdr[idx+WAL_PAGE_HEADER_SIZE:]...)
 	}
 
-	lSize := binary.LittleEndian.Uint32(hdr[9:13])
+	lSize := binary.LittleEndian.Uint32(hdr[13:17])
 
 	return lSize, nil
 }

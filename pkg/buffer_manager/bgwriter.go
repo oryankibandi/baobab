@@ -31,7 +31,7 @@ type BgWriter struct {
 
 func (bw *BgWriter) Start() {
 	// Give time for other processes to initialize
-	time.Sleep(time.Second * 15)
+	time.Sleep(time.Second * 1)
 	go bw.watchFreeList()
 
 	var dFrame []*Frame
@@ -57,6 +57,7 @@ func (bw *BgWriter) Start() {
 			// pin frames sequentially to avoid deadlocks
 			fmt.Printf("(BGWRITER) %d RemoveItemFromLru\n", k)
 			k++
+			fmt.Printf("(BGWRITER) REMOVING FRAME FROM LRU -> %d\nFRAME -> %v\n", fDirty.frame.GetKey(), fDirty.frame)
 			err := bw.cache.RemoveItemFromLru(fDirty.frame)
 
 			fmt.Println("(bgwriter) Frame Pinned")
@@ -65,6 +66,8 @@ func (bw *BgWriter) Start() {
 			if err != nil {
 				panic(fmt.Sprintf("Unable to pin frame: %v", err))
 			}
+
+			fmt.Printf("(BGWRITER) DONE -> %d\n", fDirty.frame.GetKey())
 
 			if d := fDirty.frame.IsDirty(); !d {
 				fmt.Println("(bgwriter) Frame not dirty, releasing...")
@@ -152,6 +155,9 @@ func (bw *BgWriter) Start() {
 				fr.markClean()
 			}(f)
 		}
+
+		log.Println("(BGWRITER) WAITING FOR GOROUTINES....")
+		bw.wg.Wait()
 
 		// release frames
 		for _, f := range dFrame {
@@ -272,8 +278,6 @@ func (bw *BgWriter) Start() {
 		// 	fDirty = bw.cache.diryList.popDirtyPage()
 		// }
 
-		log.Println("(BGWRITER) WAITING FOR GOROUTINES....")
-		bw.wg.Wait()
 		log.Println("(BGWRITER) DONE...")
 		// flush metadata
 		err := bw.cache.flushMetadata()
@@ -308,7 +312,7 @@ func (bw *BgWriter) Start() {
 			msg += fmt.Sprintf("(bgwriter) Written %d bytes\n", writtenB)
 			msg += "+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n"
 
-			log.Println(msg)
+			fmt.Printf(msg)
 		}
 
 		log.Println("MAXLSN ===> ", LSN.maxLSN)

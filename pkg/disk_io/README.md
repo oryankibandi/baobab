@@ -23,7 +23,7 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
 ```bash
  +----------------------+  offset 0
  | PageHeaderData       |  (fixed-size metadata)
- +----------------------+  offset 27
+ +----------------------+  offset 51
  | cell pointer         |  ↓ (one entry per tuple)
  +----------------------+
  | ... free space ...   |
@@ -42,25 +42,25 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
 |     Page ID           |
 +-----------------------+   offset 5
 |     LSN               |
-+-----------------------+   offset 13
-|     Item Count        |
 +-----------------------+   offset 17
-|     Free Space        |
+|     Item Count        |
 +-----------------------+   offset 21
-|     Upper Offset      |
+|     Free Space        |
 +-----------------------+   offset 25
-|     Lower Offset      |
+|     Upper Offset      |
 +-----------------------+   offset 29
+|     Lower Offset      |
++-----------------------+   offset 31
 |     Magic No.         |
-+-----------------------+   offset 33
++-----------------------+   offset 37
 |     Checksum          |
-+-----------------------+   offset 35
-|     Right Child       |
 +-----------------------+   offset 39
+|     Right Child       |
++-----------------------+   offset 43
 |     Right Sibling     |
 +-----------------------+   offset 43
 |     Left Sibling      |
-+-----------------------+   offset 47
++-----------------------+   offset 51
 
 ```
 

@@ -58,7 +58,8 @@ func (wr *WalWriter) initializeWriter() error {
 		// set page and offset in lsn. Offset should consider
 		// size of wal page header
 		binary.LittleEndian.PutUint32(lsn[:4], 0)
-		binary.LittleEndian.PutUint32(lsn[4:], WAL_PAGE_HEADER_SIZE)
+		binary.LittleEndian.PutUint32(lsn[4:8], WAL_PAGE_HEADER_SIZE)
+		binary.LittleEndian.PutUint32(lsn[8:], CHECKPOINT_SIZE)
 
 		cp := CheckPoint{
 			flag:          0x80,
@@ -139,10 +140,11 @@ func (wr *WalWriter) AddJob(data []byte, c *chan int) {
 func (wr *WalWriter) assignLSN(logSize uint32) []byte {
 	wr.mu.Lock()
 	defer wr.mu.Unlock()
-	lsn := make([]byte, 8)
+	lsn := make([]byte, 12)
 
 	binary.LittleEndian.PutUint32(lsn[:4], wr.maxPage)
-	binary.LittleEndian.PutUint32(lsn[4:], wr.maxOffset)
+	binary.LittleEndian.PutUint32(lsn[4:8], wr.maxOffset)
+	binary.LittleEndian.PutUint32(lsn[8:], logSize)
 
 	// increment
 	newMaxOff := wr.maxOffset + logSize

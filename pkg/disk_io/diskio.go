@@ -15,14 +15,14 @@ const (
 	DEGREE                   = 2
 	ORDER                    = DEGREE * 2
 	PAGE_SIZE_BYTES          = 8192
-	HEADER_SIZE_BYTES        = 47
+	HEADER_SIZE_BYTES        = 51
 	METADATA_PAGE_SIZE_BYTES = 8192 //20
 	LOWER_PADDING_BYTES      = 16
 	CELL_POINTER_SIZE_BYTE   = 5
 	CELL_KEY_SIZE_BYTES      = 4
 	CELL_VAL_SIZE_BYTES      = 4
 	CELL_CHILD_PAGEID_SIZE   = 4
-	LSN_SIZE_BYTE            = 8
+	LSN_SIZE_BYTE            = 12
 )
 
 // Page Header Flag bits
@@ -168,20 +168,20 @@ func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
 	fmt.Println("PGE HEADER ===> ", pgeHeader)
 
 	pageID := binary.LittleEndian.Uint32(pgeHeader[1:5])
-	itemCount := binary.LittleEndian.Uint32(pgeHeader[13:17])
-	upperOffset := binary.LittleEndian.Uint32(pgeHeader[21:25])
-	lowerOff := binary.LittleEndian.Uint32(pgeHeader[25:29])
-	freeSpace := binary.LittleEndian.Uint32(pgeHeader[17:21])
-	checksum := binary.LittleEndian.Uint16(pgeHeader[33:35])
-	magicNumber := binary.LittleEndian.Uint32(pgeHeader[29:33])
-	rightPtr := binary.LittleEndian.Uint32(pgeHeader[35:39])
-	rightSib := binary.LittleEndian.Uint32(pgeHeader[39:43])
-	leftSib := binary.LittleEndian.Uint32(pgeHeader[43:])
+	itemCount := binary.LittleEndian.Uint32(pgeHeader[17:21])
+	upperOffset := binary.LittleEndian.Uint32(pgeHeader[25:29])
+	lowerOff := binary.LittleEndian.Uint32(pgeHeader[29:33])
+	freeSpace := binary.LittleEndian.Uint32(pgeHeader[21:25])
+	checksum := binary.LittleEndian.Uint16(pgeHeader[37:39])
+	magicNumber := binary.LittleEndian.Uint32(pgeHeader[33:37])
+	rightPtr := binary.LittleEndian.Uint32(pgeHeader[39:43])
+	rightSib := binary.LittleEndian.Uint32(pgeHeader[43:47])
+	leftSib := binary.LittleEndian.Uint32(pgeHeader[47:])
 
 	h := PageHeader{
 		Flags:        pgeHeader[0],
 		PageId:       int32(pageID),
-		LSN:          pgeHeader[5:13],
+		LSN:          pgeHeader[5:17],
 		Items:        int32(itemCount),
 		FreeSpace:    int32(freeSpace),
 		UpperOffset:  int32(upperOffset),
@@ -1022,16 +1022,16 @@ func (h *PageHeader) toBytes() []byte {
 
 	headerBytes[0] = h.Flags
 	binary.LittleEndian.PutUint32(headerBytes[1:5], uint32(h.PageId))
-	copy(headerBytes[5:13], h.LSN)
-	binary.LittleEndian.PutUint32(headerBytes[13:17], uint32(h.Items))
-	binary.LittleEndian.PutUint32(headerBytes[17:21], uint32(h.FreeSpace))
-	binary.LittleEndian.PutUint32(headerBytes[21:25], uint32(h.UpperOffset))
-	binary.LittleEndian.PutUint32(headerBytes[25:29], uint32(h.LowerOffset))
-	binary.LittleEndian.PutUint32(headerBytes[29:33], uint32(h.MagicNumber))
-	binary.LittleEndian.PutUint16(headerBytes[33:35], uint16(h.Checksum))
-	binary.LittleEndian.PutUint32(headerBytes[35:39], uint32(h.RightChild))
-	binary.LittleEndian.PutUint32(headerBytes[39:43], uint32(h.RightSibling))
-	binary.LittleEndian.PutUint32(headerBytes[43:], uint32(h.LeftSibling))
+	copy(headerBytes[5:17], h.LSN)
+	binary.LittleEndian.PutUint32(headerBytes[17:21], uint32(h.Items))
+	binary.LittleEndian.PutUint32(headerBytes[21:25], uint32(h.FreeSpace))
+	binary.LittleEndian.PutUint32(headerBytes[25:29], uint32(h.UpperOffset))
+	binary.LittleEndian.PutUint32(headerBytes[29:33], uint32(h.LowerOffset))
+	binary.LittleEndian.PutUint32(headerBytes[33:37], uint32(h.MagicNumber))
+	binary.LittleEndian.PutUint16(headerBytes[37:39], uint16(h.Checksum))
+	binary.LittleEndian.PutUint32(headerBytes[39:43], uint32(h.RightChild))
+	binary.LittleEndian.PutUint32(headerBytes[43:47], uint32(h.RightSibling))
+	binary.LittleEndian.PutUint32(headerBytes[47:], uint32(h.LeftSibling))
 
 	fmt.Println("HEADER TO BYTES => ", headerBytes)
 

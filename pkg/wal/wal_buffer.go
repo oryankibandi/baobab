@@ -39,8 +39,6 @@ func (walBuf *WALBuffer) Add(b nodeValue) {
 
 	walBuf.tail.next = &n
 	walBuf.tail = &n
-
-	return
 }
 
 // Creates a copy of current wal, traverses linked list and

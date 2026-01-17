@@ -15,9 +15,9 @@ const (
 	WAL_PAGE_SIZE        = 8192
 	WAL_PAGE_HEADER_SIZE = 8
 	WAL_SEG_FILE_SIZE    = 16777216
-	BLOG_HEADER_SIZE     = 21
-	CHECKPOINT_SIZE      = 13
-	LSN_SIZE             = 8
+	BLOG_HEADER_SIZE     = 25
+	CHECKPOINT_SIZE      = 17
+	LSN_SIZE             = 12
 )
 
 // WAL config
@@ -46,7 +46,7 @@ type OperationType int
 
 // Structure of a log, otherwise known as B-LOG
 type BLog struct {
-	header  *BLogHeader   // 21 byte Header
+	header  *BLogHeader   // 25 byte Header
 	opType  OperationType // Type of operation (1 byte)
 	keySize uint32        // Size of key (4 bytes)
 	key     []byte        // Key (keySize)
@@ -58,7 +58,7 @@ type BLog struct {
 // Structure of the B-LOG header
 type BLogHeader struct {
 	flag   byte   // 1 byte header flags
-	lsn    []byte // 8 byte log sequence number
+	lsn    []byte // 12 byte log sequence number
 	pageId uint32 // ID of page where this change affects. This will be used to compare LSN during recovery
 	crc    uint32 // Cyclic Redundacy Check number for integrity checks
 	lSize  uint32 // Size of B-LOG
@@ -92,10 +92,10 @@ func (h *BLogHeader) toBytes() [BLOG_HEADER_SIZE]byte {
 	var hdr [BLOG_HEADER_SIZE]byte
 
 	hdr[0] = h.flag
-	copy(hdr[1:9], h.lsn)
-	binary.LittleEndian.PutUint32(hdr[9:13], h.lSize)
-	binary.LittleEndian.PutUint32(hdr[13:17], h.pageId)
-	binary.LittleEndian.PutUint32(hdr[17:21], h.crc)
+	copy(hdr[1:13], h.lsn)
+	binary.LittleEndian.PutUint32(hdr[13:17], h.lSize)
+	binary.LittleEndian.PutUint32(hdr[17:21], h.pageId)
+	binary.LittleEndian.PutUint32(hdr[21:25], h.crc)
 
 	log.Println("(toBytes) BLOG HEADER ==> ", hdr)
 
@@ -221,7 +221,7 @@ func (w *WAL) AddPutLog(pageId uint32, key []byte, val []byte) ([]byte, error) {
 
 	hdr := BLogHeader{
 		flag:   0x0, // Initialized with first bit flag unset for logs
-		lsn:    lsn,
+		lsn:    lsn, // 12-byte LSN
 		pageId: pageId,
 		crc:    0, // TBC when adding CRC
 		lSize:  uint32(lSize),
@@ -249,13 +249,14 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 		return WalError{Message: "Invalid LSN size"}
 	}
 
-	// get log size
-	s, err := w.walReader.getLogSize(latestLSN)
+	// get log size from LSN
+	// s, err := w.walReader.getLogSize(latestLSN)
 
-	if err != nil {
-		w.logger.Write("logger", "AddCheckpoint", logger.LevelError, fmt.Sprintf("(wal) Unalble to get size of log at LSN: %v\r ERR: %s", latestLSN, err.Error()), nil)
-		panic(fmt.Errorf("(wal) Unalble to get size of log at LSN: %v", latestLSN))
-	}
+	// if err != nil {
+	// 	w.logger.Write("logger", "AddCheckpoint", logger.LevelError, fmt.Sprintf("(wal) Unable to get size of log at LSN: %v\r ERR: %s", latestLSN, err.Error()), nil)
+	// 	panic(fmt.Errorf("(wal) Unable to get size of log at LSN: %v", latestLSN))
+	// }
+	s := binary.LittleEndian.Uint32(latestLSN[8:12])
 
 	// calculate offset(REDO point). This should be after the latest applied log
 	page := binary.LittleEndian.Uint32(latestLSN[:4])
@@ -276,7 +277,7 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 	w.walBuff.Add(&cp)
 
 	w.logger.Write("logger", "AddCheckpoint", logger.LevelInfo, "ADDED CHECKPOINT, writing config file ", nil)
-	err = w.walWriter.saveCheckpoint(lsn)
+	err := w.walWriter.saveCheckpoint(lsn)
 
 	if err != nil {
 		panic(err)

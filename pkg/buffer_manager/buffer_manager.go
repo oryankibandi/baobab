@@ -78,7 +78,6 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 	// Check if item already exists
 	val, ok := c.CacheMap[k]
 	if !ok {
-		// TODO: Check free frames first, if none evict first
 		// First time entry
 		log.Println("First Entry, adding to window cache----------------")
 		// item.UpdateCacheType(Window)
@@ -109,7 +108,7 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 	// }
 
 	// If there are items that have been evicted, delete them from map
-	if delKeys != nil && len(delKeys) > 0 {
+	if len(delKeys) > 0 {
 		for _, k := range delKeys {
 			// delete(c.CacheMap, k)
 			c.Delete(k, true)
@@ -191,38 +190,32 @@ func (c *Cache) Get(pageId uint32) (*Frame, error) {
 // Releases a frame in use by unpinning and reinserting to LRU.
 // Called when a thread is done with a frame
 func (c *Cache) ReleaseFrame(f *Frame, flushed bool) error {
-	addToLru, err := f.UnpinFrame()
+	log.Println("READDING TO LRU --> ", f)
+	del, delKeys, err := c.wTinyLfu.reAddToLru(f, flushed)
 
 	if err != nil {
 		return err
 	}
 
-	if addToLru {
-		del, delKeys, err := c.wTinyLfu.reAddToLru(f, flushed)
+	// FIX: Handle when frame is borrowed during traversal - not b  bgwriter. ONlt the bgwriter sets flushed=true
+	// if del && flushed {
+	// 	// borrowed frame has been reclaimed and flushed. Delete
+	// 	fmt.Println("(ReleaseFrame) Borrowed frame has been freed and flushed...")
+	// 	c.rmu.Lock()
+	// 	delete(c.CacheMap, f.GetKey())
+	// 	c.rmu.Unlock()
+	// }
 
-		if err != nil {
-			return err
-		}
+	if del && delKeys != nil && len(delKeys) > 0 {
+		fmt.Println("DELETING FRAME FROM LRU ----> ")
+		// flush and delete keys
+		for _, k := range delKeys {
+			c.rmu.Lock()
+			err := c.Delete(k, true)
+			c.rmu.Unlock()
 
-		// FIX: Handle when frame is borrowed during traversal - not b  bgwriter. ONlt the bgwriter sets flushed=true
-		// if del && flushed {
-		// 	// borrowed frame has been reclaimed and flushed. Delete
-		// 	fmt.Println("(ReleaseFrame) Borrowed frame has been freed and flushed...")
-		// 	c.rmu.Lock()
-		// 	delete(c.CacheMap, f.GetKey())
-		// 	c.rmu.Unlock()
-		// }
-
-		if del && delKeys != nil && len(delKeys) > 0 {
-			// flush and delete keys
-			for _, k := range delKeys {
-				c.rmu.Lock()
-				err := c.Delete(k, true)
-				c.rmu.Unlock()
-
-				if err != nil {
-					panic(err)
-				}
+			if err != nil {
+				panic(err)
 			}
 		}
 	}
@@ -321,6 +314,9 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 		if err != nil {
 			panic(err)
 		}
+
+		// delete from dirty page list
+		c.diryList.removePage(key)
 	}
 
 	delete(c.CacheMap, key)
@@ -418,7 +414,7 @@ func (c *Cache) prepareForEviction(f *Frame) error {
 
 	n := <-ch
 
-	log.Printf("(PrepareForEviction) Flushed %d page\n", n)
+	log.Printf("(PrepareForEviction) Flushed %d bytes of page %d\n", n, f.Key)
 
 	// l := <-lsnChan
 	// fmt.Println("Received LSN -> ", l)
