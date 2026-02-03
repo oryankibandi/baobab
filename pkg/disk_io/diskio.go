@@ -456,6 +456,7 @@ func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), chi
 
 	var newPageId int32
 	newPageId = PgFreeList.pop()
+	fmt.Println("(NEW) Returned page id from free list --> ", newPageId)
 
 	if newPageId <= 0 {
 		newPageId = d.MaxPageId + 1
@@ -698,6 +699,15 @@ func (p *Page) Sync(lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, r
 	fmt.Println("(Sync) IN CHILDREN ==> ", pageIds)
 	fmt.Println("(Sync) RIGHT CHILD ==> ", rightSibling)
 	fmt.Println("(Sync) LEFT CHILD ==> ", leftSibling)
+
+	// FIX: Remove debug code below
+	isinternal, e := p.IsInternal()
+
+	if e != nil {
+		panic(e)
+	}
+
+	fmt.Println("(Sync) IS INTERNAL ==> ", isinternal)
 
 	// update LSN
 	p.Header.LSN = lsn
@@ -1298,9 +1308,10 @@ func NewDiskManager() *DiskManager {
 
 	pageCount := binary.LittleEndian.Uint32(metadataPage[12:16])
 	maxPageId := binary.LittleEndian.Uint32(metadataPage[16:])
-	fmt.Println("Root Page ID => ", metadataPage[0:4], rootPgeID)
+	fmt.Printf("Root Page ID => %b, %d\n", metadataPage[0:4], rootPgeID)
 
 	fmt.Println("Page Count => ", pageCount)
+	fmt.Println("Max Page Id => ", maxPageId)
 	diskManager.PageCount = int32(pageCount)
 	diskManager.MaxPageId = int32(maxPageId)
 

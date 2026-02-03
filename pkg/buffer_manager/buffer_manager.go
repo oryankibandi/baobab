@@ -197,15 +197,6 @@ func (c *Cache) ReleaseFrame(f *Frame, flushed bool) error {
 		return err
 	}
 
-	// FIX: Handle when frame is borrowed during traversal - not b  bgwriter. ONlt the bgwriter sets flushed=true
-	// if del && flushed {
-	// 	// borrowed frame has been reclaimed and flushed. Delete
-	// 	fmt.Println("(ReleaseFrame) Borrowed frame has been freed and flushed...")
-	// 	c.rmu.Lock()
-	// 	delete(c.CacheMap, f.GetKey())
-	// 	c.rmu.Unlock()
-	// }
-
 	if del && delKeys != nil && len(delKeys) > 0 {
 		fmt.Println("DELETING FRAME FROM LRU ----> ")
 		// flush and delete keys

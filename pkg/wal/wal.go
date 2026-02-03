@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -159,7 +160,8 @@ func checkLogOverflow(data []byte, page uint32, offset uint32) []byte {
 	}
 
 	// get index of overflow
-	idx := endOff - WAL_PAGE_SIZE
+	factor := uint32(math.Floor(float64(offset/WAL_PAGE_SIZE))) + 1
+	idx := (WAL_PAGE_SIZE * factor) - offset
 
 	// Create WAL page size
 	walPgeHdr := WALPageHeader{

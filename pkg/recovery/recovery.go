@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 
 	"github.com/oryankibandi/baobab/pkg/bp_tree"
@@ -68,7 +69,7 @@ func (rMngr *RecoveryMngr) Recover() error {
 	// Calculate offset of checkpoint
 	var checkpointOff uint32
 	checkPntPage := binary.LittleEndian.Uint32(rMngr.checkpointLSN[:4])
-	checkPntPageOff := binary.LittleEndian.Uint32(rMngr.checkpointLSN[4:])
+	checkPntPageOff := binary.LittleEndian.Uint32(rMngr.checkpointLSN[4:8])
 
 	if checkPntPage != 0 {
 		checkpointOff = (checkPntPage * wal.WAL_PAGE_SIZE) + checkPntPageOff
@@ -110,12 +111,13 @@ func (rMngr *RecoveryMngr) Recover() error {
 // with the associated page's LSN and applying unapplied logs - logs with LSN greater than
 // their respective pages.
 func (rMngr *RecoveryMngr) walkThroughRecovery(startOff uint32, endOff uint32) error {
-	var isMultiPage bool
+	// var isMultiPage bool
 	currOff := startOff
 
 	for currOff < endOff {
 		// read header
 		fmt.Println("CURR oFFSET ---> ", currOff)
+		fmt.Println("END OFFSET ---> ", endOff)
 		headerMetadata, err := rMngr.readLogHeader(currOff)
 
 		if err != nil {
@@ -134,79 +136,99 @@ func (rMngr *RecoveryMngr) walkThroughRecovery(startOff uint32, endOff uint32) e
 			return err
 		}
 
-		if headerMetadata.multiPage {
-			isMultiPage = true
-		}
+		// if headerMetadata.multiPage {
+		// 	isMultiPage = true
+		// }
 
-		// retrieve page and compare LSN
-		f, err := rMngr.bufferMngr.Get(headerMetadata.pageId)
+		op, err := rMngr.readFullLog(currOff, headerMetadata.logSize, headerMetadata.lsn)
 
 		if err != nil {
-			// page does not exist. Crash might have occured before
-			// page was created. Reapply the entry
-
-			log.Println("PAGE NOT FOUND....")
-			op, err := rMngr.readFullLog(currOff, headerMetadata.logSize, headerMetadata.lsn)
-
-			if err != nil {
-				panic(err)
-			}
-
-			if op.multiPage {
-				isMultiPage = true
-			}
-
-			rMngr.reapplyLog(op)
-
-			// increment offset
-			if isMultiPage {
-				fmt.Println("Is Multipage Log entry...")
-				currOff += (headerMetadata.logSize + wal.WAL_PAGE_HEADER_SIZE)
-				fmt.Println("Next Offset -> ", currOff)
-			} else {
-				currOff += headerMetadata.logSize
-			}
-		} else {
-			pLsn, err := f.GetLSN()
-
-			if err != nil {
-				return err
-			}
-
-			reapply, err := helpers.GreaterLSN(headerMetadata.lsn, pLsn)
-
-			if err != nil {
-				log.Println("ERR => ", err)
-				return err
-			}
-
-			// if the log's LSN is greater than the page's LSN, this entry was not persisted hence we need to reapply
-			if reapply {
-				fmt.Println("(walkThroughRecovery) logSize  => ", headerMetadata.logSize)
-				op, err := rMngr.readFullLog(currOff, headerMetadata.logSize, headerMetadata.lsn)
-
-				if err != nil {
-					panic(err)
-				}
-
-				if op.multiPage {
-					isMultiPage = true
-				}
-
-				rMngr.reapplyLog(op)
-			}
-
-			// increment offset
-			if isMultiPage {
-				fmt.Println("Is Multipage Log entry...")
-				currOff += (headerMetadata.logSize + wal.WAL_PAGE_HEADER_SIZE)
-				fmt.Println("Next Offset -> ", currOff)
-			} else {
-				currOff += headerMetadata.logSize
-			}
+			panic(err)
 		}
 
-		isMultiPage = false
+		rMngr.reapplyLog(op)
+
+		if op.multiPage {
+			fmt.Println("Is Multipage Log entry...")
+			currOff += (headerMetadata.logSize + wal.WAL_PAGE_HEADER_SIZE)
+			fmt.Println("Next Offset -> ", currOff)
+		} else {
+			currOff += headerMetadata.logSize
+		}
+
+		//	// retrieve page and compare LSN
+		//	f, err := rMngr.bufferMngr.Get(headerMetadata.pageId)
+
+		//	if err != nil {
+		//		// page does not exist. Crash might have occured before
+		//		// page was created. Reapply the entry
+
+		//		log.Println("PAGE NOT FOUND....")
+		//		op, err := rMngr.readFullLog(currOff, headerMetadata.logSize, headerMetadata.lsn)
+
+		//		if err != nil {
+		//			panic(err)
+		//		}
+
+		//		if op.multiPage {
+		//			isMultiPage = true
+		//		}
+
+		//		rMngr.reapplyLog(op)
+
+		//		// increment offset
+		//		if isMultiPage {
+		//			fmt.Println("Is Multipage Log entry...")
+		//			currOff += (headerMetadata.logSize + wal.WAL_PAGE_HEADER_SIZE)
+		//			fmt.Println("Next Offset -> ", currOff)
+		//		} else {
+		//			currOff += headerMetadata.logSize
+		//		}
+		//	} else {
+		//		pLsn, err := f.GetLSN()
+
+		//		if err != nil {
+		//			return err
+		//		}
+
+		//		reapply, err := helpers.GreaterLSN(headerMetadata.lsn, pLsn)
+
+		//		if err != nil {
+		//			log.Println("ERR => ", err)
+		//			return err
+		//		}
+
+		//		// FIX: Come up with a more permanent fix
+		//		reapply = true
+		//		// if the log's LSN is greater than the page's LSN, this entry was not persisted hence we need to reapply
+		//		if reapply {
+		//			fmt.Println("(walkThroughRecovery) logSize  => ", headerMetadata.logSize)
+		//			op, err := rMngr.readFullLog(currOff, headerMetadata.logSize, headerMetadata.lsn)
+
+		//			if err != nil {
+		//				panic(err)
+		//			}
+
+		//			if op.multiPage {
+		//				isMultiPage = true
+		//			}
+
+		//			rMngr.reapplyLog(op)
+		//		} else {
+		//			fmt.Println("SKIPPING LOG...")
+		//		}
+
+		//		// increment offset
+		//		if isMultiPage {
+		//			fmt.Println("Is Multipage Log entry...")
+		//			currOff += (headerMetadata.logSize + wal.WAL_PAGE_HEADER_SIZE)
+		//			fmt.Println("Next Offset -> ", currOff)
+		//		} else {
+		//			currOff += headerMetadata.logSize
+		//		}
+		//	}
+
+		// isMultiPage = false
 	}
 
 	return nil
@@ -254,16 +276,15 @@ func (rMngr *RecoveryMngr) readLogHeader(off uint32) (LogHeaderMetadata, error) 
 		return LogHeaderMetadata{}, RecoveryError{Message: "File descriptor not provided."}
 	}
 
-	if off < 0 {
-		return LogHeaderMetadata{}, RecoveryError{Message: "Invalid offset provided"}
-	}
-
 	var hdr []byte
 
 	// check if header crosses page boundary
 	endOff := off + wal.BLOG_HEADER_SIZE
-	pageOff := (endOff) % wal.WAL_PAGE_SIZE
-	multiPage := pageOff >= wal.WAL_PAGE_SIZE
+	multiPage, err := helpers.IsMultipage(off, endOff, wal.WAL_PAGE_SIZE)
+
+	if err != nil {
+		panic(err)
+	}
 
 	if multiPage {
 		fmt.Println("(readLogHeader) Multipage...")
@@ -289,9 +310,7 @@ func (rMngr *RecoveryMngr) readLogHeader(off uint32) (LogHeaderMetadata, error) 
 		panic("invalid header size in file.")
 	}
 
-	fmt.Println("(readLogHeader) Read log header -> ", hdr)
-
-	// fmt.Println("LOG HEADER ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++> ", hdr)
+	fmt.Println("(readLogHeader) Read log header --> ", hdr)
 
 	// check if is a checkpoint entry
 	if helpers.BitIsSet(hdr[0], wal.LOGTYPE_FLAG_POS) {
@@ -300,15 +319,19 @@ func (rMngr *RecoveryMngr) readLogHeader(off uint32) (LogHeaderMetadata, error) 
 
 	if multiPage {
 		// remove WAL page header info
-		idx := wal.BLOG_HEADER_SIZE - (endOff - wal.WAL_PAGE_SIZE)
+		// idx := wal.BLOG_HEADER_SIZE - (endOff - wal.WAL_PAGE_SIZE)
+		factor := uint32(math.Floor(float64(off/wal.WAL_PAGE_SIZE))) + 1
+		idx := (wal.WAL_PAGE_SIZE * factor) - off
+
 		hdr = append(hdr[:idx], hdr[idx+wal.WAL_PAGE_HEADER_SIZE:]...)
+		fmt.Println("(readLogHeader) Final multipageheader --> ", hdr)
 	}
 
 	// extract LSN, pageId and size of the log
 	hdrMetadata := LogHeaderMetadata{
-		lsn:       hdr[1:9],
-		logSize:   binary.LittleEndian.Uint32(hdr[9:13]),
-		pageId:    binary.LittleEndian.Uint32(hdr[13:17]),
+		lsn:       hdr[1:13],
+		logSize:   binary.LittleEndian.Uint32(hdr[13:17]),
+		pageId:    binary.LittleEndian.Uint32(hdr[17:21]),
 		multiPage: multiPage,
 	}
 
@@ -330,24 +353,24 @@ func (rMngr *RecoveryMngr) readFullLog(startOff uint32, lSize uint32, lsn []byte
 		return Operation{}, RecoveryError{Message: "File descriptor not provided."}
 	}
 
-	if startOff < 0 {
-		return Operation{}, RecoveryError{Message: "Invalid offset provided"}
-	}
-
 	var bLog []byte
 	// check if header crosses page boundary
 	endOff := startOff + lSize
-	pageOff := (endOff) % wal.WAL_PAGE_SIZE
-	multiPage := pageOff >= wal.WAL_PAGE_SIZE
+	multiPage, err := helpers.IsMultipage(startOff, endOff, wal.WAL_PAGE_SIZE)
+
+	if err != nil {
+		panic(err)
+	}
 
 	if multiPage {
 		bLog = make([]byte, lSize+wal.WAL_PAGE_HEADER_SIZE)
 	} else {
 		bLog = make([]byte, lSize)
 	}
+
 	fmt.Println("bLog Length --> ", len(bLog))
 	fmt.Println("lSize ----> ", lSize)
-	fmt.Println("Reading from offset ---> ", startOff)
+	fmt.Printf("Reading from offset ---> %d to offset ---> %d of %d bytes\n", startOff, endOff, len(bLog))
 
 	// read full log
 	n, err := rMngr.fd.ReadAt(bLog, int64(startOff))
@@ -365,9 +388,12 @@ func (rMngr *RecoveryMngr) readFullLog(startOff uint32, lSize uint32, lsn []byte
 
 	if multiPage {
 		// remove WAL page header info
+		fmt.Println("Full log before truncating---> ", bLog)
 		idx := lSize - (endOff - wal.WAL_PAGE_SIZE)
 		bLog = append(bLog[:idx], bLog[idx+wal.WAL_PAGE_HEADER_SIZE:]...)
 	}
+	fmt.Println("Read Full Log ---> ", bLog)
+	fmt.Println("Is Multipage ---> ", multiPage)
 
 	op := Operation{
 		lsn:       lsn,
@@ -436,8 +462,8 @@ func NewRecoveryMngr(bufMngr *buffermanager.Cache, index *bp_tree.BTree) (*Recov
 
 	defer fd.Close()
 
-	// read the 8 byte checkpoint LSN
-	latestLSN := make([]byte, 8)
+	// read the 12 byte checkpoint LSN
+	latestLSN := make([]byte, wal.LSN_SIZE)
 
 	n, err := fd.Read(latestLSN)
 

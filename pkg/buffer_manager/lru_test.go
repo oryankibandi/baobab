@@ -2,6 +2,7 @@ package buffermanager
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 
 	diskio "github.com/oryankibandi/baobab/pkg/disk_io"
@@ -606,4 +607,84 @@ func TestDelete(t *testing.T) {
 
 		}
 	}
+}
+
+func TestConcurrentPin(t *testing.T) {
+	type testItem struct {
+		name string
+		fr   *Frame
+	}
+
+	nonNilCount := 0xFA
+	pgeIds := generateTestPageIds(nonNilCount)
+	frames := generateTestFrames(pgeIds)
+
+	var tests []testItem
+	for i, f := range frames {
+		tests = append(tests, testItem{
+			name: fmt.Sprintf("%d_test", i),
+			fr:   f,
+		})
+	}
+
+	var lru ILRU
+
+	lru = NewLru(1000, "test_lru")
+
+	assert.NotNil(t, lru, "LRU instance was not created.")
+
+	var err error
+	// add items
+	for _, tItem := range tests {
+		t.Run(tItem.name, func(t *testing.T) {
+			err = lru.Add(tItem.fr)
+			assert.Nil(t, err, fmt.Errorf("Expected error to be nil, got %v", err))
+
+			head := lru.getHead()
+
+			assert.NotNil(t, head, fmt.Sprintf("Expected head frame: %v, Got nil", head))
+			assert.Equalf(t, tItem.fr, head, "Invalid frame at head of LRU")
+		})
+	}
+
+	// check count
+	c := lru.getCount()
+	assert.Equal(t, uint64(nonNilCount), c, "Invalid count")
+
+	// slice test array
+	mid := nonNilCount / 2
+	qtr := float32(nonNilCount) * 0.25
+	pinSlice := tests[uint32(mid)-uint32(qtr) : uint32(mid)+uint32(qtr)]
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	// pin concurrently
+	for _, item := range pinSlice {
+		wg.Add(1)
+		go func(fr *Frame) {
+			defer wg.Done()
+			<-start
+			t.Run(item.name, func(t *testing.T) {
+				err := lru.RemoveFrame(fr)
+
+				assert.Nil(t, err, fmt.Errorf("Expected no error, got %s\n", err.Error()))
+
+				// check state
+				totFrames := lru.getCount()
+				pinned := lru.getPinnedFrameCount()
+				available := totFrames - pinned
+				head := lru.getHead()
+				tail := lru.getTail()
+
+				if available == 1 {
+					assert.Equal(t, head, tail, fmt.Errorf("Expected head and tail to be equal with a count of one, got:\nHead -> %v\nTail -> %v\n", head, tail))
+				}
+			})
+
+		}(item.fr)
+	}
+
+	// kick start goroutines
+	close(start)
 }

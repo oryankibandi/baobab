@@ -284,6 +284,7 @@ func (l *LRU) RemoveFrame(f *Frame) error {
 	frameCount := l.count.Load()
 	pinnedCount := l.pinnedFrames.Load()
 	availableCount := frameCount - pinnedCount
+	fmt.Println("(RemoveFrame) AVAILABLE FRAME COUNT B4 REMOVING ---------------------> ", availableCount)
 
 	// if there are frames available(unpinned), head and tail shouldn't be nil
 	if availableCount > 0 && (l.head == nil || l.tail == nil) {
@@ -349,6 +350,7 @@ func (l *LRU) RemoveFrame(f *Frame) error {
 	}
 
 	fmt.Printf("(RemoveFrame) (%s) NewTail after pinning -> %v\n", l.segName, l.tail)
+	fmt.Printf("(RemoveFrame) (%s) NewHead after pinning -> %v\n", l.segName, l.head)
 	fmt.Printf("(RemoveFrame) %s Frame after removing -> %v\n", l.segName, f)
 
 	l.checkState()

@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -271,7 +272,7 @@ func MaxLSN(lsnA []byte, lsnB []byte) ([]byte, error) {
 	}
 }
 
-// Compares to Log Sequence Numbers and returns true if lsnA is greater than lsnB,
+// Compares two Log Sequence Numbers and returns true if lsnA is greater than lsnB,
 // else false, and error if unsuccessful
 func GreaterLSN(lsnA []byte, lsnB []byte) (bool, error) {
 	if len(lsnA) < 8 {
@@ -315,6 +316,21 @@ func BitIsSet(flag byte, pos int) bool {
 
 	return r > 0
 
+}
+
+// Given startOff and endOff of a log record, checks if the data crosses the page boundary
+// for a page of size pageSize
+func IsMultipage(startOff uint32, endOff uint32, pageSize uint32) (bool, error) {
+	if startOff > endOff {
+		return false, HelperError{Message: "Start offset is greater that end offset."}
+	}
+
+	startOffPage := math.Floor(float64(startOff / pageSize))
+	endOffPage := math.Floor(float64(endOff / pageSize))
+
+	fmt.Printf("Start off: %d\tStart off page: %f\nEnd Off: %d\tEnd Off Page: %f\n", startOff, startOffPage, endOff, endOffPage)
+
+	return startOffPage != endOffPage, nil
 }
 
 // Prints a loading spinner to std output until a stop message is sent

@@ -15,7 +15,7 @@ import (
 
 const (
 	MAX_PAGES             = 100   // Max # of pages to flush in one operation
-	BGWRITER_DELAY        = 5000  // // delay between BgWriter activity writes (Milliseconds)
+	BGWRITER_DELAY        = 200   // // delay between BgWriter activity writes (Milliseconds)
 	BG_FLUSH_AFTER        = 65536 // size after which to force flush to disk(bypass OS cache) size after which to force flush to disk(bypass OS cache (Bytes)
 	FREELIST_WRITER_DELAY = 5000
 )
@@ -31,7 +31,7 @@ type BgWriter struct {
 
 func (bw *BgWriter) Start() {
 	// Give time for other processes to initialize
-	time.Sleep(time.Second * 1)
+	time.Sleep(time.Second * 60)
 	go bw.watchFreeList()
 
 	var dFrame []*Frame
@@ -75,6 +75,10 @@ func (bw *BgWriter) Start() {
 				if err != nil {
 					panic(err)
 				}
+
+				// get next item
+				fDirty = bw.cache.diryList.popDirtyPage()
+
 				continue
 				// return
 			}
@@ -312,7 +316,7 @@ func (bw *BgWriter) Start() {
 			msg += fmt.Sprintf("(bgwriter) Written %d bytes\n", writtenB)
 			msg += "+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n"
 
-			fmt.Printf(msg)
+			fmt.Println(msg)
 		}
 
 		log.Println("MAXLSN ===> ", LSN.maxLSN)
