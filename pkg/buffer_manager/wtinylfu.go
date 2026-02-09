@@ -7,10 +7,18 @@ import (
 	tiny "github.com/oryankibandi/baobab/internal/tinylfu"
 )
 
+const (
+	windowSegment SegmentType = iota
+	probationSegment
+	protectedSegment
+)
+
+type SegmentType int
+
 type WTinyLfu struct {
-	windowCache    ILRU
-	probationCache ILRU
-	protectedCache ILRU
+	windowCache    *clock
+	probationCache *clock
+	protectedCache *clock
 	tinyFilter     *tiny.TinyLFU
 }
 
@@ -413,15 +421,30 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	if windowSize <= 0 {
 		return nil, WTinyLFUError{Message: "Window size must be greater than 0"}
 	}
-
 	if mainCacheSize <= 0 {
 		return nil, WTinyLFUError{Message: "Main cache size must be greater than 0"}
 	}
 
+	// initialize clock buffers
+	wClock, err := NewClock(windowSize, windowSegment)
+	if err != nil {
+		return nil, err
+	}
+
+	probClock, err := NewClock(windowSize, probationSegment)
+	if err != nil {
+		return nil, err
+	}
+
+	protClock, err := NewClock(windowSize, protectedSegment)
+	if err != nil {
+		return nil, err
+	}
+
 	w := WTinyLfu{
-		windowCache:    NewLru(windowSize, "window"),
-		probationCache: NewLru(uint64(MAIN_CACHE_RATIO*float64(mainCacheSize)), "probation"),
-		protectedCache: NewLru(uint64((1-MAIN_CACHE_RATIO)*float64(mainCacheSize)), "protected"),
+		windowCache:    wClock,
+		probationCache: probClock,
+		protectedCache: protClock,
 		tinyFilter:     tiny.New(),
 	}
 

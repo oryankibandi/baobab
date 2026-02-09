@@ -307,15 +307,33 @@ func GreaterLSN(lsnA []byte, lsnB []byte) (bool, error) {
 }
 
 // Checks if a bit at the provided position(pos) is set.
-func BitIsSet(flag byte, pos int) bool {
+func BitIsSet(flag *byte, pos int) bool {
 	var mask byte
 	mask = 1 << byte(pos)
 
 	// Check if set
-	r := flag & mask
+	r := *flag & mask
 
 	return r > 0
 
+}
+
+// Unsets bit on f at position pos
+func UnsetFlag(f *byte, pos int) {
+	var mask byte
+	mask = 1 << byte(pos)
+
+	// unset flag (^AND)
+	*f = *f & (^mask)
+}
+
+// Unsets bit on f at position pos
+func SetFlag(f *byte, pos int) {
+	var mask byte
+	mask = 1 << byte(pos)
+
+	// unset flag (^AND)
+	*f |= mask
 }
 
 // Given startOff and endOff of a log record, checks if the data crosses the page boundary

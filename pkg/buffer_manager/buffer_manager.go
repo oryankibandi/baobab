@@ -19,6 +19,7 @@ const (
 	MAIN_CACHE_SIZE   = 800
 	CACHE_KEY_SIZE    = 16
 	MAIN_CACHE_RATIO  = 0.25
+	LSN_SIZE          = 12
 )
 
 // var BCache *Cache

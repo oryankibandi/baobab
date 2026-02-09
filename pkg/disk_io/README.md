@@ -19,17 +19,17 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
  +----------------------+  offset 20
  ```
 
- ### Page Layout(Heap Page)
+ ### Page Layout
 ```bash
  +----------------------+  offset 0
  | PageHeaderData       |  (fixed-size metadata)
- +----------------------+  offset 51
+ +----------------------+  offset 51 (lower offset)
  | cell pointer         |  ↓ (one entry per tuple)
  +----------------------+
  | ... free space ...   |
  +----------------------+
  | tuple data ("cells") |  ↑ Data cells
- +----------------------+  offset 8176
+ +----------------------+  offset 8176 (upper offset)
  | special space        |  Padding 16 Bytes (rarely used in heap pages)
  +----------------------+  offset 8192
  ```
@@ -58,7 +58,7 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
 |     Right Child       |
 +-----------------------+   offset 43
 |     Right Sibling     |
-+-----------------------+   offset 43
++-----------------------+   offset 47
 |     Left Sibling      |
 +-----------------------+   offset 51
 
