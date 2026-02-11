@@ -1,4 +1,4 @@
-package diskio
+package diskmanager
 
 type DiskioError struct {
 	Message string

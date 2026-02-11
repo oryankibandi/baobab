@@ -1,4 +1,4 @@
-package diskio
+package diskmanager
 
 import (
 	"encoding/binary"

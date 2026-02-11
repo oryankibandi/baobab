@@ -1,4 +1,4 @@
-package diskio
+package diskmanager
 
 import (
 	"bufio"
@@ -35,53 +35,18 @@ const (
 	IsInternal
 )
 
-var (
-	maxPageOffset = 0
-)
-
-// var d *DiskManager
-// var maxPageID uint32     // Use this to assign a pageID to new Pages.
-// var PgFreeList *FreeList
-
 type PageHeaderFlagPos int
-
-// type Cell struct {
-// 	Flags     []byte // 1 Byte
-// 	KeySize   int32  // 4 Bytes
-// 	ValueSize int32  // 4 Bytes
-// 	PageId    int32  // 4 Bytes PageId of child Node
-// 	Key       []byte // key_size Bytes
-// 	Value     []byte // value_size Bytes
-// }
-
-// // Header 31B
-// type PageHeader struct {
-// 	Flags        byte   // 1 Byte
-// 	PageId       int32  // ID of page. Aligns with number of block/page number on disk
-// 	LSN          []byte // 12 byte Log Sequence Number of the latest operation modifying the page
-// 	Items        int32  // No of items (4 Bytes)
-// 	FreeSpace    int32  // Amount of free space in bytes (4 Bytes)
-// 	UpperOffset  int32  //  End of free space
-// 	LowerOffset  int32  //  Begining of free space
-// 	MagicNumber  int32  // Magic Number 4 Bytes
-// 	Checksum     int16  // Checksum 2 Bytes
-// 	RightChild   int32  // Right most pointer for internal nodes
-// 	RightSibling int32  // PageId of the right sibling. 0 if none.
-// 	LeftSibling  int32  // PageId of the left sibling. 0 if none.
-// 	mu           sync.RWMutex
-// }
 
 // Page 8K
 type Page struct {
-	// PageId/BlockId
-	PageId uint32
-	// Page flags
-	Flags byte
-	LSN   [LSN_SIZE_BYTE]byte
-
 	// raw byte data
 	pgeData [PAGE_SIZE_BYTES]byte
 	rmu     sync.RWMutex
+	// PageId/BlockId
+	PageId uint32
+	LSN    [LSN_SIZE_BYTE]byte
+	// Page flags
+	Flags byte
 }
 
 type DiskManager struct {
@@ -107,14 +72,19 @@ type DiskManager struct {
 	mu sync.RWMutex
 }
 
+type DiskManagerConfig struct {
+	// relative path to database file
+	dataFile string
+}
+
 // Disk req for reads and writes
 type IOReq struct {
-	Read      bool        // Is read request
-	PageId    uint32      // ID of page to read
-	ReadPage  *chan *Page // if read req, new page read
-	Flushed   chan int32  // Amount of bytes written.
-	lsnChan   chan []byte // channel to send back log sequence number of page after flushing. This is used by the background writer to create a checkpoint in WAL
-	WritePage *Page       // if write req, page to write
+	Read      bool                     // Is read request
+	PageId    uint32                   // ID of page to read
+	ReadPage  *chan *Page              // if read req, new page read
+	Flushed   chan int32               // Amount of bytes written.
+	lsnChan   chan [LSN_SIZE_BYTE]byte // channel to send back log sequence number of page after flushing. This is used by the background writer to create a checkpoint in WAL
+	WritePage *Page                    // if write req, page to write
 	dManager  *DiskManager
 }
 
@@ -158,13 +128,10 @@ func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
 	pgeHeader := pageData[0:HEADER_SIZE_BYTES]
 	flag := int(pgeHeader[0])
 
-	fmt.Println("PGE HEADER ===> ", pgeHeader)
-
 	pageID := binary.LittleEndian.Uint32(pgeHeader[1:5])
 
 	// isInternal := h.IsSet(7)
 
-	fmt.Println("PAGEID *-*-*-> ", pageData[1:5], pageID)
 	fmt.Println("FLAG => ", flag)
 
 	if uint32(d.MaxPageId) < pageID {
@@ -246,7 +213,7 @@ func (d *DiskManager) FlushMetadata() {
 }
 
 // Creates write request for `page` and adds it to queue
-func (d *DiskManager) WriteReq(page *Page, pageId uint32, written chan int32, lsnChan chan []byte) error {
+func (d *DiskManager) WriteReq(page *Page, pageId uint32, written chan int32, lsnChan chan [LSN_SIZE_BYTE]byte) error {
 	if page == nil {
 		written <- -1
 		return DiskioError{Message: "Page is required"}
@@ -409,7 +376,7 @@ func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), chi
 	// page Id
 	binary.LittleEndian.PutUint32(pageByteData[1:5], uint32(newPageId))
 	// LSN
-	if lsn != nil && len(lsn) == LSN_SIZE_BYTE {
+	if len(lsn) == LSN_SIZE_BYTE {
 		copy(pageByteData[5:17], lsn)
 	}
 	// item count
@@ -685,128 +652,127 @@ func (p *Page) SetPageData(d *[PAGE_SIZE_BYTES]byte) error {
 }
 
 // Synchronizes keys, values and  page IDs in node to items in Page
-func (p *Page) Sync(lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
-	if len(lsn) != LSN_SIZE_BYTE {
-		return DiskioError{Message: fmt.Sprintf("Invalid LSN length. Got length %d, expected length %d", len(lsn), LSN_SIZE_BYTE)}
-	}
-
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	fmt.Println("(Sync) IN SYNC ==> ")
-	fmt.Println("(Sync) PAGE ID ==> ", p.PageId)
-	fmt.Println("(Sync) KEYS ==> ", keys)
-	fmt.Println("(Sync) VALS ==> ", vals)
-	fmt.Println("(Sync) IN CHILDREN ==> ", pageIds)
-	fmt.Println("(Sync) RIGHT CHILD ==> ", rightSibling)
-	fmt.Println("(Sync) LEFT CHILD ==> ", leftSibling)
-
-	// FIX: Remove debug code below
-	isinternal, e := p.IsInternal()
-
-	if e != nil {
-		panic(e)
-	}
-
-	fmt.Println("(Sync) IS INTERNAL ==> ", isinternal)
-
-	// update LSN
-	p.LSN = lsn
-
-	if p.Header.IsSet(Dead) {
-		// Dead page, scheduled for deletion
-		fmt.Println("DEAD PAGE, SCHEDULED FOR DELETION.....")
-		// Mark page as dirty
-		p.Header.setFlag(Dirty)
-		return nil
-	}
-
-	isInternal := len(pageIds) > 0
-
-	var keySize int
-	var valSize int
-	var cellPtrWriteOff int
-	cellPtrData := make([]byte, CELL_POINTER_SIZE_BYTE)
-	startOffs := PAGE_SIZE_BYTES - LOWER_PADDING_BYTES
-
-	if isInternal {
-		for i, k := range keys {
-			keySize = len(k)
-			cellSize := 13 + int32(keySize)
-			off := int32(startOffs) - cellSize
-
-			cellData := make([]byte, cellSize)
-			// populate cell data
-			binary.LittleEndian.PutUint32(cellData[1:5], uint32(keySize))
-			binary.LittleEndian.PutUint32(cellData[5:9], uint32(0))
-			binary.LittleEndian.PutUint32(cellData[9:13], uint32(pageIds[i]))
-			copy(cellData[13:(13+keySize)], k)
-
-			// populate cell pointer data
-			cellPtrData[0] = 0
-			binary.LittleEndian.PutUint32(cellPtrData[1:5], uint32(off))
-
-			// add to page data
-			cellPtrWriteOff = HEADER_SIZE_BYTES + (i * CELL_POINTER_SIZE_BYTE)
-			copy(p.pgeData[cellPtrWriteOff:cellPtrWriteOff+CELL_POINTER_SIZE_BYTE], cellPtrData)
-			copy(p.pgeData[off:int(off)+len(cellData)], cellData)
-
-			startOffs = int(off)
-
-			cellData = nil
-		}
-
-		// update right ptr
-		p.Header.UpdateRightPtr(pageIds[len(pageIds)-1])
-	} else {
-		// leaf node
-		for i, k := range keys {
-			keySize = len(k)
-			valSize = len(vals[i])
-			cellSize := 13 + int32(len(k)) + int32(len(vals[i]))
-
-			off := int32(startOffs) - cellSize
-
-			cellData := make([]byte, cellSize)
-
-			// populate cell data
-			binary.LittleEndian.PutUint32(cellData[1:5], uint32(keySize))
-			binary.LittleEndian.PutUint32(cellData[5:9], uint32(valSize))
-			binary.LittleEndian.PutUint32(cellData[9:13], uint32(0))
-			copy(cellData[13:(13+keySize)], k)
-			copy(cellData[13+keySize:(13+keySize+valSize)], vals[i])
-
-			// populate cell pointer data
-			cellPtrData[0] = 0
-			binary.LittleEndian.PutUint32(cellPtrData[1:5], uint32(off))
-
-			// add cells to pgeData
-			cellPtrWriteOff = HEADER_SIZE_BYTES + (i * CELL_POINTER_SIZE_BYTE)
-			copy(p.pgeData[cellPtrWriteOff:cellPtrWriteOff+CELL_POINTER_SIZE_BYTE], cellPtrData)
-			copy(p.pgeData[off:int(off)+len(cellData)], cellData)
-
-			startOffs = int(off)
-			cellData = nil
-
-		}
-	}
-
-	lowerOff := HEADER_SIZE_BYTES + (CELL_POINTER_SIZE_BYTE * len(keys))
-
-	p.Header.updateUpperOffset(uint32(startOffs))
-	p.Header.updateLowerOffset(uint32(lowerOff))
-	p.Header.updateItemCount(int32(len(keys)))
-	p.Header.updateFreeSpace(int32(startOffs) - int32(lowerOff))
-	// update siblings
-	p.Header.updateRightSibling(rightSibling)
-	p.Header.updateLeftSibling(leftSibling)
-	// Mark page as dirty
-	p.Header.setFlag(Dirty)
-
-	// add updated Header
-	copy(p.pgeData[:HEADER_SIZE_BYTES], p.Header.toBytes())
-
-	return nil
-}
+// func (p *Page) Sync(lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
+// 	if len(lsn) != LSN_SIZE_BYTE {
+// 		return DiskioError{Message: fmt.Sprintf("Invalid LSN length. Got length %d, expected length %d", len(lsn), LSN_SIZE_BYTE)}
+// 	}
+//
+// 	p.rmu.Lock()
+// 	defer p.rmu.Unlock()
+// 	fmt.Println("(Sync) IN SYNC ==> ")
+// 	fmt.Println("(Sync) PAGE ID ==> ", p.PageId)
+// 	fmt.Println("(Sync) KEYS ==> ", keys)
+// 	fmt.Println("(Sync) VALS ==> ", vals)
+// 	fmt.Println("(Sync) IN CHILDREN ==> ", pageIds)
+// 	fmt.Println("(Sync) RIGHT CHILD ==> ", rightSibling)
+// 	fmt.Println("(Sync) LEFT CHILD ==> ", leftSibling)
+//
+// 	isinternal, e := p.IsInternal()
+//
+// 	if e != nil {
+// 		panic(e)
+// 	}
+//
+// 	fmt.Println("(Sync) IS INTERNAL ==> ", isinternal)
+//
+// 	// update LSN
+// 	p.LSN = lsn
+//
+// 	if p.Header.IsSet(Dead) {
+// 		// Dead page, scheduled for deletion
+// 		fmt.Println("DEAD PAGE, SCHEDULED FOR DELETION.....")
+// 		// Mark page as dirty
+// 		p.Header.setFlag(Dirty)
+// 		return nil
+// 	}
+//
+// 	isInternal := len(pageIds) > 0
+//
+// 	var keySize int
+// 	var valSize int
+// 	var cellPtrWriteOff int
+// 	cellPtrData := make([]byte, CELL_POINTER_SIZE_BYTE)
+// 	startOffs := PAGE_SIZE_BYTES - LOWER_PADDING_BYTES
+//
+// 	if isInternal {
+// 		for i, k := range keys {
+// 			keySize = len(k)
+// 			cellSize := 13 + int32(keySize)
+// 			off := int32(startOffs) - cellSize
+//
+// 			cellData := make([]byte, cellSize)
+// 			// populate cell data
+// 			binary.LittleEndian.PutUint32(cellData[1:5], uint32(keySize))
+// 			binary.LittleEndian.PutUint32(cellData[5:9], uint32(0))
+// 			binary.LittleEndian.PutUint32(cellData[9:13], uint32(pageIds[i]))
+// 			copy(cellData[13:(13+keySize)], k)
+//
+// 			// populate cell pointer data
+// 			cellPtrData[0] = 0
+// 			binary.LittleEndian.PutUint32(cellPtrData[1:5], uint32(off))
+//
+// 			// add to page data
+// 			cellPtrWriteOff = HEADER_SIZE_BYTES + (i * CELL_POINTER_SIZE_BYTE)
+// 			copy(p.pgeData[cellPtrWriteOff:cellPtrWriteOff+CELL_POINTER_SIZE_BYTE], cellPtrData)
+// 			copy(p.pgeData[off:int(off)+len(cellData)], cellData)
+//
+// 			startOffs = int(off)
+//
+// 			cellData = nil
+// 		}
+//
+// 		// update right ptr
+// 		p.Header.UpdateRightPtr(pageIds[len(pageIds)-1])
+// 	} else {
+// 		// leaf node
+// 		for i, k := range keys {
+// 			keySize = len(k)
+// 			valSize = len(vals[i])
+// 			cellSize := 13 + int32(len(k)) + int32(len(vals[i]))
+//
+// 			off := int32(startOffs) - cellSize
+//
+// 			cellData := make([]byte, cellSize)
+//
+// 			// populate cell data
+// 			binary.LittleEndian.PutUint32(cellData[1:5], uint32(keySize))
+// 			binary.LittleEndian.PutUint32(cellData[5:9], uint32(valSize))
+// 			binary.LittleEndian.PutUint32(cellData[9:13], uint32(0))
+// 			copy(cellData[13:(13+keySize)], k)
+// 			copy(cellData[13+keySize:(13+keySize+valSize)], vals[i])
+//
+// 			// populate cell pointer data
+// 			cellPtrData[0] = 0
+// 			binary.LittleEndian.PutUint32(cellPtrData[1:5], uint32(off))
+//
+// 			// add cells to pgeData
+// 			cellPtrWriteOff = HEADER_SIZE_BYTES + (i * CELL_POINTER_SIZE_BYTE)
+// 			copy(p.pgeData[cellPtrWriteOff:cellPtrWriteOff+CELL_POINTER_SIZE_BYTE], cellPtrData)
+// 			copy(p.pgeData[off:int(off)+len(cellData)], cellData)
+//
+// 			startOffs = int(off)
+// 			cellData = nil
+//
+// 		}
+// 	}
+//
+// 	lowerOff := HEADER_SIZE_BYTES + (CELL_POINTER_SIZE_BYTE * len(keys))
+//
+// 	p.Header.updateUpperOffset(uint32(startOffs))
+// 	p.Header.updateLowerOffset(uint32(lowerOff))
+// 	p.Header.updateItemCount(int32(len(keys)))
+// 	p.Header.updateFreeSpace(int32(startOffs) - int32(lowerOff))
+// 	// update siblings
+// 	p.Header.updateRightSibling(rightSibling)
+// 	p.Header.updateLeftSibling(leftSibling)
+// 	// Mark page as dirty
+// 	p.Header.setFlag(Dirty)
+//
+// 	// add updated Header
+// 	copy(p.pgeData[:HEADER_SIZE_BYTES], p.Header.toBytes())
+//
+// 	return nil
+// }
 
 // resets the  Page details
 func (p *Page) Clear() error {
@@ -825,7 +791,7 @@ func (p *Page) Clear() error {
 
 // Flushes page content to disk(does not call sync())
 // Sends number of bytes written to channel b
-func (d *DiskManager) flushPage(p *Page, b chan int32, lsnChan chan []byte) {
+func (d *DiskManager) flushPage(p *Page, b chan int32, lsnChan chan [LSN_SIZE_BYTE]byte) {
 	fmt.Println("(flushPage) Flushing page...")
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
@@ -870,7 +836,7 @@ func (d *DiskManager) flushPage(p *Page, b chan int32, lsnChan chan []byte) {
 			panic("Could not add page to freelist")
 		}
 
-		fmt.Println("CLEARED PAGE ", p.Header.PageId)
+		fmt.Println("CLEARED PAGE ", p.PageId)
 
 		// send to channel
 		b <- int32(n)
@@ -886,9 +852,7 @@ func (d *DiskManager) flushPage(p *Page, b chan int32, lsnChan chan []byte) {
 	// set stored in disk flag and offset to lookup table
 	d.incrementFlushedPages()
 	// write page to disk
-	p.Header.mu.RLock()
-	offs := p.Header.PageId * PAGE_SIZE_BYTES
-	p.Header.mu.RUnlock()
+	offs := p.PageId * PAGE_SIZE_BYTES
 
 	fmt.Println("WRITING TO OFFSET: ", offs)
 
@@ -902,25 +866,16 @@ func (d *DiskManager) flushPage(p *Page, b chan int32, lsnChan chan []byte) {
 		panic("Could not write page")
 	}
 
-	fmt.Printf("WRITTEN PAGE %d to DISK\n", p.Header.PageId)
+	fmt.Printf("WRITTEN PAGE %d to DISK\n", p.PageId)
 
-	// Unmark as dirty
-	// p.Header.unsetFlag(5)
 	// set stored to disk flag
-	fmt.Println("SETTING FLAG...")
-	p.Header.setFlag(Written)
-	fmt.Println("SET FLAG SUCCESSFULLY...")
+	helpers.SetFlag(&p.pgeData[0], Written)
 	// send to channel
-	fmt.Println("SENDING BYTES TO CHANNEL....")
 	b <- int32(n)
-	fmt.Println("SENDING SEQNO TO CHANNEL....")
-	fmt.Println("LSNCHAN -> ", lsnChan)
 	if lsnChan != nil {
 		lsnChan <- seqNo
 	}
 	fmt.Println("SUCCESSFULLY SEND DATA TO CHANNELS....")
-
-	return
 }
 
 // Check whether the page represents an internal node
@@ -928,224 +883,51 @@ func (p *Page) IsInternal() (bool, error) {
 	p.rmu.RLock()
 	defer p.rmu.RUnlock()
 
-	return helpers.BitIsSet(p.pgeData[HEADER_SIZE_BYTES], IsInternal), nil
+	return helpers.BitIsSet(&p.pgeData[0], IsInternal), nil
 }
 
-func (p *Page) IsDirty() (bool, error) {
-	p.rmu.RLock()
-	defer p.rmu.RUnlock()
-
-	return helpers.BitIsSet(p.pgeData[HEADER_SIZE_BYTES], Dirty), nil
+func (p *Page) UpdateUpperOffset(off uint32) {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	binary.LittleEndian.PutUint32(p.pgeData[25:29], off)
 }
 
-// returns keys,  values and children from pgeData []byte and error if any
-func (p *Page) GetCellData() (keys [][]byte, vals [][]byte, children []int32, rightPtr int32, err error) {
-	p.rmu.RLock()
-	defer p.rmu.RUnlock()
-
-	p.Header.mu.RLock()
-	itemCount := p.Header.Items
-	isInternal := p.Header.IsSet(IsInternal)
-	rightChild := p.Header.RightChild
-	// rightSib := p.Header.RightSibling
-	// leftSib := p.Header.LeftSibling
-	p.Header.mu.RUnlock()
-
-	var cellOff uint32
-	var keySize uint32
-	var valSize uint32
-	var pageId uint32
-
-	fmt.Println("(GetCellData) ITEM COUNT => ", itemCount)
-	k := make([][]byte, itemCount)
-	v := make([][]byte, 0)
-	child := make([]int32, 0)
-
-	for i := range itemCount {
-		// read cell offset data
-		cellOff = binary.LittleEndian.Uint32(p.pgeData[HEADER_SIZE_BYTES+(i*CELL_POINTER_SIZE_BYTE)+1 : HEADER_SIZE_BYTES+(i*CELL_POINTER_SIZE_BYTE)+CELL_POINTER_SIZE_BYTE])
-
-		// read cell data
-		keySize = binary.LittleEndian.Uint32(p.pgeData[cellOff+1 : cellOff+5])
-		valSize = binary.LittleEndian.Uint32(p.pgeData[cellOff+5 : cellOff+9])
-
-		if isInternal {
-			pageId = binary.LittleEndian.Uint32(p.pgeData[cellOff+9 : cellOff+13])
-
-			child = append(child, int32(pageId))
-		} else {
-			val := p.pgeData[cellOff+13+keySize : cellOff+13+keySize+valSize]
-			v = append(v, val)
-		}
-
-		key := p.pgeData[cellOff+13 : cellOff+13+keySize]
-		fmt.Println("(Get Cell data) KEY TO ADD => ", key)
-		k[i] = key
-		fmt.Println("(Get Cell data) Keys after adding =>", k)
-
-	}
-
-	return k, v, child, rightChild, nil
+func (p *Page) UpdateLowerOffset(off uint32) {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	binary.LittleEndian.PutUint32(p.pgeData[29:31], off)
 }
 
-// Convert items in cell to byte array
-func (c *Cell) toBytes() []byte {
-	cellSize := 13 + c.KeySize + c.ValueSize
-	totBytes := make([]byte, cellSize)
-
-	// Flags
-	totBytes[0] = c.Flags[0]
-
-	// KeySize, ValueSize, PageId
-	binary.LittleEndian.PutUint32(totBytes[1:5], uint32(c.KeySize))
-	binary.LittleEndian.PutUint32(totBytes[5:9], uint32(c.ValueSize))
-	binary.LittleEndian.PutUint32(totBytes[9:13], uint32(c.PageId))
-
-	placeHolder := append([]byte{}, c.Key...)
-	//  totBytes = append(append([]byte{}, totBytes[13:]...), append(placeHolder, totBytes[13+c.KeySize:]...)...)
-
-	totBytes = append(totBytes[:13], append(placeHolder, totBytes[13+c.KeySize:]...)...)
-
-	valPlaceholder := append([]byte{}, c.Value...)
-	// totBytes = append(append([]byte{}, totBytes[13+c.KeySize:]...), append(valPlaceholder, totBytes[:13+c.KeySize+c.ValueSize]...)...)
-
-	totBytes = append(totBytes[:13+c.KeySize], append(valPlaceholder, totBytes[13+c.KeySize+c.ValueSize:]...)...)
-
-	fmt.Printf("CELL WITH KEY SIZE %d and VAL SIZE %d : %v\n", c.KeySize, c.ValueSize, totBytes)
-
-	return totBytes
+func (p *Page) UpdateItemCount(count int32) {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	binary.LittleEndian.PutUint32(p.pgeData[17:21], uint32(count))
 }
 
-func (p *CellPointer) toBytes() []byte {
-	totbytes := make([]byte, 5)
-
-	// fmt.Println("FLAG BYTES ===============================================================================> ", p.Flags)
-	totbytes[0] = p.Flags[0]
-
-	binary.LittleEndian.PutUint32(totbytes[1:], uint32(p.offset))
-
-	fmt.Println("CEL PONTER BTES ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++> ", totbytes)
-	return totbytes
+func (p *Page) UpdateFreeSpace(free int32) {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	binary.LittleEndian.PutUint32(p.pgeData[21:25], uint32(free))
 }
 
-// // Convert page header to bytes
-// func (h *PageHeader) toBytes() []byte {
-// 	h.mu.RLock()
-// 	defer h.mu.RUnlock()
-//
-// 	headerBytes := make([]byte, HEADER_SIZE_BYTES)
-//
-// 	headerBytes[0] = h.Flags
-// 	binary.LittleEndian.PutUint32(headerBytes[1:5], uint32(h.PageId))
-// 	copy(headerBytes[5:17], h.LSN)
-// 	binary.LittleEndian.PutUint32(headerBytes[17:21], uint32(h.Items))
-// 	binary.LittleEndian.PutUint32(headerBytes[21:25], uint32(h.FreeSpace))
-// 	binary.LittleEndian.PutUint32(headerBytes[25:29], uint32(h.UpperOffset))
-// 	binary.LittleEndian.PutUint32(headerBytes[29:33], uint32(h.LowerOffset))
-// 	binary.LittleEndian.PutUint32(headerBytes[33:37], uint32(h.MagicNumber))
-// 	binary.LittleEndian.PutUint16(headerBytes[37:39], uint16(h.Checksum))
-// 	binary.LittleEndian.PutUint32(headerBytes[39:43], uint32(h.RightChild))
-// 	binary.LittleEndian.PutUint32(headerBytes[43:47], uint32(h.RightSibling))
-// 	binary.LittleEndian.PutUint32(headerBytes[47:], uint32(h.LeftSibling))
-//
-// 	fmt.Println("HEADER TO BYTES => ", headerBytes)
-//
-// 	return headerBytes
-// }
-
-// set page header flag at provided position(1 - 7)
-func (h *PageHeader) setFlag(pos int) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var mask byte
-	mask = 1 << byte(pos)
-
-	fmt.Println("MASK -> ", mask)
-
-	// set flag (bitwise OR)
-	h.Flags |= mask
+func (p *Page) UpdateRightSibling(pageId uint32) {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	binary.LittleEndian.PutUint32(p.pgeData[43:47], pageId)
 }
 
-func (h *PageHeader) unsetFlag(pos int) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var mask byte
-	mask = 1 << byte(pos)
-
-	// unset flag (^AND)
-	h.Flags = h.Flags & (^mask)
+func (p *Page) UpdateLeftSibling(pageId uint32) {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	binary.LittleEndian.PutUint32(p.pgeData[47:51], pageId)
 }
 
-// Check if flag is et
-func (h *PageHeader) IsSet(pos int) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+func (p *Page) SetLSN(lsn []byte) {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
 
-	var mask byte
-	mask = 1 << byte(pos)
-
-	// Check if set
-	r := h.Flags & mask
-
-	return r > 0
-}
-
-func (h *PageHeader) updateUpperOffset(off uint32) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.UpperOffset = int32(off)
-}
-
-func (h *PageHeader) updateLowerOffset(off uint32) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.LowerOffset = int32(off)
-}
-
-func (h *PageHeader) updateItemCount(count int32) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.Items = count
-}
-
-func (h *PageHeader) updateFreeSpace(free int32) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.FreeSpace = free
-}
-
-func (h *PageHeader) updateRightSibling(pageId uint32) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.RightSibling = int32(pageId)
-}
-
-func (h *PageHeader) updateLeftSibling(pageId uint32) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.LeftSibling = int32(pageId)
-}
-
-func (h *PageHeader) markAsDead() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.setFlag(Dead)
-}
-
-func (h *PageHeader) setLSN(lsn []byte) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	h.LSN = lsn
-}
-
-func (h *PageHeader) getLSN() []byte {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	l := h.LSN
-
-	return l
+	copy(p.LSN[:], lsn)
+	copy(p.pgeData[5:17], lsn)
 }
 
 func (q *JobQueue) run() {
@@ -1167,7 +949,7 @@ func (q *JobQueue) run() {
 
 			fmt.Println("(run) is running -> ", q.running)
 			return // all jobs done
-		} else if len(q.jobs) < 0 {
+		} else if len(q.jobs) == 0 {
 			panic("Invalid state. Length of jobs is negative")
 		}
 
@@ -1189,7 +971,6 @@ func (q *JobQueue) addJob(job IOReq) {
 	q.mu.Unlock()
 	fmt.Println("(addJob) Should start running? -> ", shouldStart)
 
-	// FIX: Remove debug code below
 	q.mu.Lock()
 	fmt.Println("(addJob) Queue running -> ", q.running)
 	q.mu.Unlock()
@@ -1223,39 +1004,43 @@ func (r *IOReq) execute() {
 	fmt.Println("(execute) diskmanager.execute() DONE.")
 }
 
-// Generates new page header for test purpose only
-func newTestPageHeader(pgeId int32, rightPtr int32) *PageHeader {
-	h := PageHeader{
-		Flags:       byte(32), // 0010000
-		PageId:      pgeId,
-		Items:       0,
-		FreeSpace:   PAGE_SIZE_BYTES - HEADER_SIZE_BYTES,
-		UpperOffset: PAGE_SIZE_BYTES - LOWER_PADDING_BYTES,
-		LowerOffset: HEADER_SIZE_BYTES,
-		RightChild:  rightPtr,
-	}
-
-	return &h
-}
+// // Generates new page header for test purpose only
+// func newTestPageHeader(pgeId int32, rightPtr int32) *PageHeader {
+// 	h := PageHeader{
+// 		Flags:       byte(32), // 0010000
+// 		PageId:      pgeId,
+// 		Items:       0,
+// 		FreeSpace:   PAGE_SIZE_BYTES - HEADER_SIZE_BYTES,
+// 		UpperOffset: PAGE_SIZE_BYTES - LOWER_PADDING_BYTES,
+// 		LowerOffset: HEADER_SIZE_BYTES,
+// 		RightChild:  rightPtr,
+// 	}
+//
+// 	return &h
+// }
 
 // Generates new page for test use only
 func NewTestPage(pageId int32) *Page {
-	h := newTestPageHeader(pageId, 0)
 	p := Page{
-		Header:  h,
+		LSN:     [LSN_SIZE_BYTE]byte{},
 		pgeData: [PAGE_SIZE_BYTES]byte{},
+		PageId:  0,
+		Flags:   0x32,
 	}
 
 	return &p
 }
 
-func NewDiskManager() *DiskManager {
+func NewDiskManager(config DiskManagerConfig) (*DiskManager, error) {
 	fmt.Println("IN INIT()")
-	// InitLookupTable()
+	if len(config.dataFile) == 0 {
+		return nil, DiskioError{Message: "data file path not provided"}
+	}
+
 	PgFreeList := NewFreeList()
 	PgFreeList.loadFreeList()
 
-	fd, err := os.OpenFile("data", os.O_CREATE|os.O_RDWR, 0644)
+	fd, err := os.OpenFile(config.dataFile, os.O_CREATE|os.O_RDWR, 0644)
 
 	if err != nil {
 		fmt.Println("ERR while opening file")
@@ -1304,7 +1089,7 @@ func NewDiskManager() *DiskManager {
 		// Flush
 		err = diskManager.fd.Sync()
 
-		return diskManager
+		return diskManager, nil
 	}
 
 	// fmt.Println("CONTENT ==> ", metadataPage)
@@ -1328,13 +1113,13 @@ func NewDiskManager() *DiskManager {
 		// traverse
 		diskManager.startupTraversal(int32(rootPgeID))
 
-		return diskManager
+		return diskManager, nil
 	}
 
 	fmt.Println("DISKBTREE ROOT NODE => ", diskManager.RootPage)
 	fmt.Println("Initialized d....")
 
-	return diskManager
+	return diskManager, nil
 }
 
 func newJobQueue(pageId uint32) *JobQueue {

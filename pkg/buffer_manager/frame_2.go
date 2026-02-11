@@ -19,38 +19,37 @@ type counter struct {
 }
 
 type Entry struct { //alias: Frame
-	isInternal atomic.Bool
-	isDeleted  atomic.Bool
-	isDirty    atomic.Bool
-	lsn        [LSN_SIZE]byte
+	// 8K page. Memory initialized manually
+	page       diskio.Page  // 8240 bytes
+	mu         sync.RWMutex //  24 bytes
+	lsn        [12]byte     // 12 bytes
+	isInternal atomic.Bool  // 4 bytes
+	isDeleted  atomic.Bool  // 4 bytes
+	isDirty    atomic.Bool  // 4 bytes
 
 	// reference bit. Set when an item is accessed and unset by clock hand when
 	// looking for an item to evict
-	ref atomic.Bool
+	ref atomic.Bool // 4 bytes
 
 	// access bit. set when an entry is accessed(pinned) and unset during unpinning
 	// When this item is set the reference bit cannot be unset. The clock hand will
 	// advance past an entry with it's access bit set
-	acc atomic.Bool
+	acc atomic.Bool // 4 bytes
 
 	// Prev and Next links. Remain constant after initialization
-	prev *Entry
-	next *Entry
+	prev *Entry // 8 bytes
+	next *Entry // 8 bytes
 
+	counters counter // 16 bytes
 	// if its allocated
-	isOccupied atomic.Bool
-	counters   counter
+	isOccupied atomic.Bool // 4 bytes
+
 	//  metadata
-	meta metadata
+	meta metadata // 4 bytes
 
-	// 8K page. Mamory initialized manually
-	page diskio.Page
-
-	// Pointer to menually allocated memory address used to free memory.
+	// Pointer to manually allocated memory address used to free memory.
 	// Remains constant after initialization.
-	CPtr unsafe.Pointer
-
-	mu sync.RWMutex
+	CPtr unsafe.Pointer // 8 bytes
 }
 
 func (c *counter) addPinCount() {
