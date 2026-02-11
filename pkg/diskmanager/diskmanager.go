@@ -962,17 +962,9 @@ func (q *JobQueue) run() {
 }
 
 func (q *JobQueue) addJob(job IOReq) {
-	fmt.Println("(addJob) adding job to queue")
-	fmt.Println("(addJob) Acquiring queue lock....")
 	q.mu.Lock()
-	fmt.Println("(addJob) Acquired queue lock....")
 	q.jobs = append(q.jobs, job)
 	shouldStart := !q.running
-	q.mu.Unlock()
-	fmt.Println("(addJob) Should start running? -> ", shouldStart)
-
-	q.mu.Lock()
-	fmt.Println("(addJob) Queue running -> ", q.running)
 	q.mu.Unlock()
 
 	if shouldStart {
@@ -1004,30 +996,16 @@ func (r *IOReq) execute() {
 	fmt.Println("(execute) diskmanager.execute() DONE.")
 }
 
-// // Generates new page header for test purpose only
-// func newTestPageHeader(pgeId int32, rightPtr int32) *PageHeader {
-// 	h := PageHeader{
-// 		Flags:       byte(32), // 0010000
-// 		PageId:      pgeId,
-// 		Items:       0,
-// 		FreeSpace:   PAGE_SIZE_BYTES - HEADER_SIZE_BYTES,
-// 		UpperOffset: PAGE_SIZE_BYTES - LOWER_PADDING_BYTES,
-// 		LowerOffset: HEADER_SIZE_BYTES,
-// 		RightChild:  rightPtr,
-// 	}
-//
-// 	return &h
-// }
-
 // Generates new page for test use only
 func NewTestPage(pageId int32) *Page {
 	p := Page{
 		LSN:     [LSN_SIZE_BYTE]byte{},
 		pgeData: [PAGE_SIZE_BYTES]byte{},
-		PageId:  0,
+		PageId:  uint32(pageId),
 		Flags:   0x32,
 	}
 
+	binary.LittleEndian.PutUint32(p.pgeData[1:5], p.PageId)
 	return &p
 }
 
@@ -1091,8 +1069,6 @@ func NewDiskManager(config DiskManagerConfig) (*DiskManager, error) {
 
 		return diskManager, nil
 	}
-
-	// fmt.Println("CONTENT ==> ", metadataPage)
 
 	// read root node Page ID
 	rootPgeID := binary.LittleEndian.Uint32(metadataPage[0:4])

@@ -5,6 +5,7 @@ FREE_LIST="data_fl"
 WAL_PATH="bb.wal"
 CONFIG_PATH="bb_config"
 LOG_PATH="baobab.log"
+TEST_PATH="./..."
 
 run:
 	@[ -e $(BIN_PATH) ] && rm $(BIN_PATH) || echo ""
@@ -24,6 +25,6 @@ build:
 	@go build -race -o $(BIN_PATH)
 	@echo "✅ built binary at $(BIN_PATH)"
 test:
-	@go test ./...
+	@go test -v $(TEST_PATH)
 inspect-page:
 	@go run cmd/pager/main.go $(PAGE)
