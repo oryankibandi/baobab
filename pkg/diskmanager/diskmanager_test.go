@@ -140,6 +140,7 @@ func TestWritePageConcurrent(t *testing.T) {
 	for i, v := range pages {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			t.Run(fmt.Sprintf("test_write_%d", i), func(t *testing.T) {
 				<-start
 				wrChan := make(chan int32)
@@ -162,7 +163,6 @@ func TestWritePageConcurrent(t *testing.T) {
 						t.Errorf("Writing to disk timed out after %v", testTimeout)
 					}
 				}
-				wg.Done()
 			})
 		}()
 	}
@@ -254,6 +254,7 @@ func TestReadPage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
 	var readPage *Page
 
+	// wait for read to complete, or time limit to run out.
 loop:
 	for {
 		select {
@@ -321,8 +322,177 @@ loop:
 
 }
 
+func TestReadWriteConcurrent(t *testing.T) {
+	pageCount := 200
+	cellPerPage := 50
+
+	var wg sync.WaitGroup
+	var currPageId int32 = 1
+
+	dir := t.TempDir()
+	dbFile := filepath.Join(dir, "baobab.db")
+	config := DiskManagerConfig{dataFile: dbFile}
+
+	dm, err := NewDiskManager(config)
+	if err != nil || dm == nil {
+		t.Fatal("Could not initiate disk manager")
+	}
+	defer dm.Close()
+
+	// write pages
+	pages := make([]*Page, 0)
+	for range pageCount {
+		p := NewTestPage(currPageId)
+
+		// Add tuples
+		cellData := make([]byte, 13)
+		cellOffset := make([]byte, CELL_POINTER_SIZE_BYTE)
+		currOff := PAGE_SIZE_BYTES - LOWER_PADDING_BYTES
+		itemCount := binary.LittleEndian.Uint32(p.pgeData[17:21])
+		for i := range cellPerPage {
+			key := fmt.Appendf(make([]byte, 0), "key_%d", i)
+			val := fmt.Appendf(make([]byte, 0), "val_%d", i)
+			klen := len(key)
+			vlen := len(val)
+
+			cellData[0] = 0x32
+			binary.LittleEndian.PutUint32(cellData[1:5], uint32(klen))
+			binary.LittleEndian.PutUint32(cellData[5:9], uint32(vlen))
+			cellData = append(cellData, key...)
+			cellData = append(cellData, val...)
+
+			currOff -= len(cellData)
+			copy(p.pgeData[currOff:(currOff+len(cellData))], cellData)
+
+			// add cell offset
+			binary.LittleEndian.PutUint32(cellOffset[1:5], uint32(currOff))
+			startOff := HEADER_SIZE_BYTES + (i * CELL_POINTER_SIZE_BYTE)
+			copy(p.pgeData[startOff:startOff+CELL_POINTER_SIZE_BYTE], cellOffset)
+
+			// increase count
+			itemCount++
+			binary.LittleEndian.PutUint32(p.pgeData[17:21], itemCount)
+
+			cellData = make([]byte, 13)
+		}
+
+		pages = append(pages, p)
+		currPageId++
+	}
+
+	writeStart := make(chan struct{})
+	for i, pge := range pages {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			t.Run(fmt.Sprintf("testreadwriteconcurr_write_%d", i), func(t *testing.T) {
+				<-writeStart
+				wrChan := make(chan int32)
+				err = dm.WriteReq(pge, pge.PageId, wrChan, nil)
+				if err != nil {
+					t.Fatalf("Expected no error on WriteReq, got %s", err.Error())
+				}
+
+				testTimeout := 200
+				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
+
+			loop:
+				for {
+					select {
+					case n := <-wrChan:
+						cancel()
+						t.Logf("Written %d bytes", n)
+						break loop
+					case <-ctx.Done():
+						t.Errorf("Writing to disk timed out after %v", testTimeout)
+					}
+				}
+			})
+		}()
+	}
+
+	close(writeStart)
+	wg.Wait()
+
+	// read page content
+	readStart := make(chan struct{})
+	for i, pge := range pages {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			t.Run(fmt.Sprintf("testreadwriteconcurr_read_%d", i), func(t *testing.T) {
+				<-readStart
+				pageChan := make(chan *Page)
+				err = dm.ReadReq(pge.PageId, &pageChan)
+				if err != nil {
+					t.Fatalf("Expected no error while reading page, got %s", err.Error())
+				}
+
+				testTimeout := 200
+				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
+				var readPage *Page
+
+				// wait for read to complete, or time limit to run out.
+			loop:
+				for {
+					select {
+					case readPage = <-pageChan:
+						cancel()
+						break loop
+					case <-ctx.Done():
+						t.Fatalf("Writing to disk timed out after %v", testTimeout)
+					}
+				}
+
+				if readPage == nil {
+					t.Fatalf("Expected read page, got nil")
+				}
+
+				if len(readPage.pgeData) < PAGE_SIZE_BYTES {
+					t.Fatalf("no data in read page")
+				}
+
+				// check page contents
+				t.Run("test_read", func(t *testing.T) {
+					// item count
+					c := binary.LittleEndian.Uint32(readPage.pgeData[17:21])
+
+					for i := range c {
+						// read offset, ignore flags(initial byte)
+						cellOff := binary.LittleEndian.Uint32(
+							readPage.pgeData[HEADER_SIZE_BYTES+(i*CELL_POINTER_SIZE_BYTE)+1 : HEADER_SIZE_BYTES+(i*CELL_POINTER_SIZE_BYTE)+CELL_POINTER_SIZE_BYTE])
+
+						if cellOff == 0 {
+							t.Fatalf("Invalid cell offset: %d", cellOff)
+						}
+
+						// read tuple at offset
+						key, val, err := readTuple(readPage, cellOff)
+						if err != nil {
+							t.Fatal(err.Error())
+						}
+
+						kExpected := fmt.Sprintf("key_%d", i)
+						vExpected := fmt.Sprintf("val_%d", i)
+						if string(key) != kExpected {
+							t.Fatalf("Expected key %s, got %s, %v", kExpected, key, key)
+						}
+
+						if string(val) != vExpected {
+							t.Fatalf("Expected val %s, got %s", vExpected, val)
+						}
+					}
+				})
+
+			})
+		}()
+	}
+
+	close(readStart)
+	wg.Wait()
+}
+
 func readTuple(p *Page, offset uint32) (k []byte, v []byte, err error) {
-	fmt.Println("Reading tuple from offset: ", offset)
 	kSize := binary.LittleEndian.Uint32(p.pgeData[offset+1 : offset+5])
 	vSize := binary.LittleEndian.Uint32(p.pgeData[offset+5 : offset+9])
 
