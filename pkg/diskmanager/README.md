@@ -72,6 +72,14 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
  +------------------------------------------------------------------------------------------------+
  ```
 
+### Cell Pointer
+```bash
+0        1         5
++--------+---------+
+| Flags  | Offset  |
++--------+---------+
+```
+
 ## Flags
 
 ### Page Header Flags
