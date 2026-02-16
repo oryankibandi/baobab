@@ -251,6 +251,7 @@ func (d *DiskManager) WriteReq(page *Page, pageId uint32, written chan int32, ls
 	return nil
 }
 
+// Calls fsync() on buffered contents.
 func (d *DiskManager) ForceFlush() {
 	if d == nil || d.fd == nil {
 		return

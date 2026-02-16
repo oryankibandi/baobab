@@ -6,7 +6,7 @@ import (
 	"unsafe"
 
 	"github.com/oryankibandi/baobab/internal/manual"
-	diskio "github.com/oryankibandi/baobab/pkg/disk_io"
+	diskmanager "github.com/oryankibandi/baobab/pkg/diskmanager"
 )
 
 type metadata struct {
@@ -20,36 +20,43 @@ type counter struct {
 
 type Entry struct { //alias: Frame
 	// 8K page. Memory initialized manually
-	page       diskio.Page  // 8240 bytes
-	mu         sync.RWMutex //  24 bytes
-	lsn        [12]byte     // 12 bytes
-	isInternal atomic.Bool  // 4 bytes
-	isDeleted  atomic.Bool  // 4 bytes
-	isDirty    atomic.Bool  // 4 bytes
+	page       diskmanager.Page // 8240 bytes
+	lsn        [diskmanager.LSN_SIZE_BYTE]byte
+	isInternal atomic.Bool
+	isDeleted  atomic.Bool
+	isDirty    atomic.Bool
 
 	// reference bit. Set when an item is accessed and unset by clock hand when
 	// looking for an item to evict
-	ref atomic.Bool // 4 bytes
+	ref atomic.Bool
 
 	// access bit. set when an entry is accessed(pinned) and unset during unpinning
 	// When this item is set the reference bit cannot be unset. The clock hand will
 	// advance past an entry with it's access bit set
-	acc atomic.Bool // 4 bytes
+	acc atomic.Bool
 
 	// Prev and Next links. Remain constant after initialization
-	prev *Entry // 8 bytes
-	next *Entry // 8 bytes
+	prev *Entry
+	next *Entry
 
-	counters counter // 16 bytes
+	counters counter
 	// if its allocated
-	isOccupied atomic.Bool // 4 bytes
+	isOccupied atomic.Bool
 
 	//  metadata
-	meta metadata // 4 bytes
+	meta metadata
 
 	// Pointer to manually allocated memory address used to free memory.
 	// Remains constant after initialization.
-	CPtr unsafe.Pointer // 8 bytes
+	CPtr unsafe.Pointer
+
+	// segment type
+	segType SegmentType
+
+	// Mutex field. In 32 bit systems it is 12 bytes in size
+	// hence will add a padding and should be ordered as the last
+	// item to make byte positioning predictable.
+	mu sync.RWMutex
 }
 
 func (c *counter) addPinCount() {
@@ -160,74 +167,65 @@ func (e *Entry) getKey() uint32 {
 	return e.meta.key
 }
 
-func (e *Entry) GetPage() *diskio.Page {
+func (e *Entry) getSegType() SegmentType {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	return e.segType
+}
+
+func (e *Entry) GetPage() *diskmanager.Page {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	return &e.page
 }
 
-// sets data on a fram from a page entry
-func (e *Entry) SetData(p *diskio.Page) error {
+// sets data on a frame/entry from a page
+func (e *Entry) SetData(p *diskmanager.Page) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	isIntern, err := p.IsInternal()
-
 	if err != nil {
 		return err
 	}
 
+	// entry metadata
 	e.isInternal.Store(isIntern)
-
 	e.isDeleted.Store(false)
 	e.isDirty.Store(true)
-	copy(e.lsn[:], p.GetLSN())
+	e.isOccupied.Store(true)
 
+	pgelsn := p.GetLSN()
+	copy(e.lsn[:], pgelsn[:])
+
+	// entry clock metadata
 	e.ref.Store(false)
 	e.acc.Store(false)
 
-	e.isOccupied.Store(true)
+	e.meta.key = uint32(p.PageId)
 
-	e.meta.key = uint32(p.Header.PageId)
-
-	e.page = diskio.Page{
-		Header: diskio.PageHeader{},
-	}
-
-	// copy header details
-	e.page.Header.Flags = p.Header.Flags
-	e.page.Header.PageId = p.Header.PageId
-	e.page.Header.Items = p.Header.Items
-	e.page.Header.FreeSpace = p.Header.FreeSpace
-	e.page.Header.UpperOffset = p.Header.UpperOffset
-	e.page.Header.LowerOffset = p.Header.LowerOffset
-	e.page.Header.MagicNumber = p.Header.MagicNumber
-	e.page.Header.Checksum = p.Header.Checksum
-	e.page.Header.RightChild = p.Header.RightChild
-	e.page.Header.RightSibling = p.Header.RightSibling
-	e.page.Header.LeftSibling = p.Header.LeftSibling
-	copy(e.page.Header.LSN, p.Header.LSN)
-
-	// copy page data
+	// page data
+	e.page = diskmanager.Page{}
 	pData, err := p.GetPageByteData()
-
 	if err != nil {
 		return err
 	}
 
 	err = e.page.SetPageData(pData)
-
 	if err != nil {
 		return err
 	}
 
-	// assigning e.page only copies normal primitives, for strings
-	// and slices only a pointer to their headers are copied.
-	e.page.GetLSN()
+	// pageId & Flags
+	e.page.PageId = p.PageId
+	e.page.Flags = p.Flags
+
+	// clear page so that it can be garbage collected
+	p = nil
 
 	return nil
-
 }
 
 // func (e *Entry) GetData() [ENTRY_SIZE]byte {
@@ -267,15 +265,22 @@ func (e *Entry) Clear() error {
 	return nil
 }
 
+func (e *Entry) updateSegment(seg SegmentType) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.segType != seg {
+		e.segType = seg
+	}
+}
+
 // Returns a pointer to new entry
 // To reduce pressure on the GC and improve performance, memory is allocated manually via calloc().
 // This memory also needs to be freed after use to avoid memory leaks.
 // In a storage engine's buffer manager, this memory will be initialized at startup and reused as blocks are paged-in and evicted.
 func NewEntry() *Entry {
 	p := manual.Alloc(unsafe.Sizeof(Entry{}))
-
 	e := (*Entry)(p)
-
 	e.CPtr = p
 
 	return e

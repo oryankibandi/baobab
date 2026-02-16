@@ -9,7 +9,7 @@ import (
 	"log"
 	"sync"
 
-	diskmanager "github.com/oryankibandi/baobab/pkg/disk_io"
+	diskmanager "github.com/oryankibandi/baobab/pkg/diskmanager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
@@ -22,12 +22,8 @@ const (
 	LSN_SIZE          = 12
 )
 
-// var BCache *Cache
-
-// type CacheType int
-
 type Cache struct {
-	CacheMap    map[uint32]*Frame
+	CacheMap    map[uint32]*Entry
 	wTinyLfu    *WTinyLfu
 	rmu         sync.RWMutex
 	frameCount  uint32
@@ -37,76 +33,35 @@ type Cache struct {
 }
 
 // Adds a page to cache, setting k as key. k is the unique page ID.
-func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
+func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Entry, error) {
 	fmt.Println("cache.Put")
 	c.rmu.Lock()
 
-	// FIX: Remove debug code below
-	fmt.Println("(cache.put()) PUT NEW PAGE ============================================================================================> ", k)
-
-	fmt.Println("")
-
-	// formattedKey := toKey(k)
-	// internal page
-	isInternal, err := p.IsInternal()
-
-	if err != nil {
-		return nil, err
-	}
-
 	var delKeys []uint32
+	var val *Entry
 
-	item := Frame{
-		page:       p,
-		Key:        k,
-		IsInternal: isInternal,
-	}
-
-	// A newly created page will be marked as dirty so the background
-	// writer can flush it to disk
-	if dirty {
-		err = c.MarkFrameDirty(&item)
-
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	lsn := p.GetLSN()
-	// set lsn
-	item.lsn = lsn
-
-	// Check if item already exists
 	val, ok := c.CacheMap[k]
 	if !ok {
 		// First time entry
 		log.Println("First Entry, adding to window cache----------------")
-		// item.UpdateCacheType(Window)
-
-		c.CacheMap[k] = &item
-
-		// add to lru
-		delKeys, err = c.wTinyLfu.AddItem(&item)
-
+		// add to wtinylfu
+		newEntr, dKeys, err := c.wTinyLfu.AddItem(p, dirty)
 		if err != nil {
 			panic(err)
 		}
 
+		delKeys = dKeys
+		c.CacheMap[k] = newEntr
 	} else {
 		// update value
-		log.Println("Item Exists, incrementing count........")
-		log.Println("EXISTING FRAME PREV ====================> ", val.prev)
-		log.Println("EXISTING FRAME NEXT ====================>", val.next)
-
-		val.UpdatePage(p)
+		err := val.SetData(p)
+		if err != nil {
+			return nil, err
+		}
 
 		// increment count
-		c.wTinyLfu.Increment(&item)
+		c.wTinyLfu.Increment(val)
 	}
-
-	// if err != nil {
-	// 	panic(err.Error())
-	// }
 
 	// If there are items that have been evicted, delete them from map
 	if len(delKeys) > 0 {
@@ -121,21 +76,11 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 	log.Println("Printing stats ....")
 	c.rmu.Unlock()
 	go c.wTinyLfu.Stat()
-	return &item, nil
-}
-
-func (c *Cache) RemoveItemFromLru(f *Frame) error {
-	err := c.wTinyLfu.handlePinFrame(f)
-
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return val, nil
 }
 
 // 2. Retrieve item from cache
-func (c *Cache) Get(pageId uint32) (*Frame, error) {
+func (c *Cache) Get(pageId uint32) (*Entry, error) {
 	fmt.Println("(Get) Obtaining lock for cache...")
 	c.rmu.RLock()
 	fmt.Println("(Get) Obtained lock for cache...")
@@ -145,9 +90,10 @@ func (c *Cache) Get(pageId uint32) (*Frame, error) {
 	if ok {
 		// increment count & pin frame
 		fmt.Println("Item found, doing a GetIncrement()")
-		c.wTinyLfu.GetIncrement(val)
+		c.wTinyLfu.Increment(val)
 		c.rmu.RUnlock()
 
+		val.Reference()
 		return val, nil
 	} else {
 		// Retrieve item from disk
@@ -175,132 +121,26 @@ func (c *Cache) Get(pageId uint32) (*Frame, error) {
 			return nil, errors.New("No item found")
 		}
 
-		fmt.Println("(Get) Frame not found, read from disk...")
-
-		// remove frame from LRU & Pin
-		err = c.wTinyLfu.handlePinFrame(f)
-
 		if err != nil {
 			panic(err)
 		}
 
+		f.Reference()
 		return f, nil
 	}
 }
 
-// Releases a frame in use by unpinning and reinserting to LRU.
-// Called when a thread is done with a frame
-func (c *Cache) ReleaseFrame(f *Frame, flushed bool) error {
-	log.Println("READDING TO LRU --> ", f)
-	del, delKeys, err := c.wTinyLfu.reAddToLru(f, flushed)
-
-	if err != nil {
-		return err
-	}
-
-	if del && delKeys != nil && len(delKeys) > 0 {
-		fmt.Println("DELETING FRAME FROM LRU ----> ")
-		// flush and delete keys
-		for _, k := range delKeys {
-			c.rmu.Lock()
-			err := c.Delete(k, true)
-			c.rmu.Unlock()
-
-			if err != nil {
-				panic(err)
-			}
-		}
-	}
-
-	return nil
-}
-
-// Releases a frame in use by unpinning and reinserting to LRU.
-// Called when a thread is done with a frame
-// func (c *Cache) ReleaseFrame(f *Frame) error {
-// 	fmt.Println("(ReleaseFrame) Obtaining lock....")
-// 	c.rmu.Lock()
-// 	defer c.rmu.Unlock()
-//
-// 	fmt.Println("Unpinning Fram...e")
-// 	addToLru, err := f.UnpinFrame()
-// 	cType := f.GetCacheType()
-//
-// 	if err != nil {
-// 		return err
-// 	}
-//
-// 	fmt.Println("ADD BACK TO LRU ==> ", addToLru)
-//
-// 	if addToLru {
-// 		switch cType {
-// 		case lru.Probation:
-// 			fmt.Println("ADDING TO PROBATION.....")
-// 			// err = c.probationCache.ReAddFrame(f)
-// 			c.probationCache.Add(f)
-// 		case lru.Protected:
-// 			fmt.Println("ADDING TO PROTETED.....")
-// 			// err = c.protectedCache.ReAddFrame(f)
-// 			c.protectedCache.Add(f)
-// 			fmt.Println("ADDED TO PROTECTED.....")
-// 		default:
-// 			fmt.Println("ADDING TO WINDOW.....")
-// 			// err = c.windowCache.ReAddFrame(f)
-// 			c.windowCache.Add(f)
-// 		}
-// 	}
-//
-// 	if err != nil {
-// 		return err
-// 	}
-// 	fmt.Println("Unpinned frame.....")
-//
-// 	return nil
-// }
-
-// Traverses the DLL and prints all keys
-//func (c *Cache[K]) Traverse() {
-//	if c.windowCache.Count <= 0 {
-//		return
-//	}
-//
-//	start := c.windowCache.Head
-//
-//	log.Println("-------------------------------------------------------------------------------------------")
-//	for start != nil {
-//		if start.Next != nil {
-//			fmt.Printf("%s -> ", string(start.Item.Key[:]))
-//		} else {
-//			fmt.Printf("%s \n", string(start.Item.Key[:]))
-//		}
-//
-//		start = start.Next
-//	}
-//	log.Println("-------------------------------------------------------------------------------------------")
-//}
-
 // Delete an item from cache. flush parameter is set to true if it's a direct request from client. If bgwriter, it is false since the page is already flushed.
 func (c *Cache) Delete(key uint32, flush bool) error {
-	// c.rmu.Lock()
-	// defer c.rmu.Unlock()
-	// fKey := toKey(key)
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
 	val, ok := c.CacheMap[key]
-
 	if !ok {
 		return BufferManagerError{Message: "No key in cache"}
 	}
 
-	// fVal := val.(*lru.LRUNode[CacheItem[K]])
-
-	err := c.wTinyLfu.deleteFromLru(val)
-
-	if err != nil {
-		return err
-	}
-
-	// TODO: Check if frame is dirty
-	if flush {
-		err = c.prepareForEviction(val)
+	if flush && val.isDirty.Load() {
+		err := c.prepareForEviction(val)
 		fmt.Println("(Delete) prepared for eviction...")
 
 		if err != nil {
@@ -338,7 +178,7 @@ func (c *Cache) MarkFrameDirty(f *Frame) error {
 
 // Creates a new frame and assigns page ID to frame with provided keys and values/child
 // SetAsRoot parameter ensures to set
-func (c *Cache) CreateNewEntry(lsn []byte, keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Frame, error) {
+func (c *Cache) CreateNewEntry(lsn []byte, keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Entry, error) {
 	// create page
 	pgeId, pge, err := c.diskManager.NewPage(lsn, keys, values, childPageIds, setAsRoot)
 
@@ -362,15 +202,8 @@ func (c *Cache) CreateNewEntry(lsn []byte, keys [][]byte, values *([][]byte), ch
 
 	// Add to buffer
 	log.Println("Adding new page to cache...")
-	f, err := c.put(uint32(pge.Header.PageId), pge, true)
-	log.Printf("Added new page to cache. Page ID: %d\nframe -> %v", pge.Header.PageId, f)
-
-	// Set LSN
-	err = f.UpdatePageLSN(lsn)
-
-	if err != nil {
-		panic(err)
-	}
+	f, err := c.put(uint32(pgeId), pge, true)
+	log.Printf("Added new page to cache. Page ID: %d\nframe -> %v", pge.PageId, f)
 
 	return f, nil
 }
@@ -381,7 +214,7 @@ func (c *Cache) flushWritten() {
 }
 
 // Prepares page for eviction by flushing page to disk
-func (c *Cache) prepareForEviction(f *Frame) error {
+func (c *Cache) prepareForEviction(f *Entry) error {
 	log.Println("lru.PrepareForEviction()")
 	if f == nil {
 		return BufferManagerError{"Provided frame is nil."}
@@ -389,7 +222,7 @@ func (c *Cache) prepareForEviction(f *Frame) error {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.isDirty {
+	if !f.isDirty.Load() {
 		// frame not dirty, skip flushing to disk
 		fmt.Println("(prepareForEviction) frame not dirty, skipping flushing")
 
@@ -398,19 +231,14 @@ func (c *Cache) prepareForEviction(f *Frame) error {
 
 	ch := make(chan int32)
 	// lsnChan := make(chan []byte)
-	err := c.diskManager.WriteReq(f.page, f.Key, ch, nil)
+	err := c.diskManager.WriteReq(&f.page, f.getKey(), ch, nil)
 
 	if err != nil {
 		panic(err.Error())
 	}
 
 	n := <-ch
-
-	log.Printf("(PrepareForEviction) Flushed %d bytes of page %d\n", n, f.Key)
-
-	// l := <-lsnChan
-	// fmt.Println("Received LSN -> ", l)
-
+	fmt.Printf("Written %d bytes\n", n)
 	return nil
 }
 
@@ -484,28 +312,30 @@ func (c *Cache) Close() error {
 }
 
 // Create new cache instance\n windowSize, probationSize and protectedSize are sized of the individual segments
-func NewCache(windowSize uint64, mainCacheSize uint64, wal *wal.WAL) (*Cache, error) {
-	if windowSize <= 0 {
-		return nil, errors.New("Window size must be greater than 0")
+func NewCache(cacheSize uint64, wal *wal.WAL, config diskmanager.DiskManagerConfig) (*Cache, error) {
+	if cacheSize <= 0 {
+		return nil, errors.New("cache size must be greater than 0")
 	}
 
-	if mainCacheSize <= 0 {
-		return nil, errors.New("Main cache size must be greater than 0")
-	}
-
-	w, err := NewWTinylfu(windowSize, mainCacheSize)
-
+	windSize := uint64(float64(0.01) * float64(cacheSize))
+	mainSize := uint64(float64(0.99) * float64(cacheSize))
+	w, err := NewWTinylfu(windSize, mainSize)
 	if err != nil {
 		panic(err)
 	}
 
 	dList := NewDirtyPageList()
 
+	diskMan, err := diskmanager.NewDiskManager(config)
+	if err != nil {
+		panic(err)
+	}
+
 	n := Cache{
-		CacheMap:    make(map[uint32]*Frame),
+		CacheMap:    make(map[uint32]*Entry),
 		wTinyLfu:    w,
 		diryList:    dList,
-		diskManager: diskmanager.NewDiskManager(),
+		diskManager: diskMan,
 	}
 
 	// create new background writer

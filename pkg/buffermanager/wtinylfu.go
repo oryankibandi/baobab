@@ -3,8 +3,10 @@ package buffermanager
 import (
 	"fmt"
 	"log"
+	"sync"
 
 	tiny "github.com/oryankibandi/baobab/internal/tinylfu"
+	"github.com/oryankibandi/baobab/pkg/diskmanager"
 )
 
 const (
@@ -13,38 +15,44 @@ const (
 	protectedSegment
 )
 
-type SegmentType int
+type SegmentType uint64
 
 type WTinyLfu struct {
-	windowCache    *clock
-	probationCache *clock
-	protectedCache *clock
-	tinyFilter     *tiny.TinyLFU
+	cBuffer    *clock
+	tinyFilter *tiny.TinyLFU
+	// count
+	windowCount    uint64
+	probationCount uint64
+	protectedCount uint64
+
+	// capacity
+	windowCapacity    uint64
+	probationCapacity uint64
+	protectedCapacity uint64
+
+	mu sync.RWMutex
+	wg sync.WaitGroup
 }
 
-// Increments count of an item in TinyLFU. If item is in probation, it is promoted to protected. If any cache is full one of it's items is evicted.
-func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
+// Increments count of an item in TinyLFU.
+// If item is in probation, it is promoted to protected. If any cache is full one of it's items is evicted.
+// Returns true if operation is successful, else false and the error
+func (w *WTinyLfu) Increment(f *Entry) (bool, error) {
 	if f == nil {
 		panic("(Increment) frame is required")
 	}
 
-	cType := f.GetCacheType()
+	cType := f.getSegType()
 
-	switch cType {
-	case Probation:
+	if cType == probationSegment {
 		// promote to protected.
 		err := w.promoteToProtected(f)
-
 		if err != nil {
-			panic(err)
+			return false, err
 		}
-	case Protected:
-		w.protectedCache.SetMostRecent(f)
-	default:
-		w.windowCache.SetMostRecent(f)
 	}
 
-	k := f.GetKey()
+	k := f.getKey()
 
 	go func(key []byte) {
 		err := w.tinyFilter.IncrementItem(key)
@@ -54,159 +62,100 @@ func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
 		}
 	}(toBytes(k))
 
-	return false, nil
-}
-
-// Increments count from a Get request.
-// A Get request is different in that a frame will be pinned(removed from LRU)
-// hence there is no need to move it to head of LRU as it will be readded during
-// unpinning.
-func (w *WTinyLfu) GetIncrement(f *Frame) error {
-	fmt.Println("GET INCREMENT --> ", f)
-	cType := f.GetCacheType()
-
-	if cType == Probation {
-		// promote to protected.
-		err := w.promoteToProtected(f)
-
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	k := f.GetKey()
-
-	// Increment count in TinyLFU
-	go func(key []byte) {
-		err := w.tinyFilter.IncrementItem(key)
-
-		if err != nil {
-			panic(err)
-		}
-	}(toBytes(k))
-
-	w.handlePinFrame(f)
-
-	fmt.Println("REMOVED FROM LRU...")
-
-	return nil
-}
-
-// Removes frame from the respective LRU list. Called during pinning.
-func (w *WTinyLfu) handlePinFrame(f *Frame) error {
-	cType := f.GetCacheType()
-
-	switch cType {
-	case Window:
-		w.windowCache.RemoveFrame(f)
-	case Protected:
-		w.protectedCache.RemoveFrame(f)
-	case Probation:
-		w.probationCache.RemoveFrame(f)
-	default:
-		log.Println("No LRU associated with frame.")
-	}
-	fmt.Println("(handlePinFrame) DONE.")
-
-	return nil
+	return true, nil
 }
 
 // Promotes an item from probation to protected
-func (w *WTinyLfu) promoteToProtected(f *Frame) error {
-	fmt.Println("wtinylfu.PromoteToProtected()")
-	cType := f.GetCacheType()
+func (w *WTinyLfu) promoteToProtected(f *Entry) error {
+	if f == nil {
+		return BufferManagerError{Message: "frame to promote no provided"}
+	}
 
-	if cType != Probation {
+	fmt.Println("wtinylfu.PromoteToProtected()")
+	cType := f.getSegType()
+
+	if cType != probationSegment {
 		return WTinyLFUError{Message: "(promoteToProtected) Only frames in probation LRU can be promoted to protected LRU."}
 	}
 
-	// update cache type
-	f.UpdateCacheType(Protected)
-
-	// check if frame is currently pinned
-	referenced := f.GetPinCount() > 0
-
-	// remove from probationCache and reset pointers
-	if !referenced {
-		err := w.probationCache.Delete(f)
-
-		if err != nil {
-			return err
-		}
-
-		f.setPtrs(nil, nil)
-	}
-
-	if w.protectedCache.lruIsFull() {
-		// remove LRU item from protected
-		protVictim := w.protectedCache.Pop()
-
-		fmt.Println("(promoteToProtected) protected victim -> ", protVictim)
-		// add protected segment victim to probation
-		protVictim.UpdateCacheType(Probation)
-		fmt.Println("(promoteToProtected) ADDING PROTECTED CACHE VICTIM  TO CACHE -> ", protVictim)
-		w.probationCache.Add(protVictim)
-
-		if !referenced {
-			// add candidate to protected
-			w.protectedCache.Add(f)
-		}
+	if w.protectedCount < w.protectedCapacity {
+		// protected segment not full
+		f.updateSegment(protectedSegment)
+		w.probationCount--
+		w.protectedCount++
 	} else {
-		if !referenced {
-			// add candidate to protected
-			w.protectedCache.Add(f)
+		protectedVictim := w.cBuffer.EvictWithoutClearing(protectedSegment)
+
+		if protectedVictim == nil {
+			return BufferManagerError{Message: "Could not find eligible victim."}
 		}
+
+		protectedVictim.updateSegment(probationSegment)
+		f.updateSegment(protectedSegment)
 	}
 
 	return nil
 }
 
 // Evicts an item from the window cache. This is called when the w-cache is full.
+// If main cache is full, compares victims from main cache and window cache
+// and evicts the one  with a lesser count.
 func (w *WTinyLfu) evictWindow() ([]uint32, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var windVictim *Entry
+	var probationVictim *Entry
+
+	probationFull := w.probationCount < w.probationCapacity
 	fmt.Println("w.evictWindow()")
 	fmt.Println("EVICTING WINDOW CACHE...")
-	if !w.windowCache.lruIsFull() {
-		log.Printf("(evictWindow) Window Cache Is Not Full: COUNT -> %d\t CAPACITY -> %d\n", w.windowCache.getCount(), w.windowCache.getCapacity())
+	if w.windowCount < w.windowCapacity {
+		log.Printf("(evictWindow) Window Cache Is Not Full: COUNT -> %d\t CAPACITY -> %d\n", w.windowCount, w.windowCapacity)
 		return nil, WTinyLFUError{Message: "Window cache is not full"}
 	}
 
-	fmt.Println("Pop() tail  item in window cache....")
-	windVictim := w.windowCache.Pop()
-	fmt.Println("(evictWindow) WindowVictim -> ", windVictim)
+	if probationFull {
+		w.wg.Add(2)
+		go func(e *Entry) {
+			e = w.cBuffer.EvictWithoutClearing(windowSegment)
+			w.wg.Done()
+		}(windVictim)
+
+		go func(e *Entry) {
+			e = w.cBuffer.EvictWithoutClearing(probationSegment)
+			w.wg.Done()
+		}(probationVictim)
+
+		w.wg.Wait()
+	} else {
+		// item can be moved to probation segment
+		windVictim = w.cBuffer.EvictWithoutClearing(windowSegment)
+
+		windVictim.updateSegment(probationSegment)
+		w.probationCount++
+		w.windowCount++
+
+		return nil, nil
+	}
 
 	if windVictim == nil {
-		// all items pinned, borrow frame
-		w.windowCache.borrow()
-
-		return nil, nil
+		return nil, BufferManagerError{Message: "Unable to find window victim(all frames in use)."}
 	}
 
-	fmt.Println("(w.evictWindow()) windVictim not nil, evicting...")
-
-	// If main cache not full, send window victim to main cache
-	if !w.probationCache.lruIsFull() {
-		// add window victim to main cache
-		fmt.Println("(evictWindow) PROBATION NOT FULL, ADDING WINDOW VICTIM TO CACHE -> ", windVictim)
-		w.probationCache.Add(windVictim)
-
-		return nil, nil
-	}
-
-	mainCacheVictim := w.probationCache.Pop()
-
-	if mainCacheVictim == nil {
-		panic("No main victim in probation segment")
+	if probationVictim == nil && probationFull {
+		return nil, BufferManagerError{Message: "Unable to find probation victim(all frames in use)."}
 	}
 
 	// compare counts of window victim and main cache victim
-	windKey := windVictim.GetKey()
+	windKey := windVictim.getKey()
 	windCount, err := w.tinyFilter.CheckItemCount(toBytes(windKey))
 
 	if err != nil {
 		return nil, err
 	}
 
-	mainKey := mainCacheVictim.GetKey()
+	mainKey := probationVictim.getKey()
 	mainCacheCount, err := w.tinyFilter.CheckItemCount(toBytes(mainKey))
 
 	if err != nil {
@@ -217,97 +166,45 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	var delKeys []uint32
 
 	if windCount > mainCacheCount {
-		// evict & forget main cache item
-		// err = c.Delete(mainCacheVictim.GetKey(), false)
-
-		// if err != nil {
-		// 	panic(err)
-		// }
 		delKeys = append(delKeys, mainKey)
 
 		// Add window victim to probation
-		windVictim.UpdateCacheType(Probation)
-		fmt.Println("ADDING WINDOW VICTIM TO PROBATION -> ", windVictim)
-		w.probationCache.Add(windVictim)
-	} else {
-		// evict and forget window cache item
-		//	err = c.Delete(windVictim.GetKey(), false)
-
-		//	if err != nil {
-		//		panic(err)
-		//	}
-
-		// readd the main cache victim to probation cache
-		err = w.probationCache.Add(mainCacheVictim)
-
+		err = w.cBuffer.addToBpool(probationVictim)
 		if err != nil {
 			panic(err)
 		}
+
+		windVictim.updateSegment(probationSegment)
+		w.windowCount--
+	} else {
+		err = w.cBuffer.addToBpool(windVictim)
+		if err != nil {
+			panic(err)
+		}
+
 		delKeys = append(delKeys, windKey)
+		w.windowCount--
 	}
 
 	return delKeys, nil
 }
 
-// Evict an item from main cache(probation). Called when protected is full.
-func (w *WTinyLfu) evictMainCache() error {
-	if !w.protectedCache.lruIsFull() {
-		return WTinyLFUError{Message: "protected cache is not full"}
-	}
-
-	if w.probationCache.lruIsFull() {
-		// evict item from probation if full.
-		w.probationCache.Pop()
-	}
-
-	protVictim := w.protectedCache.Pop()
-
-	if protVictim == nil {
-		panic("No protected victim.")
-	}
-
-	// add victim of protected to probation
-	fmt.Println("ADDING PROTECTED CACHE VICTIM  TO CACHE -> ", protVictim)
-	w.probationCache.Add(protVictim)
-
-	return nil
-}
-
-//
-// func (w *WTinyLfu) RemoveItemFromLru(f *Frame) error {
-// 	if f == nil {
-// 		panic("(RemoveItemFromLru)frame is required")
-// 	}
-//
-// 	cType := f.GetCacheType()
-//
-// 	switch cType {
-// 	case Window:
-// 		w.windowCache.RemoveFrame(f)
-// 	case Protected:
-// 		w.protectedCache.RemoveFrame(f)
-// 	default:
-// 		w.probationCache.RemoveFrame(f)
-// 	}
-//
-// 	return nil
-// }
-
 // Adds a new item to Cache.
 // By default, all new items are added to the window cache.
 // If window segment is full, an item is evicted or added to main cache
 // Returns a slice of uint32 keys that have been evicted and error if any
-func (w *WTinyLfu) AddItem(f *Frame) ([]uint32, error) {
-	if f == nil {
+func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Entry, evictedKIds []uint32, errr error) {
+	if p == nil {
 		panic("(AddItem)frame is required")
 	}
 
-	f.UpdateCacheType(Window)
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	// keys that might be evicted if window is full
 	var evictKeys []uint32
 	var err error
-	if w.windowCache.lruIsFull() {
+	if w.windowCount == w.windowCapacity {
 		fmt.Println("(cache.AddItem()) WindowCache Is Full, evicting...")
 		// evict window cache first
 		evictKeys, err = w.evictWindow()
@@ -317,101 +214,34 @@ func (w *WTinyLfu) AddItem(f *Frame) ([]uint32, error) {
 		}
 	}
 
-	err = w.windowCache.Add(f)
+	// retrieve empty entry slot and add new page data
+	e := w.cBuffer.Pop()
+	if e == nil {
+		return nil, nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
+	}
 
+	e.updateSegment(windowSegment)
+
+	err = e.SetData(p)
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
 
-	return evictKeys, nil
-}
-
-func (w *WTinyLfu) deleteFromLru(f *Frame) error {
-	cType := f.GetCacheType()
-
-	switch cType {
-	case Protected:
-		fmt.Println("(Protected) Evicting... ")
-		w.protectedCache.Delete(f)
-	case Probation:
-		fmt.Println("(Probation) Evicting: ")
-		w.probationCache.Delete(f)
-	default:
-		fmt.Println("(Window) Evicting: ")
-		w.windowCache.Delete(f)
+	if isDirty {
+		e.MarkDirty()
 	}
 
-	return nil
-}
-
-// Readds frame `f` to LRU. Called during unpinning.
-// If the lru list the frame is a part of has borrowed frames,
-// decrement borrowed frames return del=true.
-// `flushed` indicates whether the frame has already been flushed, in
-// which case there is no need to return borrowed frames and evict the
-// window segment. This is true when the requests comes from the background
-// writer.
-func (w *WTinyLfu) reAddToLru(f *Frame, flushed bool) (del bool, deletedKeys []uint32, err error) {
-	cType := f.GetCacheType()
-
-	switch cType {
-	case Probation:
-		fmt.Println("READDING TO PROBATION.....")
-		// err = c.probationCache.ReAddFrame(f)
-		w.probationCache.ReAddFrame(f)
-	case Protected:
-		fmt.Println("READDING TO PROTECTED -> ", f)
-		// err = c.protectedCache.ReAddFrame(f)
-		w.protectedCache.ReAddFrame(f)
-		fmt.Println("READDED TO PROTECTED.....")
-	default:
-		fmt.Println("READDING TO WINDOW.....")
-		// Check if has borrowed frames
-		if w.windowCache.hasBorrowedFrames() && !flushed {
-			fmt.Println("HAS BORROWED FRAMES")
-			// do not readd
-			err := w.windowCache.returnBorrowedFrame()
-
-			if err != nil {
-				panic(err)
-			}
-
-			// ReAdd item to head of lru
-			w.windowCache.ReAddFrame(f)
-			// 1f full, evict an item
-			if w.windowCache.lruIsFull() {
-				delKeys, err := w.evictWindow()
-
-				if err != nil {
-					return false, nil, err
-				}
-
-				return true, delKeys, nil
-			}
-
-			return false, nil, nil
-		}
-
-		w.windowCache.ReAddFrame(f)
-	}
-
-	return false, nil, nil
+	return e, evictKeys, nil
 }
 
 // List metadata i.e no. of items in all segments
 func (w *WTinyLfu) Stat() {
-	winCount := w.windowCache.getCount()
-	probCount := w.probationCache.getCount()
-	protCount := w.protectedCache.getCount()
-
-	winCap := w.windowCache.getCapacity()
-	probCap := w.probationCache.getCapacity()
-	protCap := w.protectedCache.getCapacity()
-
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	msg := "------------------------------------------------------------------\n"
-	msg += fmt.Sprintf("WINDOW COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", winCount, w.windowCache.lruIsFull(), winCap, (float64(winCount)/float64(winCap))*100)
-	msg += fmt.Sprintf("PROBATION COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", probCount, w.probationCache.lruIsFull(), probCap, (float64(probCount)/float64(probCap))*100)
-	msg += fmt.Sprintf("PROTECTED COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", protCount, w.protectedCache.lruIsFull(), protCap, (float64(protCount)/float64(protCap))*100)
+	msg += fmt.Sprintf("WINDOW COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", w.windowCount, w.windowCount >= w.windowCapacity, w.windowCapacity, (float64(w.windowCount)/float64(w.windowCapacity))*100)
+	msg += fmt.Sprintf("PROBATION COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", w.probationCount, w.probationCount >= w.probationCapacity, w.probationCapacity, (float64(w.probationCount)/float64(w.probationCapacity))*100)
+	msg += fmt.Sprintf("PROTECTED COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", w.protectedCount, w.protectedCount >= w.protectedCapacity, w.protectedCapacity, (float64(w.protectedCount)/float64(w.protectedCapacity))*100)
 	msg += "------------------------------------------------------------------\n"
 
 	fmt.Println(msg)
@@ -425,26 +255,16 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 		return nil, WTinyLFUError{Message: "Main cache size must be greater than 0"}
 	}
 
-	// initialize clock buffers
-	wClock, err := NewClock(windowSize, windowSegment)
+	cBuff, err := NewClock(windowSize + mainCacheSize)
 	if err != nil {
-		return nil, err
-	}
-
-	probClock, err := NewClock(windowSize, probationSegment)
-	if err != nil {
-		return nil, err
-	}
-
-	protClock, err := NewClock(windowSize, protectedSegment)
-	if err != nil {
-		return nil, err
+		panic(err)
 	}
 
 	w := WTinyLfu{
-		windowCache:    wClock,
-		probationCache: probClock,
-		protectedCache: protClock,
+		cBuffer:        cBuff,
+		windowCount:    windowSize,
+		probationCount: uint64(float64(mainCacheSize) * float64(0.2)),
+		protectedCount: uint64(float64(mainCacheSize) * float64(0.8)),
 		tinyFilter:     tiny.New(),
 	}
 
