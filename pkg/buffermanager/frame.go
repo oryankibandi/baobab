@@ -228,16 +228,18 @@ func (e *Frame) SetData(p *diskmanager.Page) error {
 	return nil
 }
 
-// func (e *Frame) GetData() [ENTRY_SIZE]byte {
-// 	var d [ENTRY_SIZE]byte
-//
-// 	e.mu.RLock()
-// 	defer e.mu.RUnlock()
-//
-// 	copy(d[:], e.Data[:])
-//
-// 	return d
-// }
+func (e *Frame) ByteData() (byteData *[diskmanager.PAGE_SIZE_BYTES]byte, err error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	d, err := e.page.GetPageByteData()
+
+	if err != nil {
+		return nil, err
+	}
+
+	return d, nil
+}
 
 // zeros out the entry and resets all fields
 func (e *Frame) Clear() error {

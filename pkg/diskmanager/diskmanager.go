@@ -2,6 +2,7 @@ package diskmanager
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/oryankibandi/baobab/pkg/helpers"
 )
@@ -264,6 +266,25 @@ func (d *DiskManager) ForceFlush() {
 
 	if err != nil {
 		panic(fmt.Sprintf("Unable to flush to disk: %s", err.Error()))
+	}
+}
+
+func (d *DiskManager) FlushFreeList() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	ch := make(chan int)
+	d.freeList.FlushFreeList(&ch)
+
+	for {
+		select {
+		case n := <-ch:
+			cancel()
+			fmt.Printf("Flushed %d bytes in free list\n", n)
+			return nil
+		case <-ctx.Done():
+			return DiskioError{Message: "Unable to flush free list"}
+		}
 	}
 }
 
