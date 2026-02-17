@@ -216,7 +216,7 @@ func (dp *dPages) addDirtyFrame(f *Frame) {
 	log.Println("Adding frame to dirty list....")
 	dp.mu.RLock()
 	// check hash map
-	fKey := f.GetKey()
+	fKey := f.getKey()
 	log.Printf("Checking if frame (KEY: %d) is in dirty map...\n", fKey)
 	pD, ok := dp.dPageMap[fKey]
 	dp.mu.RUnlock()
@@ -239,7 +239,7 @@ func (dp *dPages) addDirtyFrame(f *Frame) {
 		}
 
 		dp.mu.Lock()
-		dp.dPageMap[f.GetKey()] = &p
+		dp.dPageMap[f.getKey()] = &p
 		dp.mu.Unlock()
 
 		// Add to LRU
@@ -263,7 +263,7 @@ func (dp *dPages) popDirtyPage() *pDirty {
 		return p
 	}
 
-	pgeId := p.frame.GetKey()
+	pgeId := p.frame.getKey()
 
 	if pgeId == 0 {
 		// is nil. return nil page

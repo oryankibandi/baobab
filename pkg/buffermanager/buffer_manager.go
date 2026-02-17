@@ -23,7 +23,7 @@ const (
 )
 
 type Cache struct {
-	CacheMap    map[uint32]*Entry
+	CacheMap    map[uint32]*Frame
 	wTinyLfu    *WTinyLfu
 	rmu         sync.RWMutex
 	frameCount  uint32
@@ -33,17 +33,17 @@ type Cache struct {
 }
 
 // Adds a page to cache, setting k as key. k is the unique page ID.
-func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Entry, error) {
+func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 	fmt.Println("cache.Put")
 	c.rmu.Lock()
 
 	var delKeys []uint32
-	var val *Entry
+	var val *Frame
 
 	val, ok := c.CacheMap[k]
 	if !ok {
 		// First time entry
-		log.Println("First Entry, adding to window cache----------------")
+		log.Println("First Frame, adding to window cache----------------")
 		// add to wtinylfu
 		newEntr, dKeys, err := c.wTinyLfu.AddItem(p, dirty)
 		if err != nil {
@@ -80,7 +80,7 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Entry, error) {
 }
 
 // 2. Retrieve item from cache
-func (c *Cache) Get(pageId uint32) (*Entry, error) {
+func (c *Cache) Get(pageId uint32) (*Frame, error) {
 	fmt.Println("(Get) Obtaining lock for cache...")
 	c.rmu.RLock()
 	fmt.Println("(Get) Obtained lock for cache...")
@@ -169,7 +169,7 @@ func (c *Cache) GetRootPageId() uint32 {
 
 // marks a frame as dirty and adds it to dirty list LRU
 func (c *Cache) MarkFrameDirty(f *Frame) error {
-	f.markDirty()
+	f.MarkDirty()
 	fmt.Println("(MarkDirtyFrame) Adding frame to dirty list")
 	c.diryList.addDirtyFrame(f)
 
@@ -178,7 +178,7 @@ func (c *Cache) MarkFrameDirty(f *Frame) error {
 
 // Creates a new frame and assigns page ID to frame with provided keys and values/child
 // SetAsRoot parameter ensures to set
-func (c *Cache) CreateNewEntry(lsn []byte, keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Entry, error) {
+func (c *Cache) CreateNewFrame(lsn []byte, keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Frame, error) {
 	// create page
 	pgeId, pge, err := c.diskManager.NewPage(lsn, keys, values, childPageIds, setAsRoot)
 
@@ -214,7 +214,7 @@ func (c *Cache) flushWritten() {
 }
 
 // Prepares page for eviction by flushing page to disk
-func (c *Cache) prepareForEviction(f *Entry) error {
+func (c *Cache) prepareForEviction(f *Frame) error {
 	log.Println("lru.PrepareForEviction()")
 	if f == nil {
 		return BufferManagerError{"Provided frame is nil."}
@@ -244,7 +244,7 @@ func (c *Cache) prepareForEviction(f *Entry) error {
 
 // sets the frame's page ID as the new root on the disk manager
 func (c *Cache) SetNewRoot(f *Frame) error {
-	pId := f.GetKey()
+	pId := f.getKey()
 
 	err := c.diskManager.SetAsRoot(int32(pId))
 
@@ -258,41 +258,37 @@ func (c *Cache) SetNewRoot(f *Frame) error {
 // Syncs contents to the frame's associated page.
 // Called when the materialized node has been updated
 // through DELETEs, PUTs, Merges or Splits
-func (c *Cache) SyncFrame(f *Frame, lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
-	if len(lsn) != diskmanager.LSN_SIZE_BYTE {
-		panic(fmt.Errorf("Invalid LSN length. Got length %d, expected length %d", len(lsn), diskmanager.LSN_SIZE_BYTE))
-	}
-
-	f.mu.Lock()
-	if f.page == nil {
-		f.mu.Unlock()
-		return BufferManagerError{Message: "No page associated with frame"}
-	}
-
-	err := f.page.Sync(lsn, keys, vals, pageIds, rightSibling, leftSibling)
-	fmt.Println("DONE SYNCING...")
-
-	if err != nil {
-		f.mu.Unlock()
-		return err
-	}
-
-	// update lsn on frame
-	f.lsn = lsn
-	f.mu.Unlock()
-
-	// mark frame as dirty
-	// f.MarkDirty()
-	fmt.Println("(SyncFrame) MARKING FRAMS AS DIRTY...")
-	err = c.MarkFrameDirty(f)
-	fmt.Println("(SyncFrame) MARKED FRAME AS DIRTY...")
-
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
+// func (c *Cache) SyncFrame(f *Frame, lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
+// 	if len(lsn) != diskmanager.LSN_SIZE_BYTE {
+// 		panic(fmt.Errorf("Invalid LSN length. Got length %d, expected length %d", len(lsn), diskmanager.LSN_SIZE_BYTE))
+// 	}
+//
+// 	f.mu.Lock()
+//
+// 	err := f.page.Sync(lsn, keys, vals, pageIds, rightSibling, leftSibling)
+// 	fmt.Println("DONE SYNCING...")
+//
+// 	if err != nil {
+// 		f.mu.Unlock()
+// 		return err
+// 	}
+//
+// 	// update lsn on frame
+// 	f.lsn = lsn
+// 	f.mu.Unlock()
+//
+// 	// mark frame as dirty
+// 	// f.MarkDirty()
+// 	fmt.Println("(SyncFrame) MARKING FRAMS AS DIRTY...")
+// 	err = c.MarkFrameDirty(f)
+// 	fmt.Println("(SyncFrame) MARKED FRAME AS DIRTY...")
+//
+// 	if err != nil {
+// 		return err
+// 	}
+//
+// 	return nil
+// }
 
 // calls disk manager to flush metadata to metadata page
 func (c *Cache) flushMetadata() error {
@@ -306,6 +302,7 @@ func (c *Cache) flushMetadata() error {
 
 // Safely close down cache
 func (c *Cache) Close() error {
+	c.wTinyLfu.close()
 	c.diskManager.Close()
 
 	return nil
@@ -332,7 +329,7 @@ func NewCache(cacheSize uint64, wal *wal.WAL, config diskmanager.DiskManagerConf
 	}
 
 	n := Cache{
-		CacheMap:    make(map[uint32]*Entry),
+		CacheMap:    make(map[uint32]*Frame),
 		wTinyLfu:    w,
 		diryList:    dList,
 		diskManager: diskMan,

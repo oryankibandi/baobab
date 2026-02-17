@@ -37,7 +37,7 @@ type WTinyLfu struct {
 // Increments count of an item in TinyLFU.
 // If item is in probation, it is promoted to protected. If any cache is full one of it's items is evicted.
 // Returns true if operation is successful, else false and the error
-func (w *WTinyLfu) Increment(f *Entry) (bool, error) {
+func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
 	if f == nil {
 		panic("(Increment) frame is required")
 	}
@@ -66,7 +66,7 @@ func (w *WTinyLfu) Increment(f *Entry) (bool, error) {
 }
 
 // Promotes an item from probation to protected
-func (w *WTinyLfu) promoteToProtected(f *Entry) error {
+func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 	if f == nil {
 		return BufferManagerError{Message: "frame to promote no provided"}
 	}
@@ -104,8 +104,8 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	var windVictim *Entry
-	var probationVictim *Entry
+	var windVictim *Frame
+	var probationVictim *Frame
 
 	probationFull := w.probationCount < w.probationCapacity
 	fmt.Println("w.evictWindow()")
@@ -117,12 +117,12 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 
 	if probationFull {
 		w.wg.Add(2)
-		go func(e *Entry) {
+		go func(e *Frame) {
 			e = w.cBuffer.EvictWithoutClearing(windowSegment)
 			w.wg.Done()
 		}(windVictim)
 
-		go func(e *Entry) {
+		go func(e *Frame) {
 			e = w.cBuffer.EvictWithoutClearing(probationSegment)
 			w.wg.Done()
 		}(probationVictim)
@@ -193,7 +193,7 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 // By default, all new items are added to the window cache.
 // If window segment is full, an item is evicted or added to main cache
 // Returns a slice of uint32 keys that have been evicted and error if any
-func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Entry, evictedKIds []uint32, errr error) {
+func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evictedKIds []uint32, errr error) {
 	if p == nil {
 		panic("(AddItem)frame is required")
 	}
@@ -245,6 +245,16 @@ func (w *WTinyLfu) Stat() {
 	msg += "------------------------------------------------------------------\n"
 
 	fmt.Println(msg)
+}
+
+func (w *WTinyLfu) close() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	err := w.cBuffer.close()
+	if err != nil {
+		panic(err)
+	}
 }
 
 func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {

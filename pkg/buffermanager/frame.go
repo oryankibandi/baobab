@@ -1,362 +1,302 @@
 package buffermanager
 
 import (
-	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
-	diskmanager "github.com/oryankibandi/baobab/pkg/disk_io"
+	"github.com/oryankibandi/baobab/internal/manual"
+	diskmanager "github.com/oryankibandi/baobab/pkg/diskmanager"
 )
 
-// A frame represents a location in the cache/buffer.
-// It holds the 8K page in memory to reduce time taken
-// to retrieve it from disk. It also buffers changes to page before
-// they are persisted to disk by the background writer
+type metadata struct {
+	key uint32
+}
+
+type counter struct {
+	pinCount   atomic.Uint64
+	unpinCount atomic.Uint64
+}
+
 type Frame struct {
-	pins       atomic.Uint32
-	prev       *Frame
-	next       *Frame
-	Key        uint32 // Key is the page ID
-	CacheType  LruType
-	page       *diskmanager.Page
-	isDirty    bool
-	isDeleted  atomic.Bool // If the frame and associated page is marked for  deletion
-	IsInternal bool        // true if is an internal node
-	lsn        []byte      // LSN of last operation. Added when marking as dirty
-	mu         sync.RWMutex
+	// 8K page. Memory initialized manually
+	page       diskmanager.Page // 8240 bytes
+	lsn        [diskmanager.LSN_SIZE_BYTE]byte
+	isInternal atomic.Bool
+	isDeleted  atomic.Bool
+	isDirty    atomic.Bool
+
+	// reference bit. Set when an item is accessed and unset by clock hand when
+	// looking for an item to evict
+	ref atomic.Bool
+
+	// access bit. set when an entry is accessed(pinned) and unset during unpinning
+	// When this item is set the reference bit cannot be unset. The clock hand will
+	// advance past an entry with it's access bit set
+	acc atomic.Bool
+
+	// Prev and Next links. Remain constant after initialization
+	prev *Frame
+	next *Frame
+
+	counters counter
+	// if its allocated
+	isOccupied atomic.Bool
+
+	//  metadata
+	meta metadata
+
+	// Pointer to manually allocated memory address used to free memory.
+	// Remains constant after initialization.
+	CPtr unsafe.Pointer
+
+	// segment type
+	segType SegmentType
+
+	// Mutex field. In 32 bit systems it is 12 bytes in size
+	// hence will add a padding and should be ordered as the last
+	// item to make byte positioning predictable.
+	mu sync.RWMutex
 }
 
-// This is a minimal page struct with items required to materialize a node
-// in the B+ Tree Index
-type PgeMin struct {
-	PageId       uint32
-	Keys         [][]byte
-	Vals         [][]byte
-	Children     []int32
-	RightSibling int32
-	LeftSibling  int32
+func (c *counter) addPinCount() {
+	c.pinCount.Add(1)
 }
 
-// Pins frame. Frame lock should be acquired before calling this method.
-// Updates pointers of adjascent frames as well as the provided frame
-func (f *Frame) pinFrame() error {
-	log.Println("(PinFrame) Obtaining Frame Lock...")
-	//	f.mu.Lock()
-	//	defer f.mu.Unlock()
-	log.Println("(PinFrame) Obtained Frame Lock...")
-	log.Println("CURR FRAME => ", f)
-	if f.pins.Load() == 0 {
-		// first time pin, remove from LRU
-		if f.prev != nil {
-			f.prev.mu.Lock()
-			log.Println("(pinFrame) Obtained lock for prev frame...")
-			// FIX: Remove debug block below
-			if f.prev == f.next {
-				panic(fmt.Errorf("(pinFrame) invalid pointers. f.prev == f.next\nf.prev.prev -> %v \n f.prev -> %v\nf -> %v\nf.next -> %v\nf.next.next -> %v", f.prev.prev, f.prev, f, f.next, f.next.next))
-			}
+func (c *counter) addUnpinCount() {
+	c.unpinCount.Add(1)
+}
 
-			f.prev.next = f.next
-			f.prev.mu.Unlock()
-		}
+func (c *counter) getTotalPins() uint64 {
+	diff := c.pinCount.Load() - c.unpinCount.Load()
 
-		// FIX:: Remove f.next != f condition after bug fix
-		if f.next != nil && f.next == f {
-			panic("(pinFrame) FRAME POINTING TO ITSELF AS NEXT Ptr")
-		}
-
-		if f.next != nil {
-			log.Println("(pinFrame) Geting lock for next frame...->", f.next)
-			f.next.mu.Lock()
-			log.Println("(pinFrame) Obtained lock for next frame...")
-			// FIX:Remove block cde below
-			if f.next == f.prev {
-				panic(fmt.Errorf("(pinFrame) invalid pointers. f.next == f.prev\n f.next -> %v\nf.prev -> %v\nf -> %v", f.next, f.prev, f))
-			}
-
-			f.next.prev = f.prev
-			f.next.mu.Unlock()
-		}
+	if diff < 0 {
+		panic("Invalid pin count")
 	}
 
-	f.pins.Add(1)
-	f.next = nil
-	f.prev = nil
-	fmt.Println("(pinframe) frame after pin -> ", f)
-	log.Println("(pinFrame) DONE.")
-
-	return nil
+	return diff
 }
 
-func (f *Frame) GetKey() uint32 {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
-	k := f.Key
-
-	return k
+func (c *counter) reset() {
+	c.pinCount.Store(0)
+	c.unpinCount.Store(0)
 }
 
-func (f *Frame) GetPage() *diskmanager.Page {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+// Sets the access bit and ref bit of an entry. Called when accessing an entry.
+// The process that uses the entry data is required to call Unreference() when done
+func (e *Frame) Reference() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ref.Store(true)
+	e.acc.Store(true)
 
-	p := f.page
-
-	return p
+	// increment pin count
+	e.counters.addPinCount()
 }
 
-// Decrements pin count and if no other pins exists,
-// returns true if it should be added back to LRU
-func (f *Frame) UnpinFrame() (bool, error) {
-	//	pinCount := f.pins.Load()
-	//	if pinCount <= 0 {
-	//		// already unpinned
-	//		return false, nil
-	//	}
-	//
-	//	f.pins.Store(pinCount - 1)
-	//
-	//	pinCount = f.pins.Load()
-	//
-	//	if pinCount <= 0 {
-	//		return true, nil
-	//	}
-	//
-	//	return false, nil
-
-	fmt.Println("UNPINNING FRAME WITH KEY -> ", f)
-	for {
-		c := f.pins.Load()
-
-		if c <= 0 {
-			log.Println("Pin count <= 0")
-			return false, nil
-		}
-
-		if f.pins.CompareAndSwap(c, c-1) {
-			// if updated pin count is zero, return true
-			return c-1 <= 0, nil
-		}
-	}
-}
-
-func (f *Frame) GetCacheType() LruType {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return f.CacheType
-}
-
-func (f *Frame) UpdatePage(p *diskmanager.Page) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.page = p
-
-	return nil
-}
-
-func (f *Frame) UpdateCacheType(t LruType) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.CacheType = t
-}
-
-func (f *Frame) PageIsDirty() (bool, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	d, err := f.page.IsDirty()
-
-	return d, err
-}
-
-// returns true if the frame is dirty
-func (f *Frame) IsDirty() bool {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
-	d := f.isDirty
-
-	return d
-}
-
-// Set the frame as dirty. This means it  has unflushed changes
-func (f *Frame) markDirty() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.isDirty = true
-	log.Println("(markDirty) Set frame to dirty.....")
-}
-
-// Mark the frame as clean. This means all updates have been flushed.
-func (f *Frame) markClean() {
-	fmt.Println("(markClean) Marking frame as clean...")
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.isDirty = false
-}
-
-// Check if a frame's page is marked for deletion.
-func (f *Frame) PageIsDead() (bool, error) {
-	if f.page == nil {
-		return false, BufferManagerError{Message: "No page associated with frame."}
+func (e *Frame) SetNextLink(n *Frame) {
+	if n == nil {
+		panic("invalid nil entry provided.")
 	}
 
-	// d := f.page.IsDeleted()
-	d := f.isDeleted.Load()
-
-	return d, nil
+	e.next = n
 }
 
-// marks a frame and associated page as dead(to be deleted)
-func (f *Frame) MarkAsDead() error {
-	f.isDeleted.Store(true)
+func (e *Frame) SetPrevLink(p *Frame) {
+	if p == nil {
+		panic("invalid nil entry provided.")
+	}
 
-	err := f.page.MarkAsDead()
+	e.prev = p
+}
 
+func (e *Frame) GetNextLink() *Frame {
+	return e.next
+}
+
+func (e *Frame) GetPrevLink() *Frame {
+	return e.prev
+}
+
+// unreferences an entry. Reduces pin count and if no pins left, unsets access bit.
+func (e *Frame) Unreference() {
+	e.counters.addUnpinCount()
+
+	e.mu.Lock()
+	// check current count
+	p := e.counters.getTotalPins()
+
+	// If no pins, unset access bit
+	if p == 0 {
+		// unset access pin
+		e.acc.Store(false)
+	}
+
+	e.mu.Unlock()
+}
+
+// Returns true if access bit is set, else false
+func (e *Frame) accessBitSet() bool {
+	return e.acc.Load()
+}
+
+// Returns true if access bit is set, else false
+func (e *Frame) refBitSet() bool {
+	return e.ref.Load()
+}
+
+// Mark an entry/frame as dirty
+func (e *Frame) MarkDirty() {
+	e.isDirty.Store(true)
+}
+
+// Mark an entry/frame as clean
+func (e *Frame) MarkClean() {
+	e.isDirty.Store(false)
+}
+
+// Unsets the reference bit. This is exclusively called by the clock replacement algorithm.
+func (e *Frame) unsetRef() {
+	e.ref.Store(false)
+}
+
+func (e *Frame) getKey() uint32 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	return e.meta.key
+}
+
+func (e *Frame) getSegType() SegmentType {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	return e.segType
+}
+
+func (e *Frame) GetPage() *diskmanager.Page {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	return &e.page
+}
+
+// sets data on a frame/entry from a page
+func (e *Frame) SetData(p *diskmanager.Page) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	isIntern, err := p.IsInternal()
 	if err != nil {
 		return err
 	}
 
-	return nil
-}
+	// entry metadata
+	e.isInternal.Store(isIntern)
+	e.isDeleted.Store(false)
+	e.isDirty.Store(true)
+	e.isOccupied.Store(true)
 
-// Gets the minimal items from a page to materialize a node
-func (f *Frame) GetMinPage() (PgeMin, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	if f.page == nil {
-		return PgeMin{}, BufferManagerError{Message: "No page associated with page"}
-	}
+	pgelsn := p.GetLSN()
+	copy(e.lsn[:], pgelsn[:])
 
-	k, v, children, rightPtr, err := f.page.GetCellData()
+	// entry clock metadata
+	e.ref.Store(false)
+	e.acc.Store(false)
 
-	if err != nil {
-		return PgeMin{}, err
-	}
+	e.meta.key = uint32(p.PageId)
 
-	if rightPtr != 0 {
-		children = append(children, rightPtr)
-	}
-
-	// Get Siblings
-	rSib, lSib := f.page.Header.GetSiblngs()
-
-	p := PgeMin{
-		Keys:         k,
-		Vals:         v,
-		PageId:       f.Key,
-		Children:     children,
-		RightSibling: rSib,
-		LeftSibling:  lSib,
-	}
-
-	return p, nil
-}
-
-// Returns true if associated page is an internal node, else false
-func (f *Frame) Internal() bool {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
-	i := f.IsInternal
-
-	return i
-}
-
-// Updates LSN of a frame's attached page
-func (f *Frame) UpdatePageLSN(lsn []byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f.page == nil {
-		return BufferManagerError{Message: "Unable to update page LSN: No page associated with frame"}
-	}
-
-	err := f.page.UpdateLSN(lsn)
-
+	// page data
+	e.page = diskmanager.Page{}
+	pData, err := p.GetPageByteData()
 	if err != nil {
 		return err
 	}
 
-	f.lsn = lsn
+	err = e.page.SetPageData(pData)
+	if err != nil {
+		return err
+	}
+
+	// pageId & Flags
+	e.page.PageId = p.PageId
+	e.page.Flags = p.Flags
+
+	// clear page so that it can be garbage collected
+	p = nil
 
 	return nil
 }
 
-// Returns Log Sequence Number of the frame. This is the same LSN as the page.
-func (f *Frame) GetLSN() ([]byte, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+// func (e *Frame) GetData() [ENTRY_SIZE]byte {
+// 	var d [ENTRY_SIZE]byte
+//
+// 	e.mu.RLock()
+// 	defer e.mu.RUnlock()
+//
+// 	copy(d[:], e.Data[:])
+//
+// 	return d
+// }
 
-	if f.page == nil {
-		return nil, BufferManagerError{Message: "No page associated with frame"}
+// zeros out the entry and resets all fields
+func (e *Frame) Clear() error {
+	if e == nil {
+		return BufferManagerError{Message: "Frame is not set"}
 	}
 
-	if f.lsn == nil {
-		return nil, BufferManagerError{Message: "Invalid lsn on frame."}
-	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	log.Println("(GetLSN) Frame ==> ", f)
-	pLsn := f.page.GetLSN()
-	log.Println("(GetLSN) PAGE LSN ==> ", pLsn)
+	e.ref.Store(false)
+	e.acc.Store(false)
 
-	return f.lsn, nil
+	e.isDirty.Store(false)
+	e.meta.key = 0
+
+	e.counters.reset()
+
+	// mark as unallocated
+	e.isOccupied.Store(false)
+
+	// clear page
+	e.page.Clear()
+
+	return nil
 }
 
-func (f *Frame) setNextPtr(fr *Frame) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+func (e *Frame) updateSegment(seg SegmentType) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
-	if f == fr {
-		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own next pointer. \nFrame -> %v\nProvided next -> %v\n", f, fr))
+	if e.segType != seg {
+		e.segType = seg
 	}
-
-	if f.prev == fr && (f.prev != nil && fr != nil) {
-		panic(fmt.Errorf("(setNextPtr) Frame has prev pointer same as next ptr. \nprev -> %v\nnext -> %v\n", f.prev, fr))
-	}
-
-	f.next = fr
 }
 
-func (f *Frame) setPrevPtr(fr *Frame) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// Returns a pointer to new entry
+// To reduce pressure on the GC and improve performance, memory is allocated manually via calloc().
+// This memory also needs to be freed after use to avoid memory leaks.
+// In a storage engine's buffer manager, this memory will be initialized at startup and reused as blocks are paged-in and evicted.
+func NewFrame() *Frame {
+	p := manual.Alloc(unsafe.Sizeof(Frame{}))
+	e := (*Frame)(p)
+	e.CPtr = p
 
-	if f == fr {
-		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own prev pointer. \nFrame -> %v\nProvided prev -> %v\n", f, fr))
-	}
-
-	if f.next == fr && (f.next != nil && fr != nil) {
-		panic(fmt.Errorf("(setPrevPtr) frame has prev pointer equal to next pointer. \nprev -> %v\next -> %v\n", fr, f.next))
-	}
-
-	f.prev = fr
+	return e
 }
 
-func (f *Frame) setPtrs(prev *Frame, next *Frame) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if f == prev {
-		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own prev pointer. \nFrame -> %v\nProvided prev -> %v\n", f, prev))
+// Calls free() on manually allocated memory
+func FreeFrame(e *Frame) error {
+	if e == nil {
+		return BufferManagerError{Message: "Null entry provided"}
 	}
 
-	if f == next {
-		panic(fmt.Errorf("(setPtrs) Cannot set curr frame as its own next pointer. \nFrame -> %v\nProvided next -> %v\n", f, next))
+	if e.CPtr == nil {
+		return BufferManagerError{Message: "No pointer to allocated heap memory."}
 	}
 
-	f.prev = prev
-	f.next = next
-}
+	manual.FreeMem(e.CPtr)
 
-func (f *Frame) GetPinCount() uint32 {
-	if f == nil {
-		panic("(GetPinCount) No frame provided")
-	}
-	p := f.pins.Load()
-
-	return p
+	return nil
 }

@@ -14,21 +14,21 @@ const (
 
 type clock struct {
 	// entry that the clock hand points to
-	Head *Entry
+	Head *Frame
 
 	// max number of items allowed in CLOCK
 	capacity uint64
 	mu       sync.RWMutex
 
 	// pool of unassigned cache slots. Freed slots are also added here
-	bPool []*Entry
+	bPool []*Frame
 }
 
 // advances the clock hand, finds a valid entry to evict and
 // clears the entry. Returns evicted entry and it's  key.
 // If no suitable entry is found after MAX_LOOP return nil entry
 // and -1 as evictedKey
-func (clk *clock) Evict(seg SegmentType) (evicted *Entry, evictedKey int) {
+func (clk *clock) Evict(seg SegmentType) (evicted *Frame, evictedKey int) {
 	start := time.Now()
 	clk.mu.Lock()
 	defer clk.mu.Unlock()
@@ -74,7 +74,7 @@ func (clk *clock) Evict(seg SegmentType) (evicted *Entry, evictedKey int) {
 // advances the clock hand, finds a valid entry.
 // Returns the entry without clearing the entry.
 // If no suitable entry is found after MAX_LOOP return nil entry
-func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Entry) {
+func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
 	start := time.Now()
 	clk.mu.Lock()
 	defer clk.mu.Unlock()
@@ -116,7 +116,7 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Entry) {
 }
 
 // Retrieve an available entry. If no entry is available return nil.
-func (clk *clock) Pop() *Entry {
+func (clk *clock) Pop() *Frame {
 	clk.mu.Lock()
 	defer clk.mu.Unlock()
 
@@ -125,13 +125,13 @@ func (clk *clock) Pop() *Entry {
 	}
 
 	e := clk.bPool[len(clk.bPool)-1]
-	clk.bPool = append(clk.bPool[:len(clk.bPool)-1], []*Entry{}...)
+	clk.bPool = append(clk.bPool[:len(clk.bPool)-1], []*Frame{}...)
 
 	return e
 }
 
 // Clears entry and adds it back to the pool.
-func (clk *clock) addToBpool(e *Entry) error {
+func (clk *clock) addToBpool(e *Frame) error {
 	if e == nil {
 		return BufferManagerError{Message: "Received nil entry to add to pool"}
 	}
@@ -145,6 +145,26 @@ func (clk *clock) addToBpool(e *Entry) error {
 	}
 
 	clk.bPool = append(clk.bPool, e)
+
+	return nil
+}
+
+// frees all buffer memory
+func (clk *clock) close() error {
+	clk.mu.Lock()
+	defer clk.mu.Unlock()
+
+	var f *Frame
+
+	for range clk.capacity {
+		f = clk.Head
+		clk.Head = f.next
+
+		err := FreeFrame(f)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -165,8 +185,7 @@ func NewClock(capacity uint64) (*clock, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			e := NewEntry()
-
+			e := NewFrame()
 			if e == nil {
 				panic("Unable to create entry")
 			}
