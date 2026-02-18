@@ -1,31 +1,38 @@
 package buffermanager
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	diskmanager "github.com/oryankibandi/baobab/pkg/diskmanager"
-	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/diskmanager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
 const (
-	MAX_PAGES             = 100   // Max # of pages to flush in one operation
-	BGWRITER_DELAY        = 200   // // delay between BgWriter activity writes (Milliseconds)
-	BG_FLUSH_AFTER        = 65536 // size after which to force flush to disk(bypass OS cache) size after which to force flush to disk(bypass OS cache (Bytes)
+	// Max # of pages to flush in one operation
+	MAX_PAGES = 100
+	// delay between BgWriter activity writes (Milliseconds)
+	BGWRITER_DELAY = 200
+	// size after which to force flush to disk(bypass OS cache) size after which to force flush to disk(bypass OS cache (Bytes)
+	BG_FLUSH_AFTER        = 65536
 	FREELIST_WRITER_DELAY = 5000
+	// threshold for how long writing a page to disk should take.
+	PAGE_WRITE_TIMEOUT = 200
 )
 
 type BgWriter struct {
-	writtenPages atomic.Uint32
-	writtenBytes atomic.Uint32
-	mu           sync.Mutex
-	wg           sync.WaitGroup
+	writtenPages uint32
+	writtenBytes uint32
 	cache        *Cache
 	wal          *wal.WAL
+	dManager     *diskmanager.DiskManager
+
+	// Head of the clock buffer
+	clockBuffer *clock
+	mu          sync.Mutex
+	wg          sync.WaitGroup
 }
 
 func (bw *BgWriter) Start() {
@@ -33,221 +40,75 @@ func (bw *BgWriter) Start() {
 	time.Sleep(time.Second * 60)
 	go bw.watchFreeList()
 
-	var dFrame []*Frame
+	var currFrame *Frame
+	var nextFrame *Frame
 	for {
-		if bw.cache.diryList.dPageLru.isEmpty() {
-			// no dirty page
-			log.Println("No dirty frame... ")
-			time.Sleep(time.Millisecond * BGWRITER_DELAY)
-			continue
-		}
+		for range bw.clockBuffer.getCap() {
+			currFrame = bw.clockBuffer.clockHead()
 
-		fmt.Println("Dirty frames available....")
-		// check dirty list
-		fDirty := bw.cache.diryList.popDirtyPage()
-		LSN := struct {
-			maxLSN []byte
-			mu     sync.Mutex
-		}{maxLSN: make([]byte, 8)}
-
-		var k int
-
-		for fDirty != nil {
-			// pin frames sequentially to avoid deadlocks
-			fmt.Printf("(BGWRITER) %d RemoveItemFromLru\n", k)
-			k++
-			fmt.Printf("(BGWRITER) REMOVING FRAME FROM LRU -> %d\nFRAME -> %v\n", fDirty.frame.GetKey(), fDirty.frame)
-			err := bw.cache.RemoveItemFromLru(fDirty.frame)
-
-			fmt.Println("(bgwriter) Frame Pinned")
-			// err := f.PinFrame()
-
-			if err != nil {
-				panic(fmt.Sprintf("Unable to pin frame: %v", err))
-			}
-
-			fmt.Printf("(BGWRITER) DONE -> %d\n", fDirty.frame.GetKey())
-
-			if d := fDirty.frame.IsDirty(); !d {
-				fmt.Println("(bgwriter) Frame not dirty, releasing...")
-				err = bw.cache.ReleaseFrame(fDirty.frame, true)
-				if err != nil {
-					panic(err)
-				}
-
-				// get next item
-				fDirty = bw.cache.diryList.popDirtyPage()
-
+			if currFrame.isPinned() {
+				currFrame = currFrame.GetNextLink()
 				continue
-				// return
 			}
 
-			dFrame = append(dFrame, fDirty.frame)
+			if !currFrame.isDirty() {
+				currFrame = currFrame.GetNextLink()
+				continue
+			}
 
-			fDirty = bw.cache.diryList.popDirtyPage()
-		}
+			currFrame.mu.Lock()
+			currFrame.Reference()
 
-		// spin up goroutines to issue writes
-		for _, f := range dFrame {
-			bw.wg.Add(1)
-			go func(fr *Frame) {
-				defer bw.wg.Done()
-				c := make(chan int32)
-				lsnChan := make(chan []byte)
-				err := bw.cache.diskManager.WriteReq(fr.GetPage(), fr.GetKey(), c, lsnChan)
-
-				if err != nil {
-					panic(err.Error())
-				}
-
-				fmt.Println("(bgwriter) waiting for write completion from disk manager...")
-				n := <-c
-				fmt.Println("(bgwriter) Received write completion  signal...")
-
-				if n >= 0 {
-					fmt.Printf("(bgwriter) Written %d byte(s).\n", n)
-
-					// Check if page is marked for deletion
-					if d, err := fr.PageIsDead(); err == nil && d {
-						fmt.Println("(bgwriter) Page marked for deletion, removing from cache")
-						// release shared reader lock temporarily  to gain exclusive lock in bw.cache.Delete()
-						// bw.cache.rmu.RUnlock()
-						// remove from buffer pool
-						bw.cache.Delete(uint32(fr.GetKey()), false)
-						// bw.cache.rmu.RLock()
-					} else if err != nil {
-						fmt.Println("(bgwriter) Page not marked for deletion")
-						panic(err)
-					}
-
-					// bw.writtenBytes += uint32(n)
-					bw.writtenBytes.Add(uint32(n))
-
-					bw.writtenPages.Add(1)
-				} else {
-					fmt.Println("(bgwriter) Unable to write to disk")
-				}
-				// Get written page LSN
-				fmt.Println("WAITING FOR LSN CHANNEL....")
-				lsn := <-lsnChan
-
-				fmt.Println("RECEIVED LSN FROM CHAN => ", lsn)
-				// compare and update LSN
-				LSN.mu.Lock()
-
-				newLSN, err := helpers.MaxLSN(LSN.maxLSN, lsn)
-
-				if err != nil {
-					panic(fmt.Errorf("Unable to get max LSN in bgwriter: %v", err))
-				}
-				fmt.Printf("(MaxLSN) Comparing LSNs:a) %v  (b) %v\t MAx: %v\n", LSN.maxLSN, lsn, newLSN)
-
-				LSN.maxLSN = newLSN
-				LSN.mu.Unlock()
-
-				fmt.Println("RECEIVED MAX LSN ==> ", lsn)
-				// If flushed MAX_PAGES, break
-				// if bw.writtenPages.Load() >= MAX_PAGES {
-
-				// 	bw.writtenPages.Store(0)
-				// 	// break
-				// 	return
-				// }
-
-				// mark frame  as clean
-				fr.markClean()
-			}(f)
-		}
-
-		log.Println("(BGWRITER) WAITING FOR GOROUTINES....")
-		bw.wg.Wait()
-
-		// release frames
-		for _, f := range dFrame {
-			err := bw.cache.ReleaseFrame(f, true)
+			wr := make(chan int32)
+			// lsnChan := make(chan [diskmanager.LSN_SIZE_BYTE]byte)
+			err := bw.dManager.WriteReq(&currFrame.page, currFrame.getKey(), wr, nil)
 
 			if err != nil {
-				panic(fmt.Sprintf("Unable to release frame: %v", err))
+				log.Printf("Error writing to page: %s\n", err.Error())
+				currFrame = currFrame.GetNextLink()
+				continue
 			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), PAGE_WRITE_TIMEOUT*time.Millisecond)
+
+			select {
+			case n := <-wr:
+				cancel()
+				log.Printf("Written %d bytes\n", n)
+				currFrame.MarkClean()
+				bw.writtenBytes += uint32(n)
+				bw.writtenPages++
+			case <-ctx.Done():
+				cancel()
+				log.Printf("Timeout when writing page.")
+			}
+
+			nextFrame = currFrame.next
+			currFrame.Unreference()
+			currFrame.mu.Unlock()
+
+			if bw.writtenPages >= MAX_PAGES {
+				break
+			}
+
+			currFrame = nextFrame
 		}
-
-		log.Println("(BGWRITER) DONE...")
-		// flush metadata
-		err := bw.cache.flushMetadata()
-
-		if err != nil {
-			panic(err)
-		}
-
-		// call Sync() to flush buffer contents to disk
-		bw.cache.flushWritten()
-
-		// Add checkpoint
-		log.Println("(BGWRITER) Adding checkpoint.....")
-		err = bw.wal.AddCheckpoint(LSN.maxLSN)
-		log.Println("(BGWRITER) Added checkpoint.....")
-
-		if err != nil {
-			panic(fmt.Errorf("Unable to add checkoint: %v", err))
-		}
-
-		// bw.cache.rmu.RUnlock()
-		// bw.wg.Wait()
-
-		// DiskBTree.forceFlush()
-		log.Println("(BGWRITER) Getting written pages and bytes...")
-		writtenP := bw.writtenPages.Load()
-		writtenB := bw.writtenBytes.Load()
-		fmt.Println("--+-+-+-+-+-+-+->> WrittenPages: ", writtenP)
-		if writtenP > 0 {
-			msg := "+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n"
-			msg += fmt.Sprintf("(bgwriter) Flushed %d page(s)\n", writtenP)
-			msg += fmt.Sprintf("(bgwriter) Written %d bytes\n", writtenB)
-			msg += "+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n"
-
-			fmt.Println(msg)
-		}
-
-		log.Println("MAXLSN ===> ", LSN.maxLSN)
-
-		//  DiskBTree.forceFlush()
-
-		if writtenP > 0 {
-			bw.writtenPages.Store(0)
-		}
-
-		if writtenB > 0 {
-			bw.writtenBytes.Store(0)
-		}
-
-		log.Println("(BGWRITER) Reset written page counters...")
-		dFrame = make([]*Frame, 0)
-		log.Println("(BGWRITER) Sleeping...")
-
 		time.Sleep(time.Millisecond * BGWRITER_DELAY)
 	}
 }
 
-// func (bw *BgWriter) watchFreeList() {
-// 	c := make(chan int)
-//
-// 	for {
-// 		go diskmanager.FlushFreeList(&c)
-//
-// 		// fmt.Println("Flushing free list....")
-// 		n := <-c
-//
-// 		if n > 0 {
-// 			fmt.Printf("Flushed %d bytes in free list\n", n)
-// 		}
-//
-// 		time.Sleep(time.Millisecond * FREELIST_WRITER_DELAY)
-// 	}
-// }
+// periodically flushes free list to disk if dirty
+func (bw *BgWriter) watchFreeList() {
+	for {
+		bw.cache.flushFreeList()
+		time.Sleep(time.Millisecond * FREELIST_WRITER_DELAY)
+	}
+}
 
-func NewBgWriter(cache *Cache, wal *wal.WAL) *BgWriter {
+func NewBgWriter(cache *Cache, wal *wal.WAL, clockBuffHead *clock, d *diskmanager.DiskManager) *BgWriter {
 	return &BgWriter{
-		cache: cache,
-		wal:   wal,
+		cache:       cache,
+		wal:         wal,
+		clockBuffer: clockBuffHead,
 	}
 }

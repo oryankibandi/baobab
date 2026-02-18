@@ -50,11 +50,8 @@ func TestMemAllocMany(t *testing.T) {
 	var entries []*Frame
 	var m runtime.MemStats
 	var e *Frame
-
-	// entrySize := unsafe.Sizeof(Frame{})
-	// pSize := os.Getpagesize()
-
 	var d [diskmanager.PAGE_SIZE_BYTES]byte
+
 	for i := range diskmanager.PAGE_SIZE_BYTES {
 		d[i] = 1
 	}
@@ -162,21 +159,29 @@ func TestSetData(t *testing.T) {
 
 	var d [diskmanager.PAGE_SIZE_BYTES]byte
 
+	key := uint32(25)
+
+	// set key
+	binary.LittleEndian.PutUint32(d[1:5], key)
+
 	for i := range diskmanager.PAGE_SIZE_BYTES {
+		// skip page id slot
+		if i >= 1 && i < 5 {
+			continue
+		}
 		d[i] = 1
 	}
 
 	testPage := diskmanager.Page{}
 	testPage.SetPageData(&d)
 
-	key := uint32(25)
 	t.Run("set_data", func(t *testing.T) {
 		err := en.SetData(&testPage)
 		assert.Nilf(t, err, "Expected no error, got  %v", err)
 
 		d2, err := en.page.GetPageByteData()
 		assert.Nilf(t, err, "Expected no error, got  %v", err)
-		assert.Equalf(t, d, d2, "Expected equal data during setData()")
+		assert.Equalf(t, d, *d2, "Expected equal data during setData()")
 
 		// check key
 		k := en.getKey()
@@ -225,7 +230,7 @@ func TestUpdateData(t *testing.T) {
 
 		d2, err := en.page.GetPageByteData()
 		assert.Nilf(t, err, "Expected no error, got  %s", err)
-		assert.Equalf(t, d, d2, "Expected equal data during setData()")
+		assert.Equalf(t, d, *d2, "Expected equal data during setData()")
 	})
 
 	t.Cleanup(func() {
@@ -270,7 +275,7 @@ func TestClear(t *testing.T) {
 		en.Clear()
 
 		d2, err := en.ByteData()
-		assert.Nilf(t, "Expected nil, got %s", err.Error())
+		assert.Nilf(t, err, "Expected nil, got %v", err)
 		assert.NotEqualf(t, d2, d, "Data not cleared")
 
 		k := en.getKey()

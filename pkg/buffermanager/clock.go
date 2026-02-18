@@ -16,11 +16,11 @@ type clock struct {
 	// entry that the clock hand points to
 	Head *Frame
 
-	// max number of items allowed in CLOCK
+	// max number of items allowed in circular buffer
 	capacity uint64
 	mu       sync.RWMutex
 
-	// pool of unassigned cache slots. Freed slots are also added here
+	// Pool of unassigned cache slots. Freed slots are also added here
 	bPool []*Frame
 }
 
@@ -147,6 +147,20 @@ func (clk *clock) addToBpool(e *Frame) error {
 	clk.bPool = append(clk.bPool, e)
 
 	return nil
+}
+
+// Returns a reference to the frame at the current clock head
+func (clk *clock) clockHead() *Frame {
+	clk.mu.RLock()
+	defer clk.mu.RUnlock()
+
+	return clk.Head
+}
+
+func (clk *clock) getCap() uint64 {
+	clk.mu.RLock()
+	defer clk.mu.RUnlock()
+	return clk.capacity
 }
 
 // frees all buffer memory

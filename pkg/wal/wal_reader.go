@@ -83,7 +83,7 @@ func (wReader *WalReader) readLogHeader(off uint32) (uint32, error) {
 	}
 
 	// check if is a checkpoint entry
-	if helpers.BitIsSet(hdr[0], LOGTYPE_FLAG_POS) {
+	if helpers.BitIsSet(&hdr[0], LOGTYPE_FLAG_POS) {
 		return 0, WalError{Message: "Log is a checkpoint"}
 	}
 

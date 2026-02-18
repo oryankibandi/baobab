@@ -139,7 +139,7 @@ func (c *Cache) Delete(key uint32, flush bool) error {
 		return BufferManagerError{Message: "No key in cache"}
 	}
 
-	if flush && val.isDirty.Load() {
+	if flush && val.isDirty() {
 		err := c.prepareForEviction(val)
 		fmt.Println("(Delete) prepared for eviction...")
 
@@ -213,6 +213,16 @@ func (c *Cache) flushWritten() {
 	c.diskManager.ForceFlush()
 }
 
+func (c *Cache) flushFreeList() error {
+	err := c.diskManager.FlushFreeList()
+
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Prepares page for eviction by flushing page to disk
 func (c *Cache) prepareForEviction(f *Frame) error {
 	log.Println("lru.PrepareForEviction()")
@@ -222,7 +232,7 @@ func (c *Cache) prepareForEviction(f *Frame) error {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.isDirty.Load() {
+	if !f.isDirty() {
 		// frame not dirty, skip flushing to disk
 		fmt.Println("(prepareForEviction) frame not dirty, skipping flushing")
 
@@ -336,7 +346,7 @@ func NewCache(cacheSize uint64, wal *wal.WAL, config diskmanager.DiskManagerConf
 	}
 
 	// create new background writer
-	bg := NewBgWriter(&n, wal)
+	bg := NewBgWriter(&n, wal, w.cBuffer, diskMan)
 
 	go bg.Start()
 

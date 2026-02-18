@@ -492,8 +492,23 @@ func (p *Page) MarkAsDead() error {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
 	helpers.SetFlag(&p.pgeData[0], Dead)
+	helpers.SetFlag(&p.Flags, Dead)
 
 	return nil
+}
+
+func (p *Page) MarkDirty() {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	helpers.SetFlag(&p.pgeData[0], Dirty)
+	helpers.SetFlag(&p.Flags, Dirty)
+}
+
+func (p *Page) MarkClean() {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	helpers.UnsetFlag(&p.pgeData[0], Dirty)
+	helpers.UnsetFlag(&p.Flags, Dirty)
 }
 
 func (d *DiskManager) SetAsRoot(pageId int32) error {
@@ -551,7 +566,7 @@ func (p *Page) GetPageByteData() (data *[PAGE_SIZE_BYTES]byte, err error) {
 	}
 
 	p.rmu.RLock()
-	defer p.rmu.Unlock()
+	defer p.rmu.RUnlock()
 
 	return &(p.pgeData), nil
 }
@@ -561,6 +576,8 @@ func (p *Page) SetPageData(d *[PAGE_SIZE_BYTES]byte) error {
 	defer p.rmu.Unlock()
 
 	copy(p.pgeData[:], d[:])
+	p.PageId = binary.LittleEndian.Uint32(d[1:5])
+	copy(p.LSN[:], d[5:5+LSN_SIZE_BYTE])
 
 	return nil
 }
