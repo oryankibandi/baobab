@@ -11,6 +11,7 @@ import (
 
 	"github.com/oryankibandi/baobab/internal/manual"
 	"github.com/oryankibandi/baobab/pkg/diskmanager"
+	"github.com/oryankibandi/baobab/pkg/helpers"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -387,4 +388,84 @@ func TestRefAndUnrefConcurrent(t *testing.T) {
 	wg.Wait()
 	manual.FreeMem(en.CPtr)
 	en = nil
+}
+
+func TestMarkDirty(t *testing.T) {
+	var en *Frame
+	var d [diskmanager.PAGE_SIZE_BYTES]byte
+	en = NewFrame()
+
+	if en == nil {
+		t.Fatal("Memory not allocated.")
+	}
+
+	if en.CPtr == nil {
+		t.Fatal("Unsafe pointer not set")
+	}
+
+	// add data
+	for i := range diskmanager.PAGE_SIZE_BYTES {
+		if i != 0 {
+			d[i] = 0x01
+		}
+	}
+
+	t.Run("Mark Dirty", func(t *testing.T) {
+		en.MarkDirty()
+
+		dirty := en.isDirty()
+		if !dirty {
+			t.Error("Expected frame to be marked as dirty")
+		}
+
+		pgeData, err := en.ByteData()
+		if err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+
+		set := helpers.BitIsSet(&(pgeData[0]), diskmanager.Dirty)
+		if !set {
+			t.Fatalf("Expected dirty bit to be set")
+		}
+	})
+}
+
+func TestMarkClean(t *testing.T) {
+	var en *Frame
+	var d [diskmanager.PAGE_SIZE_BYTES]byte
+	en = NewFrame()
+
+	if en == nil {
+		t.Fatal("Memory not allocated.")
+	}
+
+	if en.CPtr == nil {
+		t.Fatal("Unsafe pointer not set")
+	}
+
+	// add data
+	for i := range diskmanager.PAGE_SIZE_BYTES {
+		if i != 0 {
+			d[i] = 0x01
+		}
+	}
+
+	t.Run("Mark Clean", func(t *testing.T) {
+		en.MarkClean()
+
+		dirty := en.isDirty()
+		if dirty {
+			t.Error("Expected frame to be marked as clean")
+		}
+
+		pgeData, err := en.ByteData()
+		if err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+
+		set := helpers.BitIsSet(&(pgeData[0]), diskmanager.Dirty)
+		if set {
+			t.Fatalf("Expected dirty bit to be unset")
+		}
+	})
 }
