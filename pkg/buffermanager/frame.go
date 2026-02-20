@@ -169,6 +169,10 @@ func (f *Frame) MarkClean() {
 	f.page.MarkClean()
 }
 
+func (f *Frame) MarkOccupied() {
+	f.isOccupied.Store(true)
+}
+
 // Unsets the reference bit. This is exclusively called by the clock replacement algorithm.
 func (f *Frame) unsetRef() {
 	f.ref.Store(false)

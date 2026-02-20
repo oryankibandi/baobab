@@ -25,7 +25,7 @@ build:
 	@go build -race -o $(BIN_PATH)
 	@echo "✅ built binary at $(BIN_PATH)"
 test:
-	@go test -v $(TEST_PATH)
+	@go test -race -v $(TEST_PATH)
 test-asan:
 	@go test -asan -v $(TEST_PATH)
 inspect-page:

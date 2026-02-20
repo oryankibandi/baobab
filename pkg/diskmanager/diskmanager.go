@@ -591,8 +591,9 @@ func (p *Page) Clear() error {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
 
-	s := make([]byte, PAGE_SIZE_BYTES)
-	copy(p.pgeData[:], s)
+	for i := range PAGE_SIZE_BYTES {
+		p.pgeData[i] = 0x00
+	}
 
 	return nil
 }

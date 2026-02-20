@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/oryankibandi/baobab/pkg/diskmanager"
 )
 
 const (
@@ -55,6 +57,7 @@ func (clk *clock) Evict(seg SegmentType) (evicted *Frame, evictedKey int) {
 			eKey := clk.Head.getKey()
 			// clk.Head.clear()
 			e := clk.Head
+			e.Clear()
 
 			// advance clock hand
 			clk.Head = clk.Head.GetNextLink()
@@ -133,7 +136,11 @@ func (clk *clock) Pop() *Frame {
 // Clears entry and adds it back to the pool.
 func (clk *clock) addToBpool(e *Frame) error {
 	if e == nil {
-		return BufferManagerError{Message: "Received nil entry to add to pool"}
+		return BufferManagerError{Message: "Received nil frame to add to pool"}
+	}
+
+	if e.GetNextLink() == nil || e.GetPrevLink() == nil {
+		return BufferManagerError{Message: "Invalid frame"}
 	}
 
 	clk.mu.Lock()
@@ -174,7 +181,12 @@ func (clk *clock) close() error {
 		f = clk.Head
 		clk.Head = f.next
 
-		err := FreeFrame(f)
+		err := f.Clear()
+		if err != nil {
+			return err
+		}
+
+		err = FreeFrame(f)
 		if err != nil {
 			return err
 		}
@@ -183,13 +195,17 @@ func (clk *clock) close() error {
 	return nil
 }
 
-// Returns a pointer to a new circular buffer
-func NewClock(capacity uint64) (*clock, error) {
+// Creates a clock buffer of size 'size`KB and
+// returns a pointer to the new circular buffer.
+// `size` parameter should be in Kilobytes.
+func NewClock(size uint64) (*clock, error) {
+	minSize := (3 * diskmanager.PAGE_SIZE_BYTES) / 1024
 	// Initialize entries, add to bPool and create the circular buffer
-	if capacity < 3 {
-		return nil, BufferManagerError{Message: "Minimum capacity is 3"}
+	if size < uint64(minSize) {
+		return nil, BufferManagerError{Message: fmt.Sprintf("Minimum capacity is %d", minSize)}
 	}
 
+	capacity := (size * 1024) / diskmanager.PAGE_SIZE_BYTES
 	clk := &clock{
 		capacity: capacity,
 	}
