@@ -9,9 +9,6 @@ import (
 	"github.com/oryankibandi/baobab/pkg/diskmanager"
 )
 
-// TODO:
-// -> Test addToBpool() - item is cleared and added to bPool
-
 func TestNewClock(t *testing.T) {
 	var size uint64 = 800 // 800KB
 	var allocatedRSS uint64
@@ -334,4 +331,125 @@ func TestEvictWithoutClearingConcurrent(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
+}
+
+func TestAddToBPool(t *testing.T) {
+	var assignedFrames []*Frame
+	var size uint64 = 800 // KB
+	testItems := 5
+	expectedItemCount := (size * 1024) / diskmanager.PAGE_SIZE_BYTES
+
+	c, err := NewClock(size)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if c == nil {
+		t.Fatalf("Expected new clock, got nil")
+	}
+
+	defer c.close()
+
+	for range testItems {
+		fr := c.Pop()
+
+		if fr == nil {
+			t.Fatal("Expected frame, got nil")
+		}
+
+		fr.MarkOccupied()
+		assignedFrames = append(assignedFrames, fr)
+	}
+
+	t.Run("addtobpool_check_counte_after_pop", func(t *testing.T) {
+		if len(c.bPool) != int(expectedItemCount)-testItems {
+			t.Fatalf("Expected %d remaining items in bpool, got %d", int(int(expectedItemCount)-testItems), len(c.bPool))
+		}
+	})
+
+	for i, f := range assignedFrames {
+		t.Run(fmt.Sprintf("%d_addtobpool", i), func(t *testing.T) {
+			// readd to bpool
+			err := c.addToBpool(f)
+			if err != nil {
+				t.Fatalf("(TestAddToBPool) Expected no error, got %v", err)
+			}
+
+			if f.isOccupied.Load() {
+				t.Fatalf("Expected frame to not be occupied after readding.")
+			}
+		})
+	}
+
+	t.Run("addtobpool_check_counter_after_readding", func(t *testing.T) {
+		if len(c.bPool) != int(expectedItemCount) {
+			t.Fatalf("Expected %d frames in bpool, got %d", int(expectedItemCount), len(c.bPool))
+		}
+	})
+}
+
+func TestAddToBPoolConcurrent(t *testing.T) {
+	var wg sync.WaitGroup
+	var assignedFrames []*Frame
+	var size uint64 = 800 // KB
+	testItems := 5
+	expectedItemCount := (size * 1024) / diskmanager.PAGE_SIZE_BYTES
+
+	c, err := NewClock(size)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if c == nil {
+		t.Fatalf("Expected new clock, got nil")
+	}
+
+	defer c.close()
+
+	for range testItems {
+		fr := c.Pop()
+
+		if fr == nil {
+			t.Fatal("Expected frame, got nil")
+		}
+
+		fr.MarkOccupied()
+		assignedFrames = append(assignedFrames, fr)
+	}
+
+	t.Run("addtobpoolconcurrent_check_counte_after_pop", func(t *testing.T) {
+		if len(c.bPool) != int(expectedItemCount)-testItems {
+			t.Fatalf("Expected %d remaining items in bpool, got %d", int(int(expectedItemCount)-testItems), len(c.bPool))
+		}
+	})
+
+	for i, f := range assignedFrames {
+		t.Run(fmt.Sprintf("%d_addtobpoolconcurrent", i), func(t *testing.T) {
+			// readd to bpool
+			err := c.addToBpool(f)
+			if err != nil {
+				t.Fatalf("(TestAddToBPool) Expected no error, got %v", err)
+			}
+
+			if f.isOccupied.Load() {
+				t.Fatalf("Expected frame to not be occupied after readding.")
+			}
+		})
+	}
+
+	start := make(chan struct{})
+	for i := range testItems {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			t.Run(fmt.Sprintf("%d_addtobpoolconcurrent_check_counter_after_readding", j), func(t *testing.T) {
+				<-start
+				if len(c.bPool) != int(expectedItemCount) {
+					t.Fatalf("Expected %d frames in bpool, got %d", int(expectedItemCount), len(c.bPool))
+				}
+			})
+		}(i)
+	}
 }
