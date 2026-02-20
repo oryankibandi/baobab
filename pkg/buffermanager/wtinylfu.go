@@ -18,7 +18,10 @@ const (
 type SegmentType uint64
 
 type WTinyLfu struct {
-	cBuffer    *clock
+	// circular buffer
+	cBuffer *clock
+
+	// TinyLFU filter
 	tinyFilter *tiny.TinyLFU
 	// count
 	windowCount    uint64
@@ -189,9 +192,9 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	return delKeys, nil
 }
 
-// Adds a new item to Cache.
+// Adds a new item to wtinylfu.
 // By default, all new items are added to the window cache.
-// If window segment is full, an item is evicted or added to main cache
+// If window segment is full, an item is evicted or added to main cache.
 // Returns a slice of uint32 keys that have been evicted and error if any
 func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evictedKIds []uint32, errr error) {
 	if p == nil {
@@ -257,13 +260,23 @@ func (w *WTinyLfu) close() {
 	}
 }
 
+// Creates new instance  of W-TinyLFU. windowSize and mainCacheSize should be
+// in KB
 func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	if windowSize <= 0 {
 		return nil, WTinyLFUError{Message: "Window size must be greater than 0"}
 	}
+
 	if mainCacheSize <= 0 {
 		return nil, WTinyLFUError{Message: "Main cache size must be greater than 0"}
 	}
+
+	if windowSize >= mainCacheSize {
+		return nil, WTinyLFUError{Message: "Window size is greater than man cache size."}
+	}
+
+	windowItemCount := (windowSize * 1024) / diskmanager.PAGE_SIZE_BYTES
+	mainItemCount := (mainCacheSize * 1024) / diskmanager.PAGE_SIZE_BYTES
 
 	cBuff, err := NewClock(windowSize + mainCacheSize)
 	if err != nil {
@@ -271,11 +284,11 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	}
 
 	w := WTinyLfu{
-		cBuffer:        cBuff,
-		windowCount:    windowSize,
-		probationCount: uint64(float64(mainCacheSize) * float64(0.2)),
-		protectedCount: uint64(float64(mainCacheSize) * float64(0.8)),
-		tinyFilter:     tiny.New(),
+		cBuffer:           cBuff,
+		windowCapacity:    windowItemCount,
+		probationCapacity: uint64(float64(mainItemCount) * MAIN_CACHE_RATIO),
+		protectedCapacity: uint64(float64(mainItemCount) * float64(1.0-MAIN_CACHE_RATIO)),
+		tinyFilter:        tiny.New(),
 	}
 
 	return &w, nil
