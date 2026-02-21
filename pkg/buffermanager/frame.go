@@ -278,6 +278,7 @@ func (f *Frame) Clear() error {
 
 	// mark as unallocated
 	f.isOccupied.Store(false)
+	f.segType = unassigned
 
 	// clear page
 	f.page.Clear()

@@ -83,6 +83,10 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
 	defer clk.mu.Unlock()
 
 	for i := 0; i < int(clk.capacity)*MAX_LOOP; i++ {
+		// log.Printf("===============================================\n")
+		// log.Printf("CHECKING KEY -----> %d\n", clk.Head.getKey())
+		// log.Printf("IS REFERENCED ----> %t\n", clk.Head.accessBitSet())
+		// log.Printf("===============================================\n")
 		if clk.Head.accessBitSet() {
 			// access bit set, advance clock hand
 			clk.Head = clk.Head.GetNextLink()

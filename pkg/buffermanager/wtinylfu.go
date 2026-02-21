@@ -2,15 +2,16 @@ package buffermanager
 
 import (
 	"fmt"
-	"log"
 	"sync"
 
 	tiny "github.com/oryankibandi/baobab/internal/tinylfu"
 	"github.com/oryankibandi/baobab/pkg/diskmanager"
 )
 
+// Frames start with no assigned segment, so 0 represents unassigned stage
 const (
-	windowSegment SegmentType = iota
+	unassigned SegmentType = iota
+	windowSegment
 	probationSegment
 	protectedSegment
 )
@@ -102,19 +103,17 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 
 // Evicts an item from the window cache. This is called when the w-cache is full.
 // If main cache is full, compares victims from main cache and window cache
-// and evicts the one  with a lesser count.
+// and evicts the one with a lesser count.
 func (w *WTinyLfu) evictWindow() ([]uint32, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	if w.probationCount > w.probationCapacity {
+		panic("probation items surpassed allowed max")
+	}
 
 	var windVictim *Frame
 	var probationVictim *Frame
 
-	probationFull := w.probationCount < w.probationCapacity
-	fmt.Println("w.evictWindow()")
-	fmt.Println("EVICTING WINDOW CACHE...")
+	probationFull := w.probationCount >= w.probationCapacity
 	if w.windowCount < w.windowCapacity {
-		log.Printf("(evictWindow) Window Cache Is Not Full: COUNT -> %d\t CAPACITY -> %d\n", w.windowCount, w.windowCapacity)
 		return nil, WTinyLFUError{Message: "Window cache is not full"}
 	}
 
@@ -134,10 +133,13 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	} else {
 		// item can be moved to probation segment
 		windVictim = w.cBuffer.EvictWithoutClearing(windowSegment)
+		if windVictim == nil {
+			return nil, BufferManagerError{Message: "Unable to find window victim(all frames in use)."}
+		}
 
 		windVictim.updateSegment(probationSegment)
 		w.probationCount++
-		w.windowCount++
+		// w.windowCount++
 
 		return nil, nil
 	}
@@ -234,7 +236,19 @@ func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evi
 		e.MarkDirty()
 	}
 
+	// update count
+	if w.windowCount < w.windowCapacity {
+		w.windowCount++
+	}
+
 	return e, evictKeys, nil
+}
+
+func (w *WTinyLfu) getWindowCount() uint64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	return w.windowCount
 }
 
 // List metadata i.e no. of items in all segments

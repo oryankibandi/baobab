@@ -72,7 +72,78 @@ func TestNewWTinyLFU(t *testing.T) {
 				if w.protectedCapacity != protCap {
 					t.Fatalf("Expected probation cache to be of size %d items, got %d items", probCap, w.probationCapacity)
 				}
+
+				w.close()
 			}
 		})
 	}
+}
+
+func TestEvictWindow(t *testing.T) {
+	// var testPage *diskmanager.Page
+	var frameToBeEvicted *Frame
+
+	windowCapacity := 48
+	windowFrameCount := (windowCapacity * 1024) / diskmanager.PAGE_SIZE_BYTES
+	mainCapacity := 2376
+
+	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity))
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	defer w.close()
+
+	for i := range windowFrameCount {
+		t.Run(fmt.Sprintf("%d_testevict_additem", i), func(t *testing.T) {
+			testPage := diskmanager.NewTestPage(int32(i) + 1)
+			f, _, err := w.AddItem(testPage, false)
+			if err != nil {
+				t.Fatalf("Expected no error, got %v", err)
+			}
+
+			if seg := f.getSegType(); seg != windowSegment {
+				t.Fatalf("Expected new frame to be in window segment, got %v", seg)
+			}
+
+			// pin all frames apart from the most recent.
+			if i+1 < windowFrameCount {
+				f.Reference()
+			} else {
+				frameToBeEvicted = f
+			}
+		})
+	}
+
+	t.Run("testevict_counters", func(t *testing.T) {
+		wc := w.getWindowCount()
+
+		if wc != uint64(windowFrameCount) {
+			t.Fatalf("Expected window count to be %d but got %d", windowFrameCount, wc)
+		}
+	})
+
+	t.Run("testevict_evictwindow", func(t *testing.T) {
+		if frameToBeEvicted == nil {
+			t.Fatalf("No frame to be evicted set")
+		}
+		if frameToBeEvicted.refBitSet() {
+			t.Fatalf("Expected frame to be evicted to be unreferenced")
+		}
+
+		testPage := diskmanager.NewTestPage(int32(windowFrameCount) + 1)
+		fr, _, err := w.AddItem(testPage, false)
+
+		if err != nil {
+			t.Fatalf("Expected no error, got %v", err)
+		}
+
+		if seg := fr.getSegType(); seg != windowSegment {
+			t.Fatalf("Expected new frame to be in window segment, got %v", seg)
+		}
+
+		if seg := frameToBeEvicted.getSegType(); seg != probationSegment {
+			t.Fatalf("Expected evicted frame to be in probation segment, got %v", seg)
+		}
+	})
 }
