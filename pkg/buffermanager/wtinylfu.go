@@ -38,6 +38,11 @@ type WTinyLfu struct {
 	wg sync.WaitGroup
 }
 
+type paddedFramePtr struct {
+	fr *Frame
+	_  [56]byte
+}
+
 // Increments count of an item in TinyLFU.
 // If item is in probation, it is promoted to protected. If any cache is full one of it's items is evicted.
 // Returns true if operation is successful, else false and the error
@@ -109,8 +114,9 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 		panic("probation items surpassed allowed max")
 	}
 
-	var windVictim *Frame
-	var probationVictim *Frame
+	// use padded struct to prevent false sharing
+	windVictim := paddedFramePtr{}
+	probationVictim := paddedFramePtr{}
 
 	probationFull := w.probationCount >= w.probationCapacity
 	if w.windowCount < w.windowCapacity {
@@ -119,48 +125,48 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 
 	if probationFull {
 		w.wg.Add(2)
-		go func(e *Frame) {
-			e = w.cBuffer.EvictWithoutClearing(windowSegment)
+		go func(e **Frame) {
+			*e = w.cBuffer.EvictWithoutClearing(windowSegment)
 			w.wg.Done()
-		}(windVictim)
+		}(&(windVictim.fr))
 
-		go func(e *Frame) {
-			e = w.cBuffer.EvictWithoutClearing(probationSegment)
+		go func(e **Frame) {
+			*e = w.cBuffer.EvictWithoutClearing(probationSegment)
 			w.wg.Done()
-		}(probationVictim)
+		}(&(probationVictim.fr))
 
 		w.wg.Wait()
 	} else {
 		// item can be moved to probation segment
-		windVictim = w.cBuffer.EvictWithoutClearing(windowSegment)
-		if windVictim == nil {
+		windVictim.fr = w.cBuffer.EvictWithoutClearing(windowSegment)
+		if windVictim.fr == nil {
 			return nil, BufferManagerError{Message: "Unable to find window victim(all frames in use)."}
 		}
 
-		windVictim.updateSegment(probationSegment)
+		windVictim.fr.updateSegment(probationSegment)
 		w.probationCount++
 		// w.windowCount++
 
 		return nil, nil
 	}
 
-	if windVictim == nil {
-		return nil, BufferManagerError{Message: "Unable to find window victim(all frames in use)."}
+	if windVictim.fr == nil {
+		return nil, BufferManagerError{Message: "Could not find window victim(all frames in use)."}
 	}
 
-	if probationVictim == nil && probationFull {
+	if probationVictim.fr == nil && probationFull {
 		return nil, BufferManagerError{Message: "Unable to find probation victim(all frames in use)."}
 	}
 
 	// compare counts of window victim and main cache victim
-	windKey := windVictim.getKey()
+	windKey := windVictim.fr.getKey()
 	windCount, err := w.tinyFilter.CheckItemCount(toBytes(windKey))
 
 	if err != nil {
 		return nil, err
 	}
 
-	mainKey := probationVictim.getKey()
+	mainKey := probationVictim.fr.getKey()
 	mainCacheCount, err := w.tinyFilter.CheckItemCount(toBytes(mainKey))
 
 	if err != nil {
@@ -174,15 +180,15 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 		delKeys = append(delKeys, mainKey)
 
 		// Add window victim to probation
-		err = w.cBuffer.addToBpool(probationVictim)
+		err = w.cBuffer.addToBpool(probationVictim.fr)
 		if err != nil {
 			panic(err)
 		}
 
-		windVictim.updateSegment(probationSegment)
+		windVictim.fr.updateSegment(probationSegment)
 		w.windowCount--
 	} else {
-		err = w.cBuffer.addToBpool(windVictim)
+		err = w.cBuffer.addToBpool(windVictim.fr)
 		if err != nil {
 			panic(err)
 		}
@@ -215,7 +221,7 @@ func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evi
 		evictKeys, err = w.evictWindow()
 
 		if err != nil {
-			panic(err)
+			return nil, nil, err
 		}
 	}
 
@@ -244,11 +250,28 @@ func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evi
 	return e, evictKeys, nil
 }
 
+// Returns the number of frames in the window cache
 func (w *WTinyLfu) getWindowCount() uint64 {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
 	return w.windowCount
+}
+
+// Returns the number of frames in the probation segment
+func (w *WTinyLfu) getProbationCount() uint64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	return w.probationCount
+}
+
+// Returns the number of frames in the protected segment
+func (w *WTinyLfu) getProtectedCount() uint64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	return w.protectedCount
 }
 
 // List metadata i.e no. of items in all segments
@@ -291,6 +314,8 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 
 	windowItemCount := (windowSize * 1024) / diskmanager.PAGE_SIZE_BYTES
 	mainItemCount := (mainCacheSize * 1024) / diskmanager.PAGE_SIZE_BYTES
+	probationCap := uint64(float64(mainItemCount) * MAIN_CACHE_RATIO)
+	protectedCap := uint64(float64(mainItemCount) * float64(1.0-MAIN_CACHE_RATIO))
 
 	cBuff, err := NewClock(windowSize + mainCacheSize)
 	if err != nil {
@@ -300,8 +325,8 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	w := WTinyLfu{
 		cBuffer:           cBuff,
 		windowCapacity:    windowItemCount,
-		probationCapacity: uint64(float64(mainItemCount) * MAIN_CACHE_RATIO),
-		protectedCapacity: uint64(float64(mainItemCount) * float64(1.0-MAIN_CACHE_RATIO)),
+		probationCapacity: probationCap,
+		protectedCapacity: protectedCap,
 		tinyFilter:        tiny.New(),
 	}
 
