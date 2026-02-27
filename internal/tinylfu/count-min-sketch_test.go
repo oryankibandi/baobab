@@ -4,8 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand"
 	"slices"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
 func TestNewCMS(t *testing.T) {
@@ -100,8 +105,9 @@ func TestGetCount(t *testing.T) {
 				t.Fatalf("Expected no error, got %v", err)
 			}
 
-			if c <= 0 {
-				t.Fatalf("Expected count to be greater than zero")
+			// count should never be below the actual
+			if c < int64(test.count) {
+				t.Fatalf("Expected count not to be less than the actual")
 			}
 		})
 	}
@@ -187,4 +193,87 @@ func TestReset(t *testing.T) {
 	})
 }
 
-// TODO: ADd test for Uniform and Zipfian distributions
+// Uniform distributions
+func TestNormalDistribution(t *testing.T) {
+	var wg sync.WaitGroup
+	n := 10000 // number of distinct keys
+	ε := 0.1   // error rate 0.1%
+	δ := 0.1   // error probability 0.1%
+	totOperations := 0
+
+	type tTest struct {
+		key   []byte
+		count uint64
+	}
+
+	tests := make([]tTest, n)
+	var test tTest
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	for i := range n {
+		test.key = []byte(helpers.RandomString(5))
+		test.count = uint64(r.Intn(80) + 1000)
+		tests[i] = test
+		totOperations += int(test.count)
+	}
+
+	cSketch, err := NewCMS(ε, δ, NewMapHash())
+
+	if err != nil {
+		t.Fatalf("Expected not error, got %v", err)
+	}
+
+	if cSketch == nil {
+		t.Fatal("Expected CM Sketch,  got nil")
+	}
+
+	// increment count
+	for i, test := range tests {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := range test.count {
+				t.Run(fmt.Sprintf("%d_%d_test_normaldistribution_increment", i, j), func(t *testing.T) {
+					_, err := cSketch.Increment(test.key)
+
+					if err != nil {
+						t.Fatalf("Expected no error during incrementing count, got %v", err)
+					}
+				})
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	errCount := 0
+	for i, test := range tests {
+		// check count
+		t.Run(fmt.Sprintf("%d_test_normaldistribution_checker", i), func(t *testing.T) {
+			currCount, err := cSketch.GetCount(test.key)
+			if err != nil {
+				t.Fatalf("Expected not error, got %v", err)
+			}
+
+			absoluteErr := math.Abs(float64(currCount - int64(test.count)))
+			relativeErr := math.Abs((absoluteErr / float64(test.count)) * 100)
+			t.Logf("Relative error: %f %%", relativeErr)
+			// currCount <= actualCount + (ε * N)
+			// At most δ num of keys should violate this bound.
+			exceeded := float64(currCount) > float64(test.count)+((ε/100)*float64(totOperations))
+			if exceeded {
+				errCount++
+			}
+		})
+	}
+
+	t.Run("test_normaldistribution_probabilitybound", func(t *testing.T) {
+		expectedErrorCount := δ * float64(totOperations)
+		fmt.Printf("Expected errors: %d, Received  errors: %d\n", uint64(expectedErrorCount), errCount)
+		if errCount > int(expectedErrorCount) {
+			t.Fatalf("Expected error count <= %d, but got error count of %d", errCount, uint64(expectedErrorCount))
+		}
+	})
+}
+
+// Zipfian/skewed distribution
