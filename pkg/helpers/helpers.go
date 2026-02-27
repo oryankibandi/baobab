@@ -6,11 +6,17 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/rand"
+	"strings"
 	"time"
 )
 
 const (
 	DEGREE = 2
+)
+
+const (
+	charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
 
 // sorting
@@ -369,4 +375,18 @@ func StartSpinner(stop chan struct{}, message string) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// Generates and returns a random string of length n
+func RandomString(n int) string {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	var sb strings.Builder
+	sb.Grow(n)
+
+	for i := 0; i < n; i++ {
+		sb.WriteByte(charset[r.Intn(len(charset))])
+	}
+
+	return sb.String()
 }

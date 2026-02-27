@@ -43,7 +43,7 @@ func DoubleHashIndices(h Hasher, data []byte, k int, m uint64) []uint64 {
 	h2 := h.Sum64(tmp)
 
 	indices := make([]uint64, k)
-	// ensure h2 is odd to avoid cycles when m is power-of-two (optional)
+	// ensure h2 is odd to avoid cycles when m is power-of-two
 	if h2%2 == 0 {
 		h2++
 	}

@@ -18,37 +18,27 @@ import (
 	"sync"
 )
 
-type hashFunc func(int) int
-
 type Bloom struct {
-	m        uint64 // size of bitArray
-	k        uint64 // hash func count
+	// size of bitArray
+	m uint64
+	// hash func count
+	k        uint64
 	hasher   Hasher
 	bitArray []byte
 	mu       sync.RWMutex
 	wg       *sync.WaitGroup
 }
 
-func NewDoorkeeper(m uint64, k uint64, hasher Hasher) *Bloom {
-	return &Bloom{
-		bitArray: make([]byte, (m+7)/8),
-		m:        m,
-		k:        k,
-		hasher:   hasher,
-		wg:       &sync.WaitGroup{},
-	}
-}
-
-func (b *Bloom) Add(data []byte) {
+func (b *Bloom) Add(data []byte) error {
 	// Get indices where to add vbits
 	indices := DoubleHashIndices(b.hasher, data, int(b.k), b.m)
+	err := b.setBit(indices)
 
-	for _, v := range indices {
-		// b.wg.Add(1)
-		b.setBit(int(v))
+	if err != nil {
+		return err
 	}
 
-	// b.wg.Wait()
+	return nil
 }
 
 func (b *Bloom) Check(data []byte) bool {
@@ -61,16 +51,6 @@ func (b *Bloom) Check(data []byte) bool {
 
 	// fmt.Println("(Check) Indices: ", indices)
 	for _, v := range indices {
-		// b.wg.Add(1)
-		// go func(t uint64) {
-		// 	defer b.wg.Done()
-		// 	if set, err := b.isSet(int(t)); err == nil && !set {
-		// 		exists.Store(false)
-		// 	} else if err != nil {
-		// 		panic(err)
-		// 	}
-		// }(v)
-
 		if set, err := b.isSet(int(v)); err == nil && !set {
 			exists.Store(false)
 		} else if err != nil {
@@ -87,28 +67,44 @@ func (b *Bloom) Clear() {
 	if b == nil {
 		panic("Doorkeeper not initialized.")
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	b.bitArray = make([]byte, (b.m+7)/8)
+	for i := range b.bitArray {
+		b.bitArray[i] &= 0x00
+	}
 }
 
-// Sets bit on the bit array at the provided position (pos)
-func (b *Bloom) setBit(pos int) error {
-	// defer b.wg.Done()
-	l := int(math.Floor(float64(pos / 8)))
-
-	if l >= len(b.bitArray) {
-		return errors.New("Invalid index")
-	}
-
-	maskPos := (8 * (l + 1)) - (pos + 1)
-
+// Sets bits on the bit array at the provided positions in the uint64 array (pos)
+func (b *Bloom) setBit(pos []uint64) error {
 	var mask byte
 
-	mask = 1 << byte(maskPos)
+	b.mu.RLock()
+	maskArr := make([]byte, (b.m)/8)
+	b.mu.RUnlock()
+
+	for _, p := range pos {
+		// find the position of the byte where pos is located
+		// since b.bitArray is an array of bytes, the position
+		// to set the bits will be located within an individual byte.
+		l := uint64(math.Floor(float64(p / 8)))
+		if l >= uint64(len(b.bitArray)) {
+			return errors.New("Invalid index")
+		}
+
+		maskPos := (8 * (l + 1)) - (p + 1)
+		mask = 1 << byte(maskPos)
+
+		// bitwise OR on maskArr
+		maskArr[l] |= mask
+	}
 
 	// set bit (bitwise OR)
 	b.mu.Lock()
-	b.bitArray[l] |= mask
+	// bitwise OR on bloom filter's bit array
+	for i := range (b.m) / 8 {
+		b.bitArray[i] |= maskArr[i]
+	}
 	b.mu.Unlock()
 
 	return nil
@@ -156,4 +152,32 @@ func (b *Bloom) isSet(pos int) (bool, error) {
 	r := b.bitArray[l] & mask
 
 	return r > 0, nil
+}
+
+// Returns a new Doorkeeper(bloom filter) with size m bit array and k number of hash functions.
+// m must be a multiple of 8 eg. 8, 64, 1024, 4096
+func NewDoorkeeper(m uint64, k uint64, hasher Hasher) (*Bloom, error) {
+	if hasher == nil {
+		return nil, TinyLFUError{Message: "invalid hasher provided"}
+	}
+
+	if k == 0 {
+		return nil, TinyLFUError{Message: "At least one hash function required. Hash function count is zero"}
+	}
+
+	if m == 0 {
+		return nil, TinyLFUError{Message: "size of bit array cannot be zero"}
+	}
+
+	if m%8 != 0 {
+		return nil, TinyLFUError{Message: "Size of bit array must be a multiple of 8"}
+	}
+
+	return &Bloom{
+		bitArray: make([]byte, (m+7)/8),
+		m:        m,
+		k:        k,
+		hasher:   hasher,
+		wg:       &sync.WaitGroup{},
+	}, nil
 }

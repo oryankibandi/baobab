@@ -1,12 +1,17 @@
 package tinylfu
 
-import "log"
+import (
+	"log"
+	"sync"
+)
 
 // "fmt"
 
 type TinyLFU struct {
 	Doorkeeper *Bloom
 	MainStruct *CMS
+	sampleSize uint64 // sample size(W). When this val is reached, reset op is triggered
+	mu         sync.RWMutex
 }
 
 // Bloom
@@ -17,26 +22,35 @@ const (
 
 // Count-Min Sketch (CMS)
 const (
-	CMS_HASH_FUNC_COUNT = 20     // k
-	SAMPLE_SIZE         = 800000 // W. The closer the value of W is to number of operations (N) the higher the accuracy
-	CMS_ARR_WIDTH       = 10000
+	SAMPLE_SIZE     = 800000 // W. The closer the value of W is to number of operations (N) the higher the accuracy
+	CMS_ERROR_RATE  = 0.1    // 0.1%
+	CMS_PROBABILITY = 0.01   // 0.01%
 )
 
-func New() *TinyLFU {
+func New() (*TinyLFU, error) {
 	newHasher := NewMapHash()
 
-	doorKeep := NewDoorkeeper(BLOOM_BIT_ARR_SIZE, HASH_FUNC_COUNT, newHasher)
-	cms := NewCMS(CMS_HASH_FUNC_COUNT, SAMPLE_SIZE, CMS_ARR_WIDTH, CMS_HASH_FUNC_COUNT, newHasher)
+	doorKeep, err := NewDoorkeeper(BLOOM_BIT_ARR_SIZE, HASH_FUNC_COUNT, newHasher)
+
+	if err != nil {
+		return nil, err
+	}
+
+	cms, err := NewCMS(CMS_ERROR_RATE, CMS_PROBABILITY, newHasher)
+
+	if err != nil {
+		return nil, err
+	}
 
 	return &TinyLFU{
 		Doorkeeper: doorKeep,
 		MainStruct: cms,
-	}
+	}, nil
 }
 
 // Increments count of an item
 // Checks if an item is in the Doorkeeper. If not, add to doorkeeper. If it is
-// already in the doorkeeper increment in main structure
+// already in the doorkeeper increment in main structure(CMS).
 func (t *TinyLFU) IncrementItem(data []byte) error {
 
 	log.Println("Checking doorkeeper....")
@@ -51,18 +65,22 @@ func (t *TinyLFU) IncrementItem(data []byte) error {
 
 	// increment in main structure
 	log.Println("Incrementing in main structure....")
-	isReset, err := t.MainStruct.Increment(data)
+	opCount, err := t.MainStruct.Increment(data)
 	log.Println("Incremented in main structure....")
 
 	if err != nil {
 		return err
 	}
 
-	if isReset {
+	t.mu.Lock()
+
+	if opCount >= t.sampleSize {
 		// Clear Doorkeeper
+		t.MainStruct.reset()
 		t.Doorkeeper.Clear()
 	}
 
+	t.mu.Unlock()
 	return nil
 }
 

@@ -70,10 +70,6 @@ func (c *counter) addUnpinCount() {
 func (c *counter) getTotalPins() uint64 {
 	diff := c.pinCount.Load() - c.unpinCount.Load()
 
-	if diff < 0 {
-		panic("Invalid pin count")
-	}
-
 	return diff
 }
 

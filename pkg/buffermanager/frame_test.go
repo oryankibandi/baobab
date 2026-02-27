@@ -320,13 +320,14 @@ func TestRefAndUnref(t *testing.T) {
 		t.Run(fmt.Sprintf("test_reference_%d", i), func(t *testing.T) {
 			if test.operation == "reference" {
 				en.Reference()
-
-				// check ref bit, acess bit and pin count
-				assert.Equal(t, test.expectedAccBit, en.acc.Load(), "access bit not set")
-				assert.Equal(t, test.expectedRefBit, en.ref.Load(), "reference bit not set")
-				assert.Equal(t, test.expectedPinCount, en.counters.pinCount.Load(), "Invalid pin count")
-				assert.Equal(t, test.expectedUnpinCount, en.counters.unpinCount.Load(), "Invalid unpin cunt")
+			} else {
+				en.Unreference()
 			}
+			// check ref bit, acess bit and pin count
+			assert.Equal(t, test.expectedAccBit, en.acc.Load(), "access bit not set")
+			assert.Equal(t, test.expectedRefBit, en.ref.Load(), "reference bit not set")
+			assert.Equal(t, test.expectedPinCount, en.counters.pinCount.Load(), "Invalid pin count")
+			assert.Equal(t, test.expectedUnpinCount, en.counters.unpinCount.Load(), "Invalid unpin cunt")
 		})
 	}
 
