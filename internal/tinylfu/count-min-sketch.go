@@ -11,7 +11,7 @@ import (
 type CMS struct {
 	k          uint64     // hash func count
 	width      uint64     // width of the 2D Array
-	arr        [][]uint64 // 2D Array
+	arr        [][]uint64 // 2D Array with 64 bit counters
 	hasher     Hasher
 	mu         sync.RWMutex
 	wg         *sync.WaitGroup
@@ -113,19 +113,20 @@ func (c *CMS) GetCount(key []byte) (int64, error) {
 
 // Halves all the counters  in the CMS, reset op_counter and clear doorkeeper
 func (c *CMS) reset() {
-	// halve all counters
+	// halves all counters
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i, v := range c.arr {
+	for i, _ := range c.arr {
 		c.wg.Add(1)
-		go func(a []uint64) {
+		go func(idx int) {
 			defer c.wg.Done()
-			for j, k := range a {
+			for j, k := range c.arr[idx] {
 				if k > 0 {
+					// modify array item in place
 					c.arr[i][j] = k / 2
 				}
 			}
-		}(v)
+		}(i)
 	}
 
 	c.wg.Wait()
