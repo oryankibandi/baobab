@@ -322,12 +322,17 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 		panic(err)
 	}
 
+	t, err := tiny.New()
+	if err != nil {
+		return nil, err
+	}
+
 	w := WTinyLfu{
 		cBuffer:           cBuff,
 		windowCapacity:    windowItemCount,
 		probationCapacity: probationCap,
 		protectedCapacity: protectedCap,
-		tinyFilter:        tiny.New(),
+		tinyFilter:        t,
 	}
 
 	return &w, nil
