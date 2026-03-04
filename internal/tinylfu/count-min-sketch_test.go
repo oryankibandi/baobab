@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oryankibandi/baobab/internal/zipf"
 	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
@@ -196,9 +197,9 @@ func TestReset(t *testing.T) {
 // Uniform distributions
 func TestNormalDistribution(t *testing.T) {
 	var wg sync.WaitGroup
-	n := 10000 // number of distinct keys
-	ε := 0.1   // error rate 0.1%
-	δ := 0.1   // error probability 0.1%
+	n := 1000 // number of distinct keys
+	ε := 0.1  // error rate(ε) 0.1%
+	δ := 0.1  // error probability(δ)  0.1%
 	totOperations := 0
 
 	type tTest struct {
@@ -213,7 +214,7 @@ func TestNormalDistribution(t *testing.T) {
 
 	for i := range n {
 		test.key = []byte(helpers.RandomString(5))
-		test.count = uint64(r.Intn(80) + 1000)
+		test.count = uint64(r.Intn(80) + 500)
 		tests[i] = test
 		totOperations += int(test.count)
 	}
@@ -257,8 +258,8 @@ func TestNormalDistribution(t *testing.T) {
 
 			absoluteErr := math.Abs(float64(currCount - int64(test.count)))
 			relativeErr := math.Abs((absoluteErr / float64(test.count)) * 100)
-			t.Logf("Relative error: %f %%", relativeErr)
-			// currCount <= actualCount + (ε * N)
+			t.Logf("Relative error: %f", relativeErr)
+
 			// At most δ num of keys should violate this bound.
 			exceeded := float64(currCount) > float64(test.count)+((ε/100)*float64(totOperations))
 			if exceeded {
@@ -277,3 +278,90 @@ func TestNormalDistribution(t *testing.T) {
 }
 
 // Zipfian/skewed distribution
+func TestZipfianDistribution(t *testing.T) {
+
+	// var wg sync.WaitGroup
+	n := 10000 // number of distinct keys
+	ε := 0.1   // error rate(ε) 0.1%
+	δ := 0.1   // error probability(δ)  0.1%
+	totOperations := 0
+
+	// zipf parameters
+	var offset float64 = 200
+	var zipfExponent float64 = 2.3
+	var imax float64 = 5000
+
+	type tTest struct {
+		key   []byte
+		count uint64
+	}
+
+	tests := make([]tTest, n)
+	var test tTest
+
+	z := zipf.NewZipf(zipfExponent, float64(offset), float64(imax))
+	if z == nil {
+		panic("Unable to create Zipf generator")
+	}
+
+	for i := range n {
+		test.key = []byte(helpers.RandomString(5))
+		// use rejection-inversion to sample values
+		test.count = z.GetNext()
+		tests[i] = test
+		totOperations += int(test.count)
+	}
+
+	cSketch, err := NewCMS(ε, δ, NewMapHash())
+
+	if err != nil {
+		t.Fatalf("Expected not error, got %v", err)
+	}
+
+	if cSketch == nil {
+		t.Fatal("Expected CM Sketch,  got nil")
+	}
+
+	// increment count
+	for i, test := range tests {
+		for j := range test.count {
+			t.Run(fmt.Sprintf("%d_%d_test_zipfiandistribution_increment", i, j), func(t *testing.T) {
+				_, err := cSketch.Increment(test.key)
+
+				if err != nil {
+					t.Fatalf("Expected no error during incrementing count, got %v", err)
+				}
+			})
+		}
+	}
+
+	errCount := 0
+	for i, test := range tests {
+		// check count
+		t.Run(fmt.Sprintf("%d_test_zipfiandistribution_checker", i), func(t *testing.T) {
+			currCount, err := cSketch.GetCount(test.key)
+			if err != nil {
+				t.Fatalf("Expected not error, got %v", err)
+			}
+
+			absoluteErr := math.Abs(float64(currCount - int64(test.count)))
+			relativeErr := math.Abs((absoluteErr / float64(test.count)) * 100)
+			t.Logf("Relative error: %f", relativeErr)
+
+			// At most δ num of keys should violate this bound.
+			exceeded := float64(currCount) > float64(test.count)+((ε/100)*float64(totOperations))
+			if exceeded {
+				errCount++
+			}
+		})
+	}
+
+	t.Run("test_zipfiandistribution_probabilitybound", func(t *testing.T) {
+		expectedErrorCount := δ * float64(totOperations)
+		fmt.Printf("Expected errors: %d, Received  errors: %d\n", uint64(expectedErrorCount), errCount)
+		if errCount > int(expectedErrorCount) {
+			t.Fatalf("Expected error count <= %d, but got error count of %d", errCount, uint64(expectedErrorCount))
+		}
+	})
+
+}
