@@ -23,7 +23,7 @@ type Zipf struct {
 
 // Calculates and returns h(x) using: h(x) = ((v + x) ** (1-s))/(1-s))
 func (z *Zipf) h(x float64) float64 {
-	h_x := (math.Pow(float64(z.v)+x, (1 - z.s))) / (1 - z.s)
+	h_x := (math.Pow(z.v+x, (1 - z.s))) / (1 - z.s)
 
 	return h_x
 }
@@ -43,7 +43,7 @@ func (z *Zipf) cummulativeArea(u float64) float64 {
 	return area
 }
 
-// sovles for x from h inverse using cummulative area
+// solves for x from h inverse using cummulative area
 //
 //	x = (cummulativeArea ** (1/(1-s)))((1-s)**(1/(1-s))) - v
 func (z *Zipf) findX(cArea float64) float64 {
@@ -93,7 +93,7 @@ func NewZipf(s float64, v float64, imax float64) *Zipf {
 		v:    v,
 		imax: imax,
 		xmin: 0.5,
-		xmax: 0.5 + float64(imax),
+		xmax: 0.5 + imax,
 		rnd:  r,
 	}
 
