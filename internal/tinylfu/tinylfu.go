@@ -32,7 +32,7 @@ const (
 // already in the doorkeeper increment in main structure(CMS).
 func (t *TinyLFU) IncrementItem(data []byte) error {
 	if len(data) == 0 {
-		return TinyLFUError{Message: "Invalid data provided in the "}
+		return TinyLFUError{Message: "Invalid/empty data bytes provided"}
 	}
 
 	log.Println("Checking doorkeeper....")
