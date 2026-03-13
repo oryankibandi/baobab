@@ -10,7 +10,6 @@ package tinylfu
 
 import (
 	"errors"
-	"fmt"
 	"sync/atomic"
 
 	//	"fmt"
@@ -44,7 +43,7 @@ func (b *Bloom) Add(data []byte) error {
 func (b *Bloom) Check(data []byte) bool {
 	// Get indices where to add vbits
 	indices := DoubleHashIndices(b.hasher, data, int(b.k), b.m)
-	fmt.Println("Indices....=> ", indices)
+	// fmt.Println("Indices....=> ", indices)
 
 	var exists atomic.Bool
 	exists.Store(true)

@@ -10,11 +10,10 @@ import (
 type TinyLFU struct {
 	Doorkeeper *Bloom
 	MainStruct *CMS
-	sampleSize uint64 // sample size(W). When this val is reached, reset op is triggered
 	mu         sync.RWMutex
 }
 
-// Bloom
+// Bloom Filter constants
 const (
 	BLOOM_BIT_ARR_SIZE = 10000
 	HASH_FUNC_COUNT    = 20
@@ -22,36 +21,19 @@ const (
 
 // Count-Min Sketch (CMS)
 const (
-	SAMPLE_SIZE     = 800000 // W. The closer the value of W is to number of operations (N) the higher the accuracy
-	CMS_ERROR_RATE  = 0.1    // 0.1%
-	CMS_PROBABILITY = 0.01   // 0.01%
+	// Sample Size (W). The closer the value of W is to number of operations (N) the higher the accuracy
+	SAMPLE_SIZE     = 800000
+	CMS_ERROR_RATE  = 0.1  // 0.1%
+	CMS_PROBABILITY = 0.01 // 0.01%
 )
-
-func New() (*TinyLFU, error) {
-	newHasher := NewMapHash()
-
-	doorKeep, err := NewDoorkeeper(BLOOM_BIT_ARR_SIZE, HASH_FUNC_COUNT, newHasher)
-
-	if err != nil {
-		return nil, err
-	}
-
-	cms, err := NewCMS(CMS_ERROR_RATE, CMS_PROBABILITY, newHasher)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &TinyLFU{
-		Doorkeeper: doorKeep,
-		MainStruct: cms,
-	}, nil
-}
 
 // Increments count of an item
 // Checks if an item is in the Doorkeeper. If not, add to doorkeeper. If it is
 // already in the doorkeeper increment in main structure(CMS).
 func (t *TinyLFU) IncrementItem(data []byte) error {
+	if len(data) == 0 {
+		return TinyLFUError{Message: "Invalid data provided in the "}
+	}
 
 	log.Println("Checking doorkeeper....")
 	mayExist := t.Doorkeeper.Check(data)
@@ -74,7 +56,7 @@ func (t *TinyLFU) IncrementItem(data []byte) error {
 
 	t.mu.Lock()
 
-	if opCount >= t.sampleSize {
+	if opCount >= SAMPLE_SIZE {
 		// Clear Doorkeeper
 		t.MainStruct.reset()
 		t.Doorkeeper.Clear()
@@ -92,12 +74,27 @@ func (t *TinyLFU) CheckItemCount(data []byte) (int64, error) {
 		return -1, err
 	}
 
-	// Increment count
-	// err = t.IncrementItem(data)
-
-	//if err != nil {
-	//	return -1, nil
-	//}
-
 	return count, nil
+}
+
+// Creates and returns a new instance of TinyLFU, and error if any.
+func NewTinyLFU() (*TinyLFU, error) {
+	newHasher := NewMapHash()
+
+	doorKeep, err := NewDoorkeeper(BLOOM_BIT_ARR_SIZE, HASH_FUNC_COUNT, newHasher)
+
+	if err != nil {
+		return nil, err
+	}
+
+	cms, err := NewCMS(CMS_ERROR_RATE, CMS_PROBABILITY, newHasher)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &TinyLFU{
+		Doorkeeper: doorKeep,
+		MainStruct: cms,
+	}, nil
 }

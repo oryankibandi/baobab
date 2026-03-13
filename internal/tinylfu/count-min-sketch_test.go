@@ -280,7 +280,6 @@ func TestNormalDistribution(t *testing.T) {
 // Zipfian/skewed distribution
 func TestZipfianDistribution(t *testing.T) {
 
-	// var wg sync.WaitGroup
 	n := 10000 // number of distinct keys
 	ε := 0.1   // error rate(ε) 0.1%
 	δ := 0.1   // error probability(δ)  0.1%
