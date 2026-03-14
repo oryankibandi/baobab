@@ -50,7 +50,7 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
 |     Upper Offset      |
 +-----------------------+   offset 29
 |     Lower Offset      |
-+-----------------------+   offset 31
++-----------------------+   offset 33
 |     Magic No.         |
 +-----------------------+   offset 37
 |     Checksum          |

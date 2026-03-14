@@ -43,12 +43,10 @@ func (b *Bloom) Add(data []byte) error {
 func (b *Bloom) Check(data []byte) bool {
 	// Get indices where to add vbits
 	indices := DoubleHashIndices(b.hasher, data, int(b.k), b.m)
-	// fmt.Println("Indices....=> ", indices)
 
 	var exists atomic.Bool
 	exists.Store(true)
 
-	// fmt.Println("(Check) Indices: ", indices)
 	for _, v := range indices {
 		if set, err := b.isSet(int(v)); err == nil && !set {
 			exists.Store(false)
@@ -56,8 +54,6 @@ func (b *Bloom) Check(data []byte) bool {
 			panic(err)
 		}
 	}
-
-	// b.wg.Wait()
 
 	return exists.Load()
 }

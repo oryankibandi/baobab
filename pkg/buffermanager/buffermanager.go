@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	diskmanager "github.com/oryankibandi/baobab/pkg/diskmanager"
+	"github.com/oryankibandi/baobab/pkg/helpers"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
@@ -21,7 +22,15 @@ const (
 	CACHE_RATIO       = 0.25
 	MAIN_CACHE_RATIO  = 0.2
 	LSN_SIZE          = 12
+
+	// minimum cache size in KB
+	MIN_CACHE_SIZE_KB = 8192
 )
+
+type CacheConfig struct {
+	// size of the cache in KB. Minimum and default size is 8192KB(8MB)
+	CacheSize uint64
+}
 
 type Cache struct {
 	CacheMap    map[uint32]*Frame
@@ -48,11 +57,13 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 		// add to wtinylfu
 		newEntr, dKeys, err := c.wTinyLfu.AddItem(p, dirty)
 		if err != nil {
-			panic(err)
+			fmt.Println(helpers.BOLDRED + err.Error() + helpers.RESET)
+			return nil, err
 		}
 
 		delKeys = dKeys
 		c.CacheMap[k] = newEntr
+		val = newEntr
 	} else {
 		// update value
 		err := val.SetData(p)
@@ -204,7 +215,10 @@ func (c *Cache) CreateNewFrame(lsn []byte, keys [][]byte, values *([][]byte), ch
 	// Add to buffer
 	log.Println("Adding new page to cache...")
 	f, err := c.put(uint32(pgeId), pge, true)
-	log.Printf("Added new page to cache. Page ID: %d\nframe -> %v", pge.PageId, f)
+	log.Printf("Added new page to cache. Page ID: %d\n", pge.PageId)
+	if err != nil {
+		return nil, err
+	}
 
 	return f, nil
 }
@@ -313,20 +327,36 @@ func (c *Cache) flushMetadata() error {
 
 // Safely close down cache
 func (c *Cache) Close() error {
-	c.wTinyLfu.close()
-	c.diskManager.Close()
+	if c.wTinyLfu != nil {
+		c.wTinyLfu.close()
+	}
+
+	if c.diskManager != nil {
+		c.diskManager.Close()
+	}
 
 	return nil
 }
 
-// Create new cache instance\n windowSize, probationSize and protectedSize are sized of the individual segments
-func NewCache(cacheSize uint64, wal *wal.WAL, config diskmanager.DiskManagerConfig) (*Cache, error) {
-	if cacheSize <= 0 {
-		return nil, errors.New("cache size must be greater than 0")
+// NewCache Create new cache instance\n windowSize, probationSize and protectedSize are sized of the individual segments
+//
+//	Parameters:
+//	cacheSize - size of the cache in KB. Minimum and default size is 8192KB(8MB)
+//	wal - initialized wal instance
+//	config - disk manager config
+//
+// Returns:
+func NewCache(cacheConfig CacheConfig, wal *wal.WAL, config diskmanager.DiskManagerConfig) (*Cache, error) {
+	if cacheConfig.CacheSize < MIN_CACHE_SIZE_KB {
+		return nil, BufferManagerError{Message: fmt.Sprintf("Minimum cache size is %dKB", MIN_CACHE_SIZE_KB)}
 	}
 
-	windSize := uint64(float64(0.01) * float64(cacheSize))
-	mainSize := uint64(float64(0.99) * float64(cacheSize))
+	if wal == nil {
+		return nil, BufferManagerError{Message: "wal instance  not provided."}
+	}
+
+	windSize := uint64(float64(0.01) * float64(cacheConfig.CacheSize))
+	mainSize := uint64(float64(0.99) * float64(cacheConfig.CacheSize))
 	w, err := NewWTinylfu(windSize, mainSize)
 	if err != nil {
 		panic(err)
@@ -336,7 +366,7 @@ func NewCache(cacheSize uint64, wal *wal.WAL, config diskmanager.DiskManagerConf
 
 	diskMan, err := diskmanager.NewDiskManager(config)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	n := Cache{

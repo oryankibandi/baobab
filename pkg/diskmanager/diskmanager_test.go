@@ -15,7 +15,7 @@ import (
 func TestNewDiskManager(t *testing.T) {
 	dir := t.TempDir()
 	dbFile := filepath.Join(dir, "baobab.db")
-	config := DiskManagerConfig{dataFile: dbFile}
+	config := DiskManagerConfig{DataFile: dbFile}
 
 	// test no config
 	_, err := NewDiskManager(DiskManagerConfig{})
@@ -47,7 +47,7 @@ func TestWritePage(t *testing.T) {
 	var pageId int32 = 1
 	dir := t.TempDir()
 	dbFile := filepath.Join(dir, "baobab.db")
-	config := DiskManagerConfig{dataFile: dbFile}
+	config := DiskManagerConfig{DataFile: dbFile}
 
 	dm, err := NewDiskManager(config)
 
@@ -110,7 +110,7 @@ func TestWritePageConcurrent(t *testing.T) {
 	var pageId int32 = 1
 	dir := t.TempDir()
 	dbFile := filepath.Join(dir, "baobab.db")
-	config := DiskManagerConfig{dataFile: dbFile}
+	config := DiskManagerConfig{DataFile: dbFile}
 
 	dm, err := NewDiskManager(config)
 
@@ -189,7 +189,7 @@ func TestReadPage(t *testing.T) {
 	cellCount := 3
 	dir := t.TempDir()
 	dbFile := filepath.Join(dir, "baobab.db")
-	config := DiskManagerConfig{dataFile: dbFile}
+	config := DiskManagerConfig{DataFile: dbFile}
 
 	dm, err := NewDiskManager(config)
 	if err != nil || dm == nil {
@@ -331,7 +331,7 @@ func TestReadWriteConcurrent(t *testing.T) {
 
 	dir := t.TempDir()
 	dbFile := filepath.Join(dir, "baobab.db")
-	config := DiskManagerConfig{dataFile: dbFile}
+	config := DiskManagerConfig{DataFile: dbFile}
 
 	dm, err := NewDiskManager(config)
 	if err != nil || dm == nil {

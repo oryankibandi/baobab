@@ -76,7 +76,7 @@ type DiskManager struct {
 
 type DiskManagerConfig struct {
 	// relative path to database file
-	dataFile string
+	DataFile string
 }
 
 // Disk req for reads and writes
@@ -404,7 +404,7 @@ func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), chi
 	// item count
 	binary.LittleEndian.PutUint32(pageByteData[17:21], uint32(len(keys)))
 	// lower offset
-	binary.LittleEndian.PutUint32(pageByteData[29:31], HEADER_SIZE_BYTES)
+	binary.LittleEndian.PutUint32(pageByteData[29:33], uint32(HEADER_SIZE_BYTES))
 	// Right pointer
 	binary.LittleEndian.PutUint32(pageByteData[39:43], uint32(rightPtr))
 
@@ -704,7 +704,7 @@ func (p *Page) UpdateUpperOffset(off uint32) {
 func (p *Page) UpdateLowerOffset(off uint32) {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
-	binary.LittleEndian.PutUint32(p.pgeData[29:31], off)
+	binary.LittleEndian.PutUint32(p.pgeData[29:33], off)
 }
 
 func (p *Page) UpdateItemCount(count int32) {
@@ -820,14 +820,14 @@ func NewTestPage(pageId int32) *Page {
 
 func NewDiskManager(config DiskManagerConfig) (*DiskManager, error) {
 	fmt.Println("IN INIT()")
-	if len(config.dataFile) == 0 {
+	if len(config.DataFile) == 0 {
 		return nil, DiskioError{Message: "data file path not provided"}
 	}
 
 	PgFreeList := NewFreeList()
 	PgFreeList.loadFreeList()
 
-	fd, err := os.OpenFile(config.dataFile, os.O_CREATE|os.O_RDWR, 0644)
+	fd, err := os.OpenFile(config.DataFile, os.O_CREATE|os.O_RDWR, 0644)
 
 	if err != nil {
 		fmt.Println("ERR while opening file")

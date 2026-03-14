@@ -6,6 +6,7 @@ import (
 
 	tiny "github.com/oryankibandi/baobab/internal/tinylfu"
 	"github.com/oryankibandi/baobab/pkg/diskmanager"
+	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
 // Frames start with no assigned segment, so 0 represents unassigned stage
@@ -215,17 +216,20 @@ func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evi
 	// keys that might be evicted if window is full
 	var evictKeys []uint32
 	var err error
+	if w.windowCount > w.windowCapacity {
+		panic(helpers.BOLDRED + "window cache exceeded capacity" + helpers.RESET)
+	}
+
 	if w.windowCount == w.windowCapacity {
 		fmt.Println("(cache.AddItem()) WindowCache Is Full, evicting...")
 		// evict window cache first
 		evictKeys, err = w.evictWindow()
-
 		if err != nil {
 			return nil, nil, err
 		}
 	}
 
-	// retrieve empty entry slot and add new page data
+	// retrieve empty entry slot from the circular buffer and add new page data
 	e := w.cBuffer.Pop()
 	if e == nil {
 		return nil, nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
@@ -322,7 +326,7 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 		panic(err)
 	}
 
-	t, err := tiny.New()
+	t, err := tiny.NewTinyLFU()
 	if err != nil {
 		return nil, err
 	}

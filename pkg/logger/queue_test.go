@@ -17,7 +17,7 @@ func TestAddItem(t *testing.T) {
 		{name: "req 1", lReq: &LogReq{
 			log: LogItem{
 				pkg:      "logger",
-				fn:       "TestADdItem()",
+				fn:       "TestAddItem()",
 				logLevel: LevelDebug,
 				msg:      "Log req 1",
 			},
@@ -26,7 +26,7 @@ func TestAddItem(t *testing.T) {
 		{name: "req 2", lReq: &LogReq{
 			log: LogItem{
 				pkg:      "logger",
-				fn:       "TestADdItem()",
+				fn:       "TestAddItem()",
 				logLevel: LevelDebug,
 				msg:      "Log req 2",
 			},
@@ -35,7 +35,7 @@ func TestAddItem(t *testing.T) {
 		{name: "req 3", lReq: &LogReq{
 			log: LogItem{
 				pkg:      "logger",
-				fn:       "TestADdItem()",
+				fn:       "TestAddItem()",
 				logLevel: LevelDebug,
 				msg:      "Log req 3",
 			},
@@ -44,7 +44,7 @@ func TestAddItem(t *testing.T) {
 		{name: "req 4", lReq: &LogReq{
 			log: LogItem{
 				pkg:      "logger",
-				fn:       "TestADdItem()",
+				fn:       "TestAddItem()",
 				logLevel: LevelDebug,
 				msg:      "Log req 4",
 			},
