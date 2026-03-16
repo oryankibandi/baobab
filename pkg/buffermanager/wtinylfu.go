@@ -216,6 +216,7 @@ func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evi
 	// keys that might be evicted if window is full
 	var evictKeys []uint32
 	var err error
+
 	if w.windowCount > w.windowCapacity {
 		panic(helpers.BOLDRED + "window cache exceeded capacity" + helpers.RESET)
 	}
@@ -230,20 +231,20 @@ func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evi
 	}
 
 	// retrieve empty entry slot from the circular buffer and add new page data
-	e := w.cBuffer.Pop()
-	if e == nil {
+	f := w.cBuffer.Pop()
+	if f == nil {
 		return nil, nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
 	}
 
-	e.updateSegment(windowSegment)
+	f.updateSegment(windowSegment)
 
-	err = e.SetData(p)
+	err = f.SetData(p)
 	if err != nil {
 		panic(err)
 	}
 
 	if isDirty {
-		e.MarkDirty()
+		f.MarkDirty()
 	}
 
 	// update count
@@ -251,7 +252,7 @@ func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evi
 		w.windowCount++
 	}
 
-	return e, evictKeys, nil
+	return f, evictKeys, nil
 }
 
 // Returns the number of frames in the window cache
@@ -288,7 +289,7 @@ func (w *WTinyLfu) Stat() {
 	msg += fmt.Sprintf("PROTECTED COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", w.protectedCount, w.protectedCount >= w.protectedCapacity, w.protectedCapacity, (float64(w.protectedCount)/float64(w.protectedCapacity))*100)
 	msg += "------------------------------------------------------------------\n"
 
-	fmt.Println(msg)
+	fmt.Println(helpers.BOLDWHITE + msg + helpers.RESET)
 }
 
 func (w *WTinyLfu) close() {

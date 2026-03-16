@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
 func TestNewDiskManager(t *testing.T) {
@@ -24,8 +26,8 @@ func TestNewDiskManager(t *testing.T) {
 		t.Fatal("Expected error, got nil")
 	}
 
-	if !errors.As(err, &DiskioError{}) {
-		t.Fatalf("Expected DiskioError, got %v", err)
+	if !errors.As(err, &DiskManagerError{}) {
+		t.Fatalf("Expected DiskManagerError, got %v", err)
 	}
 
 	// test good config
@@ -144,7 +146,7 @@ func TestWritePageConcurrent(t *testing.T) {
 			t.Run(fmt.Sprintf("test_write_%d", i), func(t *testing.T) {
 				<-start
 				wrChan := make(chan int32)
-				err = dm.WriteReq(v, v.PageId, wrChan, nil)
+				err := dm.WriteReq(v, v.PageId, wrChan, nil)
 				if err != nil {
 					t.Fatalf("Expected no error on WriteReq, got %s", err.Error())
 				}
@@ -243,35 +245,38 @@ func TestReadPage(t *testing.T) {
 	<-wrChan
 
 	// read page
-	pageChan := make(chan *Page)
-	err = dm.ReadReq(uint32(pageId), &pageChan)
+	readErr := make(chan error)
+	readPage := &Page{}
 
+	err = dm.ReadReq(uint32(pageId), readPage, readErr)
 	if err != nil {
 		t.Fatalf("Expected no error while reading page, got %s", err.Error())
 	}
 
 	testTimeout := 200
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
-	var readPage *Page
 
 	// wait for read to complete, or time limit to run out.
 loop:
 	for {
 		select {
-		case readPage = <-pageChan:
+		case err := <-readErr:
 			cancel()
+			if err != nil {
+				t.Fatalf(helpers.BOLDRED+"Unable to read page: %v"+helpers.RESET, err)
+			}
 			break loop
 		case <-ctx.Done():
-			t.Fatalf("Writing to disk timed out after %v", testTimeout)
+			t.Fatalf(helpers.BOLDRED+"Writing to disk timed out after %v"+helpers.RESET, testTimeout)
 		}
 	}
 
 	if readPage == nil {
-		t.Fatalf("Expected read  page, got nil")
+		t.Fatalf(helpers.BOLDRED + "Expected read  page, got nil" + helpers.RESET)
 	}
 
 	if len(readPage.pgeData) < PAGE_SIZE_BYTES {
-		t.Fatalf("no data in read page")
+		t.Fatalf(helpers.BOLDRED + "no data in read page" + helpers.RESET)
 	}
 
 	t.Run("read_itemcount", func(t *testing.T) {
@@ -388,7 +393,7 @@ func TestReadWriteConcurrent(t *testing.T) {
 			t.Run(fmt.Sprintf("testreadwriteconcurr_write_%d", i), func(t *testing.T) {
 				<-writeStart
 				wrChan := make(chan int32)
-				err = dm.WriteReq(pge, pge.PageId, wrChan, nil)
+				err := dm.WriteReq(pge, pge.PageId, wrChan, nil)
 				if err != nil {
 					t.Fatalf("Expected no error on WriteReq, got %s", err.Error())
 				}
@@ -422,22 +427,25 @@ func TestReadWriteConcurrent(t *testing.T) {
 			defer wg.Done()
 			t.Run(fmt.Sprintf("testreadwriteconcurr_read_%d", i), func(t *testing.T) {
 				<-readStart
-				pageChan := make(chan *Page)
-				err = dm.ReadReq(pge.PageId, &pageChan)
+				readPage := &Page{}
+				readErr := make(chan error)
+				err := dm.ReadReq(pge.PageId, readPage, readErr)
 				if err != nil {
 					t.Fatalf("Expected no error while reading page, got %s", err.Error())
 				}
 
 				testTimeout := 200
 				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
-				var readPage *Page
 
 				// wait for read to complete, or time limit to run out.
 			loop:
 				for {
 					select {
-					case readPage = <-pageChan:
+					case err := <-readErr:
 						cancel()
+						if err != nil {
+							t.Fatalf(helpers.BOLDRED+"Unable to read page: %v"+helpers.RESET, err)
+						}
 						break loop
 					case <-ctx.Done():
 						t.Fatalf("Writing to disk timed out after %v", testTimeout)
@@ -497,11 +505,11 @@ func readTuple(p *Page, offset uint32) (k []byte, v []byte, err error) {
 	vSize := binary.LittleEndian.Uint32(p.pgeData[offset+5 : offset+9])
 
 	if kSize <= 0 {
-		return nil, nil, DiskioError{Message: fmt.Sprintf("Invalid key size:: %d", kSize)}
+		return nil, nil, DiskManagerError{Message: fmt.Sprintf("Invalid key size:: %d", kSize)}
 	}
 
 	if vSize <= 0 {
-		return nil, nil, DiskioError{Message: fmt.Sprintf("Invalid val size:: %d", vSize)}
+		return nil, nil, DiskManagerError{Message: fmt.Sprintf("Invalid val size:: %d", vSize)}
 	}
 
 	key := p.pgeData[offset+13 : offset+13+kSize]

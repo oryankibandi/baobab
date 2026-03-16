@@ -142,7 +142,7 @@ func TestCreateNewFrame(t *testing.T) {
 	}
 
 	t.Run("test_createnewframe", func(t *testing.T) {
-		f, err := cache.CreateNewFrame(lsn, keys, &vals, nil, false)
+		f, err := cache.CreateNewFrame(lsn, keys, vals, nil, false)
 		if err != nil {
 			t.Fatalf(helpers.BOLDRED+"Expected no error, got %v"+helpers.RESET, err)
 		}

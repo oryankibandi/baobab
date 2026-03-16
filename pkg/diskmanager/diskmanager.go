@@ -80,74 +80,73 @@ type DiskManagerConfig struct {
 }
 
 // Disk req for reads and writes
-type IOReq struct {
-	Read      bool                     // Is read request
-	PageId    uint32                   // ID of page to read
-	ReadPage  *chan *Page              // if read req, new page read
-	Flushed   chan int32               // Amount of bytes written.
+type ioReq struct {
+	isReadReq bool       // Is read request
+	pageId    uint32     // ID of page to read
+	readErr   chan error // read error
+	destPage  *Page      // page to write to for read requests
+
+	flushed   chan int32               // Amount of bytes written.
 	lsnChan   chan [LSN_SIZE_BYTE]byte // channel to send back log sequence number of page after flushing. This is used by the background writer to create a checkpoint in WAL
-	WritePage *Page                    // if write req, page to write
+	writePage *Page                    // if write req, page to write
 	dManager  *DiskManager
 }
 
 type JobQueue struct {
 	// PageId/Block Id for which this job is for
 	pageId  uint32
-	jobs    []IOReq
+	jobs    []ioReq
 	running bool
 	mu      sync.Mutex
 }
 
-// traverse nodes and set page count, lookupID and maxPageID
-func (d *DiskManager) startupTraversal(rootPageId int32) {
-	fmt.Println("READING FROM OFFSET => ", rootPageId)
-
-	rootPage, err := d.loadPage(rootPageId)
-
-	if err != nil {
-		log.Fatal(err.Error())
+// Reads a page from  disk into an already allocated memory slot in destpage
+//
+// Parameters:
+//
+//	pageId pageId of page
+//	succChan boolean channel. if read is succeessful, receiver get true, otherwise false
+//	destpage pointer to page(already allocated in memory) to write to
+//
+// Return:
+//
+//	err error if any
+func (d *DiskManager) loadPage(pageId int32, destpage *Page) error {
+	if pageId < 0 {
+		return DiskManagerError{Message: "Invalid pageId provided"}
 	}
-	d.RootPage = int32(rootPage.PageId)
-}
 
-// Create an in-memory Page from an existing on-disk page. Can be run as a goroutine
-func (d *DiskManager) loadPage(pageId int32) (*Page, error) {
+	if destpage == nil {
+		return DiskManagerError{Message: "Invalid allocated page provided"}
+	}
+
 	offset := pageId * PAGE_SIZE_BYTES
-
-	pageData := make([]byte, PAGE_SIZE_BYTES)
-
 	fmt.Println("(loadPage) Reading at offet -> ", offset)
-	_, err := d.fd.ReadAt(pageData, int64(offset))
 
+	// read into destPage
+	_, err := d.fd.ReadAt(destpage.pgeData[:], int64(offset))
 	if err != nil && !errors.Is(err, io.EOF) {
 		panic(fmt.Sprintf("Unable to read offset %d: %v", offset, err.Error()))
 	}
 
-	fmt.Println("READING FROM OFFSET => ", offset)
-	fmt.Println("PAGE DATA LEN -> ", len(pageData))
+	// check page validity by checking item count. Offset 17 - 21 in header.
+	if binary.LittleEndian.Uint32(destpage.pgeData[17:21]) <= 0 {
+		return DiskManagerError{Message: "Invalid page"}
+	}
 
 	// Page Header items
-	pgeHeader := pageData[0:HEADER_SIZE_BYTES]
-	flag := int(pgeHeader[0])
+	fmt.Println("FLAG => ", destpage.pgeData[0])
+	destpage.PageId = binary.LittleEndian.Uint32(destpage.pgeData[1:5])
+	destpage.Flags = destpage.pgeData[0]
+	destpage.LSN = [LSN_SIZE_BYTE]byte(destpage.pgeData[5:17])
 
-	pageID := binary.LittleEndian.Uint32(pgeHeader[1:5])
-
-	// isInternal := h.IsSet(7)
-
-	fmt.Println("FLAG => ", flag)
-
-	if uint32(d.MaxPageId) < pageID {
-		d.MaxPageId = int32(pageID)
+	d.mu.Lock()
+	if uint32(d.MaxPageId) < destpage.PageId {
+		d.MaxPageId = int32(destpage.PageId)
 	}
+	d.mu.Unlock()
 
-	p := Page{
-		PageId:  pageID,
-		Flags:   pgeHeader[0],
-		LSN:     [LSN_SIZE_BYTE]byte(pageData[5:17]),
-		pgeData: [8192]byte(pageData),
-	}
-
-	return &p, nil
+	return nil
 }
 
 func (d *DiskManager) FlushMetadata() {
@@ -218,14 +217,14 @@ func (d *DiskManager) FlushMetadata() {
 func (d *DiskManager) WriteReq(page *Page, pageId uint32, written chan int32, lsnChan chan [LSN_SIZE_BYTE]byte) error {
 	if page == nil {
 		written <- -1
-		return DiskioError{Message: "Page is required"}
+		return DiskManagerError{Message: "Page is required"}
 	}
 
-	writeReq := IOReq{
-		Read:      false,
-		PageId:    pageId,
-		Flushed:   written,
-		WritePage: page,
+	writeReq := ioReq{
+		isReadReq: false,
+		pageId:    pageId,
+		flushed:   written,
+		writePage: page,
 		lsnChan:   lsnChan,
 		dManager:  d,
 	}
@@ -283,17 +282,17 @@ func (d *DiskManager) FlushFreeList() error {
 			fmt.Printf("Flushed %d bytes in free list\n", n)
 			return nil
 		case <-ctx.Done():
-			return DiskioError{Message: "Unable to flush free list"}
+			return DiskManagerError{Message: "Unable to flush free list"}
 		}
 	}
 }
 
 // Creates a read req for `pageId` and adds it to queue
-func (d *DiskManager) ReadReq(pageId uint32, p *chan *Page) error {
+func (d *DiskManager) ReadReq(pageId uint32, destPage *Page, readErr chan error) error {
 	fmt.Println("(ReadReq) Reading page -> ", pageId)
-	if p == nil {
-		fmt.Println("(ReadReq) ERROR: CHANNEL IS NIL -> ", p)
-		return DiskioError{Message: "Page output channel is required."}
+	if destPage == nil {
+		fmt.Println("(ReadReq) ERROR: CHANNEL IS NIL -> ", destPage)
+		return DiskManagerError{Message: "Page output channel is required."}
 	}
 
 	fmt.Println("(diskmanager) Read Req on page -> ", pageId)
@@ -302,11 +301,12 @@ func (d *DiskManager) ReadReq(pageId uint32, p *chan *Page) error {
 		// read metadata page
 	}
 
-	rReq := IOReq{
-		Read:     true,
-		ReadPage: p,
-		PageId:   pageId,
-		dManager: d,
+	rReq := ioReq{
+		isReadReq: true,
+		readErr:   readErr,
+		destPage:  destPage,
+		pageId:    pageId,
+		dManager:  d,
 	}
 
 	q, ok := d.Queues.Load(pageId)
@@ -349,31 +349,48 @@ func (d *DiskManager) Close() {
 	fmt.Println("Closed data file descriptors")
 }
 
-// Create a new Page. Requires at least two keys and values/pointers. Key should be sorted in a lexicographical order
-func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (int32, *Page, error) {
+// Create a new Page. Requires at least two keys and values/pointers.
+// Keys should be sorted in a lexicographical order.
+//
+// Parameters:
+//
+//	lsn LSN number of new page
+//	keys keys for the page keys
+//	values a
+//
+// Returns:
+//
+//	pageid pageId of newly created page
+//	pagenewly created page
+//	error error if any
+func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values [][]byte, childPageIds []int32, setAsRoot bool) (int32, *Page, error) {
 	fmt.Println("(NEW) KEYS ==> ", keys)
-	if ((values == nil || len(*values) <= 0) && (len(keys) < DEGREE-1 || len(keys) > ORDER-1)) && !setAsRoot {
-		return 0, nil, DiskioError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
+	// internal node
+	if ((len(values) <= 0) && (len(keys) < DEGREE-1 || len(keys) > ORDER-1)) && !setAsRoot {
+		return 0, nil, DiskManagerError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE-1)}
 	}
 
-	if ((childPageIds == nil || len(*childPageIds) <= 0) && (len(keys) < DEGREE || len(keys) > ORDER)) && !setAsRoot {
-		return 0, nil, DiskioError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
+	// leaf node
+	if ((len(childPageIds) <= 0) && (len(keys) < DEGREE || len(keys) > ORDER)) && !setAsRoot {
+		return 0, nil, DiskManagerError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
 	}
 
+	// check if both page IDs(internal node) and values(leaf nodes) have been provided
 	if values == nil && childPageIds == nil {
-		return 0, nil, DiskioError{Message: "Insufficient input parameters: Either page IDs or values are required to create a new page."}
+		return 0, nil, DiskManagerError{Message: "Insufficient input parameters: Either page IDs or values are required to create a new page."}
 	}
 
 	log.Printf("VALUES ==> %v\n", values)
 	log.Printf("CHILD PAGE IDS ==> %v\n", childPageIds)
 
-	if (values != nil && len(*values) <= 0) && len(*childPageIds) <= 0 {
-		return 0, nil, DiskioError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
+	if (values != nil && len(values) <= 0) && len(childPageIds) <= 0 {
+		return 0, nil, DiskManagerError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
 	}
 
 	fmt.Println("GETTING PAGE..")
 
 	var rightPtr int32
+	var newPageId int32
 
 	d.mu.Lock()
 	fmt.Println("(NEW) ROOT NODE ==> ", d.RootPage)
@@ -382,7 +399,6 @@ func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), chi
 		fmt.Println("(NEW) ROOT NODE PAGE ID ==> ", d.RootPage)
 	}
 
-	var newPageId int32
 	newPageId = d.freeList.pop()
 	fmt.Println("(NEW) Returned page id from free list --> ", newPageId)
 
@@ -410,7 +426,7 @@ func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), chi
 
 	// If internal node, set flag
 	isInternal := false
-	if values == nil || len(*values) <= 0 {
+	if len(values) == 0 {
 		helpers.SetFlag(&pageByteData[0], IsInternal)
 		isInternal = true
 	}
@@ -423,15 +439,15 @@ func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values *([][]byte), chi
 		binary.LittleEndian.PutUint32(cData[1:5], uint32(len(k)))
 
 		if isInternal {
-			binary.LittleEndian.PutUint32(cData[9:13], uint32((*childPageIds)[i]))
+			binary.LittleEndian.PutUint32(cData[9:13], uint32((childPageIds)[i]))
 		} else {
-			binary.LittleEndian.PutUint32(cData[5:9], uint32(len((*values)[i])))
+			binary.LittleEndian.PutUint32(cData[5:9], uint32(len((values)[i])))
 		}
 
 		cData = append(cData, k...)
-		cData = append(cData, (*values)[i]...)
+		cData = append(cData, (values)[i]...)
 
-		// calculate offset to start writing
+		// calculate offset to start writing. cells are written from end of page upwards to lower spots
 		lastOff -= len(cData)
 		copy(pageByteData[lastOff:(lastOff+len(cData))], cData)
 		cData = make([]byte, 13)
@@ -479,7 +495,7 @@ func (p *Page) UpdateRightPtr(pageId int32) error {
 
 	// check if is internal node
 	if !helpers.BitIsSet(&p.pgeData[0], IsInternal) {
-		return DiskioError{Message: "Invalid node: Only internal nodes can have right pointer in header."}
+		return DiskManagerError{Message: "Invalid node: Only internal nodes can have right pointer in header."}
 	}
 
 	binary.LittleEndian.PutUint32(p.pgeData[39:43], uint32(pageId))
@@ -536,11 +552,11 @@ func (p *Page) UpdateLSN(lsn []byte) error {
 	p.rmu.RLock()
 	defer p.rmu.RUnlock()
 	if lsn == nil {
-		return DiskioError{Message: "Invalid LSN provided"}
+		return DiskManagerError{Message: "Invalid LSN provided"}
 	}
 
 	if len(lsn) != LSN_SIZE_BYTE {
-		return DiskioError{Message: "LSN size is invalid."}
+		return DiskManagerError{Message: "LSN size is invalid."}
 	}
 
 	copy(p.LSN[:], lsn)
@@ -562,7 +578,7 @@ func (p *Page) GetLSN() [LSN_SIZE_BYTE]byte {
 
 func (p *Page) GetPageByteData() (data *[PAGE_SIZE_BYTES]byte, err error) {
 	if p == nil {
-		return nil, DiskioError{Message: "Page is not set"}
+		return nil, DiskManagerError{Message: "Page is not set"}
 	}
 
 	p.rmu.RLock()
@@ -585,7 +601,7 @@ func (p *Page) SetPageData(d *[PAGE_SIZE_BYTES]byte) error {
 // resets the  Page details
 func (p *Page) Clear() error {
 	if p == nil {
-		return DiskioError{Message: "Page is not set"}
+		return DiskManagerError{Message: "Page is not set"}
 	}
 
 	p.rmu.Lock()
@@ -746,7 +762,7 @@ func (q *JobQueue) run() {
 	q.running = true
 	q.mu.Unlock()
 
-	var job IOReq
+	var job ioReq
 	for {
 		fmt.Println("(run) acquiring queue lock()...")
 		q.mu.Lock()
@@ -770,7 +786,7 @@ func (q *JobQueue) run() {
 	}
 }
 
-func (q *JobQueue) addJob(job IOReq) {
+func (q *JobQueue) addJob(job ioReq) {
 	q.mu.Lock()
 	q.jobs = append(q.jobs, job)
 	shouldStart := !q.running
@@ -783,24 +799,23 @@ func (q *JobQueue) addJob(job IOReq) {
 }
 
 // executes queue job
-func (r *IOReq) execute() {
+func (r *ioReq) execute() {
 	fmt.Println("(execute) diskmanager.execute()...")
-	if r.Read {
+	if r.isReadReq {
 		// Read from disk, create Page and return that in channel
 		fmt.Println("(execute) executing read request...")
-		p, err := r.dManager.loadPage(int32(r.PageId))
-
+		err := r.dManager.loadPage(int32(r.pageId), r.destPage)
 		if err != nil {
-			panic(err.Error())
+			r.readErr <- err
 		}
 		fmt.Println("(execute) sending back read page...")
 
-		*(r.ReadPage) <- p
+		r.readErr <- nil
 	} else {
 		// Write page to disk
-		fmt.Printf("(execute) executing write request -> %d...\n", r.PageId)
-		r.dManager.flushPage(r.WritePage, r.Flushed, r.lsnChan)
-		fmt.Printf("(execute) executed write request -> %d...\n", r.PageId)
+		fmt.Printf("(execute) executing write request -> %d...\n", r.pageId)
+		r.dManager.flushPage(r.writePage, r.flushed, r.lsnChan)
+		fmt.Printf("(execute) executed write request -> %d...\n", r.pageId)
 	}
 	fmt.Println("(execute) diskmanager.execute() DONE.")
 }
@@ -821,7 +836,7 @@ func NewTestPage(pageId int32) *Page {
 func NewDiskManager(config DiskManagerConfig) (*DiskManager, error) {
 	fmt.Println("IN INIT()")
 	if len(config.DataFile) == 0 {
-		return nil, DiskioError{Message: "data file path not provided"}
+		return nil, DiskManagerError{Message: "data file path not provided"}
 	}
 
 	PgFreeList := NewFreeList()
@@ -893,10 +908,7 @@ func NewDiskManager(config DiskManagerConfig) (*DiskManager, error) {
 
 	// If root is present, traverse
 	if rootPgeID != 0 {
-		// Create root node
-		// Set DiskManager Variable
-		// traverse
-		diskManager.startupTraversal(int32(rootPgeID))
+		diskManager.RootPage = int32(rootPgeID)
 
 		return diskManager, nil
 	}
@@ -910,7 +922,7 @@ func NewDiskManager(config DiskManagerConfig) (*DiskManager, error) {
 func newJobQueue(pageId uint32) *JobQueue {
 	return &JobQueue{
 		pageId:  pageId,
-		jobs:    make([]IOReq, 0),
+		jobs:    make([]ioReq, 0),
 		running: false,
 	}
 }

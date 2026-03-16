@@ -128,13 +128,8 @@ func (c *Cache) Get(pageId uint32) (*Frame, error) {
 		//  add item  to cache
 		c.rmu.RUnlock()
 		f, err := c.put(pageId, pge, false)
-
 		if err != nil {
 			return nil, errors.New("No item found")
-		}
-
-		if err != nil {
-			panic(err)
 		}
 
 		f.Reference()
@@ -190,7 +185,7 @@ func (c *Cache) MarkFrameDirty(f *Frame) error {
 
 // Creates a new frame and assigns page ID to frame with provided keys and values/child
 // SetAsRoot parameter ensures to set
-func (c *Cache) CreateNewFrame(lsn []byte, keys [][]byte, values *([][]byte), childPageIds *[]int32, setAsRoot bool) (*Frame, error) {
+func (c *Cache) CreateNewFrame(lsn []byte, keys [][]byte, values [][]byte, childPageIds []int32, setAsRoot bool) (*Frame, error) {
 	// create page
 	pgeId, pge, err := c.diskManager.NewPage(lsn, keys, values, childPageIds, setAsRoot)
 

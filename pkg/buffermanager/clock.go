@@ -215,7 +215,7 @@ func NewClock(size uint64) (*clock, error) {
 	}
 
 	var wg sync.WaitGroup
-	for i := uint64(0); i < capacity; i++ {
+	for range capacity {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
