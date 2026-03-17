@@ -15,42 +15,6 @@ import (
 	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
-const (
-	DEGREE                   = 2
-	ORDER                    = DEGREE * 2
-	PAGE_SIZE_BYTES          = 8192
-	HEADER_SIZE_BYTES        = 51
-	METADATA_PAGE_SIZE_BYTES = 8192 //20
-	LOWER_PADDING_BYTES      = 16
-	CELL_POINTER_SIZE_BYTE   = 5
-	CELL_KEY_SIZE_BYTES      = 4
-	CELL_VAL_SIZE_BYTES      = 4
-	CELL_CHILD_PAGEID_SIZE   = 4
-	LSN_SIZE_BYTE            = 12
-)
-
-// Page Header Flag bits
-const (
-	Dead int = iota + 4
-	Dirty
-	Written
-	IsInternal
-)
-
-type PageHeaderFlagPos int
-
-// Page 8K
-type Page struct {
-	// raw byte data
-	pgeData [PAGE_SIZE_BYTES]byte
-	rmu     sync.RWMutex
-	// PageId/BlockId
-	PageId uint32
-	LSN    [LSN_SIZE_BYTE]byte
-	// Page flags
-	Flags byte
-}
-
 type DiskManager struct {
 	// Root Page ID
 	RootPage int32
@@ -488,45 +452,6 @@ func (d *DiskManager) CheckRootPageId() uint32 {
 }
 
 // Updates the right most pointer
-func (p *Page) UpdateRightPtr(pageId int32) error {
-	if pageId == 0 {
-		return nil
-	}
-
-	// check if is internal node
-	if !helpers.BitIsSet(&p.pgeData[0], IsInternal) {
-		return DiskManagerError{Message: "Invalid node: Only internal nodes can have right pointer in header."}
-	}
-
-	binary.LittleEndian.PutUint32(p.pgeData[39:43], uint32(pageId))
-
-	return nil
-}
-
-// marks a page as dead, prepares it for deletion
-func (p *Page) MarkAsDead() error {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	helpers.SetFlag(&p.pgeData[0], Dead)
-	helpers.SetFlag(&p.Flags, Dead)
-
-	return nil
-}
-
-func (p *Page) MarkDirty() {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	helpers.SetFlag(&p.pgeData[0], Dirty)
-	helpers.SetFlag(&p.Flags, Dirty)
-}
-
-func (p *Page) MarkClean() {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	helpers.UnsetFlag(&p.pgeData[0], Dirty)
-	helpers.UnsetFlag(&p.Flags, Dirty)
-}
-
 func (d *DiskManager) SetAsRoot(pageId int32) error {
 	d.mu.Lock()
 	d.RootPage = pageId
@@ -534,84 +459,6 @@ func (d *DiskManager) SetAsRoot(pageId int32) error {
 
 	return nil
 
-}
-
-// Check if page is marked for deletion
-func (p *Page) IsDeleted() bool {
-	fmt.Println("(IsDeleted) Acquiring page latch...")
-	p.rmu.Lock()
-	fmt.Println("(IsDeleted) Acquired page latch...")
-	defer p.rmu.Unlock()
-
-	d := helpers.BitIsSet(&p.pgeData[0], Dead)
-
-	return d
-}
-
-func (p *Page) UpdateLSN(lsn []byte) error {
-	p.rmu.RLock()
-	defer p.rmu.RUnlock()
-	if lsn == nil {
-		return DiskManagerError{Message: "Invalid LSN provided"}
-	}
-
-	if len(lsn) != LSN_SIZE_BYTE {
-		return DiskManagerError{Message: "LSN size is invalid."}
-	}
-
-	copy(p.LSN[:], lsn)
-
-	return nil
-}
-
-// Retrieves the Log Sequence Number of the page block
-func (p *Page) GetLSN() [LSN_SIZE_BYTE]byte {
-	p.rmu.RLock()
-	defer p.rmu.RUnlock()
-
-	var lsn [LSN_SIZE_BYTE]byte
-
-	copy(lsn[:], p.LSN[:])
-
-	return lsn
-}
-
-func (p *Page) GetPageByteData() (data *[PAGE_SIZE_BYTES]byte, err error) {
-	if p == nil {
-		return nil, DiskManagerError{Message: "Page is not set"}
-	}
-
-	p.rmu.RLock()
-	defer p.rmu.RUnlock()
-
-	return &(p.pgeData), nil
-}
-
-func (p *Page) SetPageData(d *[PAGE_SIZE_BYTES]byte) error {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-
-	copy(p.pgeData[:], d[:])
-	p.PageId = binary.LittleEndian.Uint32(d[1:5])
-	copy(p.LSN[:], d[5:5+LSN_SIZE_BYTE])
-
-	return nil
-}
-
-// resets the  Page details
-func (p *Page) Clear() error {
-	if p == nil {
-		return DiskManagerError{Message: "Page is not set"}
-	}
-
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-
-	for i := range PAGE_SIZE_BYTES {
-		p.pgeData[i] = 0x00
-	}
-
-	return nil
 }
 
 // Flushes page content to disk(does not call sync())
@@ -701,58 +548,6 @@ func (d *DiskManager) flushPage(p *Page, b chan int32, lsnChan chan [LSN_SIZE_BY
 		lsnChan <- seqNo
 	}
 	fmt.Println("SUCCESSFULLY SEND DATA TO CHANNELS....")
-}
-
-// Check whether the page represents an internal node
-func (p *Page) IsInternal() (bool, error) {
-	p.rmu.RLock()
-	defer p.rmu.RUnlock()
-
-	return helpers.BitIsSet(&p.pgeData[0], IsInternal), nil
-}
-
-func (p *Page) UpdateUpperOffset(off uint32) {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	binary.LittleEndian.PutUint32(p.pgeData[25:29], off)
-}
-
-func (p *Page) UpdateLowerOffset(off uint32) {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	binary.LittleEndian.PutUint32(p.pgeData[29:33], off)
-}
-
-func (p *Page) UpdateItemCount(count int32) {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	binary.LittleEndian.PutUint32(p.pgeData[17:21], uint32(count))
-}
-
-func (p *Page) UpdateFreeSpace(free int32) {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	binary.LittleEndian.PutUint32(p.pgeData[21:25], uint32(free))
-}
-
-func (p *Page) UpdateRightSibling(pageId uint32) {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	binary.LittleEndian.PutUint32(p.pgeData[43:47], pageId)
-}
-
-func (p *Page) UpdateLeftSibling(pageId uint32) {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-	binary.LittleEndian.PutUint32(p.pgeData[47:51], pageId)
-}
-
-func (p *Page) SetLSN(lsn []byte) {
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
-
-	copy(p.LSN[:], lsn)
-	copy(p.pgeData[5:17], lsn)
 }
 
 func (q *JobQueue) run() {

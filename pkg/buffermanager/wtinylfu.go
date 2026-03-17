@@ -205,7 +205,7 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 // By default, all new items are added to the window cache.
 // If window segment is full, an item is evicted or added to main cache.
 // Returns a slice of uint32 keys that have been evicted and error if any
-func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evictedKIds []uint32, errr error) {
+func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evictedKIds []uint32, e error) {
 	if p == nil {
 		panic("(AddItem)frame is required")
 	}
@@ -253,6 +253,45 @@ func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evi
 	}
 
 	return f, evictKeys, nil
+}
+
+// getEmptyFrame returns a free frame from the circular buffer. If no frame
+// is available, evict from window cache
+func (w *WTinyLfu) getFreeFrame() (fr *Frame, evicted []uint32, e error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// check if window is full
+	// incase of eviction, IDs of evicted frames are appended to the array
+	var keysToEvict []uint32
+	var err error
+
+	if w.windowCount == w.windowCapacity {
+		keysToEvict, err = w.evictWindow()
+		if err != nil {
+			return nil, nil, WTinyLFUError{Message: "Unable to evict from window cache"}
+		}
+	}
+
+	// Get empty frame from cbuffer
+	f := w.cBuffer.Pop()
+	if f == nil {
+		return nil, nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
+	}
+
+	f.updateSegment(windowSegment)
+
+	return f, keysToEvict, nil
+}
+
+// readdFrameToPool  re-adds a frame to bpool after clearing its content first.
+// Returns error if any
+func (w *WTinyLfu) readdFrameToPool(fr *Frame) error {
+	err := w.cBuffer.addToBpool(fr)
+	if err != nil {
+		fmt.Printf(helpers.BOLDRED + err.Error() + helpers.RESET)
+	}
+
+	return err
 }
 
 // Returns the number of frames in the window cache

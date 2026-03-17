@@ -1,4 +1,4 @@
-package diskmanager
+package pager
 
 import (
 	"encoding/binary"

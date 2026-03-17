@@ -6,7 +6,7 @@ import (
 	"unsafe"
 
 	"github.com/oryankibandi/baobab/internal/manual"
-	diskmanager "github.com/oryankibandi/baobab/pkg/diskmanager"
+	"github.com/oryankibandi/baobab/pkg/pager"
 )
 
 type metadata struct {
@@ -20,8 +20,9 @@ type counter struct {
 
 type Frame struct {
 	// 8K page. Memory initialized manually
-	page       diskmanager.Page // 8240 bytes
-	lsn        [diskmanager.LSN_SIZE_BYTE]byte
+	// x64 -> 8220 bytes, x86 8208 bytes
+	page       pager.Page // 4 byte padding added in x64 systems
+	lsn        [pager.LSN_SIZE_BYTE]byte
 	isInternal atomic.Bool
 	isDeleted  atomic.Bool
 	dirty      atomic.Bool

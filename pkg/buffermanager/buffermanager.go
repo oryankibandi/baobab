@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	diskmanager "github.com/oryankibandi/baobab/pkg/diskmanager"
-	"github.com/oryankibandi/baobab/pkg/helpers"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
@@ -43,7 +42,7 @@ type Cache struct {
 }
 
 // Adds a page to cache, setting k as key. k is the unique page ID.
-func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
+func (c *Cache) put(k uint32, fr *Frame, dirty bool) (*Frame, error) {
 	fmt.Println("cache.Put")
 	c.rmu.Lock()
 
@@ -51,26 +50,9 @@ func (c *Cache) put(k uint32, p *diskmanager.Page, dirty bool) (*Frame, error) {
 	var val *Frame
 
 	val, ok := c.CacheMap[k]
-	if !ok {
-		// First time entry
-		log.Println("First Frame, adding to window cache----------------")
-		// add to wtinylfu
-		newEntr, dKeys, err := c.wTinyLfu.AddItem(p, dirty)
-		if err != nil {
-			fmt.Println(helpers.BOLDRED + err.Error() + helpers.RESET)
-			return nil, err
-		}
+	c.CacheMap[k] = fr
 
-		delKeys = dKeys
-		c.CacheMap[k] = newEntr
-		val = newEntr
-	} else {
-		// update value
-		err := val.SetData(p)
-		if err != nil {
-			return nil, err
-		}
-
+	if ok {
 		// increment count
 		c.wTinyLfu.Increment(val)
 	}
@@ -108,26 +90,44 @@ func (c *Cache) Get(pageId uint32) (*Frame, error) {
 		val.Reference()
 		return val, nil
 	} else {
-		// Retrieve item from disk
-		fmt.Println("Item not found, reading from disk")
-		ch := make(chan *diskmanager.Page)
-		err := c.diskManager.ReadReq(uint32(pageId), &ch)
+		// get empty frame. this is where the page read from disk will be stored since memory is already allocated.
+		fr, evicted, err := c.wTinyLfu.getFreeFrame()
+		if err != nil {
+			return nil, err
+		}
 
+		// if there are keys evicted, delete from hash table
+		if len(evicted) > 0 {
+			// acquire write lock
+			c.rmu.RUnlock()
+			c.rmu.Lock()
+
+			for _, ev := range evicted {
+				delete(c.CacheMap, ev)
+			}
+			c.rmu.Unlock()
+			c.rmu.RLock()
+		}
+
+		// Create read request
+		fmt.Println("Item not found, reading from disk")
+		errChan := make(chan error)
+		err = c.diskManager.ReadReq(uint32(pageId), &fr.page, errChan)
 		if err != nil {
 			return nil, err
 		}
 
 		fmt.Println("(bufferManager.Get()) Waiting for read req to complete..")
-		pge := <-ch
-		fmt.Println("(bufferManager.Get() Read request done.")
-
-		if pge == nil {
-			return nil, BufferManagerError{Message: "Page not found"}
+		err = <-errChan
+		if err != nil {
+			// readd frame to circular buffer pool
+			c.wTinyLfu.readdFrameToPool(fr)
+			return nil, err
 		}
 
 		//  add item  to cache
 		c.rmu.RUnlock()
-		f, err := c.put(pageId, pge, false)
+		f, err := c.put(pageId, fr, false)
 		if err != nil {
 			return nil, errors.New("No item found")
 		}

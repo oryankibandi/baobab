@@ -138,6 +138,7 @@ func (clk *clock) Pop() *Frame {
 }
 
 // Clears entry and adds it back to the pool.
+// Returns error if any.
 func (clk *clock) addToBpool(e *Frame) error {
 	if e == nil {
 		return BufferManagerError{Message: "Received nil frame to add to pool"}
