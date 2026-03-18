@@ -1,36 +1,19 @@
 package diskmanager
 
 import (
-	"bufio"
-	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
 type DiskManager struct {
-	// Root Page ID
-	RootPage int32
-	// 4 bytes No. of pages
-	PageCount int32
-	// No of pages flushed to disk. Default to PageCount on startup
-	FlushedPages int32
-
-	// 4 bytes Max Page ID issued monotinically (starts from 1)
-	MaxPageId int32
-
 	// Map of job queues for read and write requests {PageId: *JobQueue}
 	Queues sync.Map
-
-	//  free list containin available page IDs
-	freeList *FreeList
 
 	// database file
 	fd *os.File
@@ -44,167 +27,94 @@ type DiskManagerConfig struct {
 }
 
 // Disk req for reads and writes
+// pointer pointer to buffer where page data is retrieved from for writes. or
+//
+//	in case of a read request, data is written to.
+//
+// size size of buffer
+// off offset to read/write at
+// errChan chan to send errors to
+// flag flags representing the type of request and dead page
+//
+//	+-----+-----+-----+-----+-----+-----+-----+-----+
+//	| b7  | b6  | b5  | b4  | b3  | b2  | b1  | b0  |
+//	+-----+-----+-----+-----+-----+-----+-----+-----+
+//	|  1  |  1  |  0  |  0  |  0  |  0  |  0  |  0  |
+//	+-----+-----+-----+-----+-----+-----+-----+-----+
+//
+//	b7: request type. 1 if read request, 0 if write request
+//	b6: dead page flag. 1 if dead page, 0 if not.Dead pages are overwritten
+//	    with zero
 type ioReq struct {
-	isReadReq bool       // Is read request
-	pageId    uint32     // ID of page to read
-	readErr   chan error // read error
-	destPage  *Page      // page to write to for read requests
-
-	flushed   chan int32               // Amount of bytes written.
-	lsnChan   chan [LSN_SIZE_BYTE]byte // channel to send back log sequence number of page after flushing. This is used by the background writer to create a checkpoint in WAL
-	writePage *Page                    // if write req, page to write
-	dManager  *DiskManager
+	buff    *[]byte
+	size    int64
+	errChan chan error
+	off     uint32
+	flag    byte
 }
 
 type JobQueue struct {
 	// PageId/Block Id for which this job is for
-	pageId  uint32
-	jobs    []ioReq
-	running bool
-	mu      sync.Mutex
+	pageId   uint32
+	jobs     []ioReq
+	running  bool
+	mu       sync.Mutex
+	dManager *DiskManager
 }
 
-// Reads a page from  disk into an already allocated memory slot in destpage
+// Reads a page from disk at offset off into buff
 //
 // Parameters:
 //
-//	pageId pageId of page
-//	succChan boolean channel. if read is succeessful, receiver get true, otherwise false
-//	destpage pointer to page(already allocated in memory) to write to
+//	off offset to start reading from
+//	buff buffer to store read page content
 //
 // Return:
 //
 //	err error if any
-func (d *DiskManager) loadPage(pageId int32, destpage *Page) error {
-	if pageId < 0 {
-		return DiskManagerError{Message: "Invalid pageId provided"}
+func (d *DiskManager) loadPage(off uint32, buff *[]byte) error {
+	if buff == nil {
+		return DiskManagerError{Message: "Invalid buffer provided"}
 	}
 
-	if destpage == nil {
-		return DiskManagerError{Message: "Invalid allocated page provided"}
-	}
-
-	offset := pageId * PAGE_SIZE_BYTES
-	fmt.Println("(loadPage) Reading at offet -> ", offset)
-
-	// read into destPage
-	_, err := d.fd.ReadAt(destpage.pgeData[:], int64(offset))
+	// read into buffer
+	_, err := d.fd.ReadAt(*buff, int64(off))
 	if err != nil && !errors.Is(err, io.EOF) {
-		panic(fmt.Sprintf("Unable to read offset %d: %v", offset, err.Error()))
+		panic(fmt.Sprintf("Unable to read offset %d: %v", off, err.Error()))
 	}
-
-	// check page validity by checking item count. Offset 17 - 21 in header.
-	if binary.LittleEndian.Uint32(destpage.pgeData[17:21]) <= 0 {
-		return DiskManagerError{Message: "Invalid page"}
-	}
-
-	// Page Header items
-	fmt.Println("FLAG => ", destpage.pgeData[0])
-	destpage.PageId = binary.LittleEndian.Uint32(destpage.pgeData[1:5])
-	destpage.Flags = destpage.pgeData[0]
-	destpage.LSN = [LSN_SIZE_BYTE]byte(destpage.pgeData[5:17])
-
-	d.mu.Lock()
-	if uint32(d.MaxPageId) < destpage.PageId {
-		d.MaxPageId = int32(destpage.PageId)
-	}
-	d.mu.Unlock()
 
 	return nil
 }
 
-func (d *DiskManager) FlushMetadata() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	// only use as fixed size buffer - default is 4K which is too much
-	wr := bufio.NewWriterSize(d.fd, METADATA_PAGE_SIZE_BYTES)
-
-	// Go to beginning of file
-	d.fd.Seek(0, 0)
-
-	rootPageId := make([]byte, 4)
-	pageCount := make([]byte, 4)
-	maxPageId := make([]byte, 4)
-
-	binary.LittleEndian.PutUint32(pageCount, uint32(d.PageCount))
-	binary.LittleEndian.PutUint32(maxPageId, uint32(d.MaxPageId))
-
-	if d.RootPage != 0 {
-		binary.LittleEndian.PutUint32(rootPageId, uint32(d.RootPage))
-	}
-
-	// write
-	//  root page ID
-	_, err := wr.Write(rootPageId)
-
-	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
-	}
-
-	// Version
-	_, err = wr.Write([]byte{0, 0, 0, 0})
-
-	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
-	}
-	// tree height
-	_, err = wr.Write([]byte{0, 0, 0, 0})
-
-	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
-	}
-
-	// No or pages
-	_, err = wr.Write(pageCount)
-
-	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
-	}
-
-	// Max page Id
-	_, err = wr.Write(maxPageId)
-
-	if err != nil {
-		panic(fmt.Sprintf("Unable to write root page metadata: %v", err))
-	}
-
-	err = wr.Flush()
-	if err != nil {
-		panic(fmt.Sprintf("Unable to flush metadata buffer: %v", err))
-	}
-	if err = d.fd.Sync(); err != nil {
-		panic(err.Error())
-	}
-}
-
 // Creates write request for `page` and adds it to queue
-func (d *DiskManager) WriteReq(page *Page, pageId uint32, written chan int32, lsnChan chan [LSN_SIZE_BYTE]byte) error {
-	if page == nil {
-		written <- -1
-		return DiskManagerError{Message: "Page is required"}
+func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool, errChan chan error) error {
+	if buff == nil {
+		return DiskManagerError{Message: "invalid buffer pointer provided."}
+	}
+	if errChan == nil {
+		return DiskManagerError{Message: "invalid error channel provided."}
 	}
 
+	var flag byte
+	if isDead {
+		// set dead flag
+		helpers.SetFlag(&flag, 6)
+	}
 	writeReq := ioReq{
-		isReadReq: false,
-		pageId:    pageId,
-		flushed:   written,
-		writePage: page,
-		lsnChan:   lsnChan,
-		dManager:  d,
+		buff:    buff,
+		size:    size,
+		off:     off,
+		flag:    flag,
+		errChan: errChan,
 	}
 
 	// Check queue
-	// d.mu.RLock()
-	q, ok := d.Queues.Load(pageId)
-	// d.mu.RUnlock()
+	q, ok := d.Queues.Load(off)
 
 	if !ok {
 		// Create queue
-		jQ := newJobQueue(pageId)
-		// d.mu.Lock()
-		d.Queues.Store(pageId, jQ)
-		// d.mu.Unlock()
-
+		jQ := d.newJobQueue(off)
+		d.Queues.Store(off, jQ)
 		jQ.addJob(writeReq)
 
 		return nil
@@ -232,54 +142,31 @@ func (d *DiskManager) ForceFlush() {
 	}
 }
 
-func (d *DiskManager) FlushFreeList() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	ch := make(chan int)
-	d.freeList.FlushFreeList(&ch)
-
-	for {
-		select {
-		case n := <-ch:
-			cancel()
-			fmt.Printf("Flushed %d bytes in free list\n", n)
-			return nil
-		case <-ctx.Done():
-			return DiskManagerError{Message: "Unable to flush free list"}
-		}
-	}
-}
-
 // Creates a read req for `pageId` and adds it to queue
-func (d *DiskManager) ReadReq(pageId uint32, destPage *Page, readErr chan error) error {
-	fmt.Println("(ReadReq) Reading page -> ", pageId)
-	if destPage == nil {
-		fmt.Println("(ReadReq) ERROR: CHANNEL IS NIL -> ", destPage)
-		return DiskManagerError{Message: "Page output channel is required."}
+func (d *DiskManager) ReadReq(buff *[]byte, off uint32, readErr chan error) error {
+	if buff == nil {
+		return DiskManagerError{Message: "invalid buffer pointer provided."}
+	}
+	if readErr == nil {
+		return DiskManagerError{Message: "invalid error channel provided."}
 	}
 
-	fmt.Println("(diskmanager) Read Req on page -> ", pageId)
-
-	if pageId == 0 {
-		// read metadata page
-	}
+	fmt.Println("(diskmanager) Read Req at offset -> ", off)
 
 	rReq := ioReq{
-		isReadReq: true,
-		readErr:   readErr,
-		destPage:  destPage,
-		pageId:    pageId,
-		dManager:  d,
+		flag:    0x80, // 1000 0000
+		buff:    buff,
+		off:     off,
+		errChan: readErr,
 	}
 
-	q, ok := d.Queues.Load(pageId)
+	q, ok := d.Queues.Load(off)
 
 	if !ok {
 		// Create queue
 		fmt.Println("(diskmanager.ReadReq()) No queue, creating...")
-		jQ := newJobQueue(pageId)
-		d.Queues.Store(pageId, jQ)
+		jQ := d.newJobQueue(off)
+		d.Queues.Store(off, jQ)
 
 		jQ.addJob(rReq)
 
@@ -291,16 +178,8 @@ func (d *DiskManager) ReadReq(pageId uint32, destPage *Page, readErr chan error)
 	return nil
 }
 
-func (d *DiskManager) incrementFlushedPages() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.FlushedPages += 1
-}
-
 // safely close file descriptors
 func (d *DiskManager) Close() {
-	//LookupTable.Close()
-	d.freeList.close()
 	d.mu.Lock()
 	err := d.fd.Close()
 
@@ -310,244 +189,48 @@ func (d *DiskManager) Close() {
 
 	d.mu.Unlock()
 
-	fmt.Println("Closed data file descriptors")
-}
-
-// Create a new Page. Requires at least two keys and values/pointers.
-// Keys should be sorted in a lexicographical order.
-//
-// Parameters:
-//
-//	lsn LSN number of new page
-//	keys keys for the page keys
-//	values a
-//
-// Returns:
-//
-//	pageid pageId of newly created page
-//	pagenewly created page
-//	error error if any
-func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values [][]byte, childPageIds []int32, setAsRoot bool) (int32, *Page, error) {
-	fmt.Println("(NEW) KEYS ==> ", keys)
-	// internal node
-	if ((len(values) <= 0) && (len(keys) < DEGREE-1 || len(keys) > ORDER-1)) && !setAsRoot {
-		return 0, nil, DiskManagerError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE-1)}
-	}
-
-	// leaf node
-	if ((len(childPageIds) <= 0) && (len(keys) < DEGREE || len(keys) > ORDER)) && !setAsRoot {
-		return 0, nil, DiskManagerError{Message: fmt.Sprintf("Atleast %d keys are required.\n", DEGREE)}
-	}
-
-	// check if both page IDs(internal node) and values(leaf nodes) have been provided
-	if values == nil && childPageIds == nil {
-		return 0, nil, DiskManagerError{Message: "Insufficient input parameters: Either page IDs or values are required to create a new page."}
-	}
-
-	log.Printf("VALUES ==> %v\n", values)
-	log.Printf("CHILD PAGE IDS ==> %v\n", childPageIds)
-
-	if (values != nil && len(values) <= 0) && len(childPageIds) <= 0 {
-		return 0, nil, DiskManagerError{Message: fmt.Sprintf("Atleast %d values or pageIds are required.\n", ORDER)}
-	}
-
-	fmt.Println("GETTING PAGE..")
-
-	var rightPtr int32
-	var newPageId int32
-
-	d.mu.Lock()
-	fmt.Println("(NEW) ROOT NODE ==> ", d.RootPage)
-
-	if d.RootPage != 0 {
-		fmt.Println("(NEW) ROOT NODE PAGE ID ==> ", d.RootPage)
-	}
-
-	newPageId = d.freeList.pop()
-	fmt.Println("(NEW) Returned page id from free list --> ", newPageId)
-
-	if newPageId <= 0 {
-		newPageId = d.MaxPageId + 1
-		d.MaxPageId = newPageId
-	}
-
-	pageByteData := make([]byte, PAGE_SIZE_BYTES)
-
-	// Fill Page Data
-	pageByteData[0] = byte(32)
-	// page Id
-	binary.LittleEndian.PutUint32(pageByteData[1:5], uint32(newPageId))
-	// LSN
-	if len(lsn) == LSN_SIZE_BYTE {
-		copy(pageByteData[5:17], lsn)
-	}
-	// item count
-	binary.LittleEndian.PutUint32(pageByteData[17:21], uint32(len(keys)))
-	// lower offset
-	binary.LittleEndian.PutUint32(pageByteData[29:33], uint32(HEADER_SIZE_BYTES))
-	// Right pointer
-	binary.LittleEndian.PutUint32(pageByteData[39:43], uint32(rightPtr))
-
-	// If internal node, set flag
-	isInternal := false
-	if len(values) == 0 {
-		helpers.SetFlag(&pageByteData[0], IsInternal)
-		isInternal = true
-	}
-
-	// add keys and values to page data
-	cData := make([]byte, 13)
-	lastOff := PAGE_SIZE_BYTES - LOWER_PADDING_BYTES
-	for i, k := range keys {
-		// create cell layout then copy cell to page
-		binary.LittleEndian.PutUint32(cData[1:5], uint32(len(k)))
-
-		if isInternal {
-			binary.LittleEndian.PutUint32(cData[9:13], uint32((childPageIds)[i]))
-		} else {
-			binary.LittleEndian.PutUint32(cData[5:9], uint32(len((values)[i])))
-		}
-
-		cData = append(cData, k...)
-		cData = append(cData, (values)[i]...)
-
-		// calculate offset to start writing. cells are written from end of page upwards to lower spots
-		lastOff -= len(cData)
-		copy(pageByteData[lastOff:(lastOff+len(cData))], cData)
-		cData = make([]byte, 13)
-	}
-
-	// upper offset
-	binary.LittleEndian.PutUint32(pageByteData[25:29], uint32(lastOff))
-	// free space
-	binary.LittleEndian.PutUint32(pageByteData[21:25], (uint32(lastOff) - HEADER_SIZE_BYTES))
-
-	// new page
-	p := Page{
-		PageId:  uint32(newPageId),
-		pgeData: [PAGE_SIZE_BYTES]byte{},
-	}
-
-	// LSN and Flags
-	p.Flags = pageByteData[0]
-	copy(p.LSN[:], lsn)
-
-	// Add page count & offset
-	if d.RootPage == 0 && d.PageCount <= 0 {
-		d.RootPage = int32(p.PageId)
-	}
-
-	d.PageCount += 1
-	d.mu.Unlock()
-
-	return newPageId, &p, nil
-}
-
-func (d *DiskManager) CheckRootPageId() uint32 {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	root := d.RootPage
-
-	return uint32(root)
-}
-
-// Updates the right most pointer
-func (d *DiskManager) SetAsRoot(pageId int32) error {
-	d.mu.Lock()
-	d.RootPage = pageId
-	d.mu.Unlock()
-
-	return nil
-
+	fmt.Println("Closed db file descriptors")
 }
 
 // Flushes page content to disk(does not call sync())
-// Sends number of bytes written to channel b
-func (d *DiskManager) flushPage(p *Page, b chan int32, lsnChan chan [LSN_SIZE_BYTE]byte) {
+// Paramters:
+//
+//	pData pointer to buffer with data to flush
+//	offset offset at which to write data
+//	size size of data being written
+//	isDead if the page is dead(has logically deleted). If true, overwrite with 0
+func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDead bool) {
 	fmt.Println("(flushPage) Flushing page...")
-	p.rmu.Lock()
-	defer p.rmu.Unlock()
 
-	fmt.Println("acquired page locks... ")
-	// Unmark as dirty
-	helpers.UnsetFlag(&p.pgeData[HEADER_SIZE_BYTES], Dirty)
-
-	// retrieve LSN. Already acquired page locks so we can access from the header to avoid deadlocks if we called page.GetLSN()
-	seqNo := p.LSN
-	// update page header data
-
-	if helpers.BitIsSet(&p.pgeData[HEADER_SIZE_BYTES], Dead) {
-		// page marked for deletion, overwrite with 0s
-		var isRoot bool
-		copy(p.pgeData[:], make([]byte, PAGE_SIZE_BYTES))
-
+	if isDead {
+		// rewrite with zeros
 		d.mu.Lock()
-		isRoot = d.RootPage == int32(p.PageId)
-		n, err := d.fd.WriteAt(p.pgeData[:], int64(p.PageId*PAGE_SIZE_BYTES))
+		for i := range size {
+			d.wg.Add(1)
+			go func() {
+				(*pData)[i] &= 0
+				d.wg.Done()
+			}()
+		}
+		d.wg.Wait()
+		d.mu.Unlock()
+
+		// page marked for deletion, overwrite with 0s
+		_, err := d.fd.WriteAt(*pData, int64(offset))
 
 		if err != nil {
 			panic("Could not write page")
 		}
-
-		// if page is root and it's the only one, reset root page
-		if isRoot && d.PageCount == 1 {
-			d.RootPage = 0
-			// d.RootNode = nil
-		}
-
-		if d.PageCount > 0 {
-			d.PageCount -= 1
-		}
-
-		d.mu.Unlock()
-
-		// add to free list
-		added := d.freeList.add(uint32(p.PageId))
-
-		if !added {
-			panic("Could not add page to freelist")
-		}
-
-		fmt.Println("CLEARED PAGE ", p.PageId)
-
-		// send to channel
-		b <- int32(n)
-		if lsnChan != nil {
-			lsnChan <- seqNo
-		}
-
-		// d.FlushMetadata()
-
 		return
 	}
 
-	// set stored in disk flag and offset to lookup table
-	d.incrementFlushedPages()
-	// write page to disk
-	offs := p.PageId * PAGE_SIZE_BYTES
-
-	fmt.Println("WRITING TO OFFSET: ", offs)
-
-	fmt.Println("ACQURING LOCK ON DISK MANAGER -> ")
-	d.mu.RLock()
-	fmt.Println("ACQURED LOCK ON DISK MANAGER -> ")
-	n, err := d.fd.WriteAt(p.pgeData[:], int64(offs))
-	d.mu.RUnlock()
+	// page marked for deletion, overwrite with 0s
+	_, err := d.fd.WriteAt(*pData, int64(offset))
 
 	if err != nil {
 		panic("Could not write page")
 	}
-
-	fmt.Printf("WRITTEN PAGE %d to DISK\n", p.PageId)
-
-	// set stored to disk flag
-	helpers.SetFlag(&p.pgeData[0], Written)
-	// send to channel
-	b <- int32(n)
-	if lsnChan != nil {
-		lsnChan <- seqNo
-	}
-	fmt.Println("SUCCESSFULLY SEND DATA TO CHANNELS....")
+	return
 }
 
 func (q *JobQueue) run() {
@@ -577,7 +260,7 @@ func (q *JobQueue) run() {
 		q.jobs = q.jobs[1:]
 		q.mu.Unlock()
 
-		job.execute() // execute job
+		job.execute(q.dManager) // execute job
 	}
 }
 
@@ -594,130 +277,51 @@ func (q *JobQueue) addJob(job ioReq) {
 }
 
 // executes queue job
-func (r *ioReq) execute() {
+func (r *ioReq) execute(dMan *DiskManager) {
 	fmt.Println("(execute) diskmanager.execute()...")
-	if r.isReadReq {
-		// Read from disk, create Page and return that in channel
+	if helpers.BitIsSet(&r.flag, 7) {
+		// Read req. Read from disk, create Page and return that in channel
 		fmt.Println("(execute) executing read request...")
-		err := r.dManager.loadPage(int32(r.pageId), r.destPage)
+		err := dMan.loadPage(r.off, r.buff)
 		if err != nil {
-			r.readErr <- err
+			r.errChan <- err
 		}
 		fmt.Println("(execute) sending back read page...")
 
-		r.readErr <- nil
+		r.errChan <- nil
 	} else {
 		// Write page to disk
-		fmt.Printf("(execute) executing write request -> %d...\n", r.pageId)
-		r.dManager.flushPage(r.writePage, r.flushed, r.lsnChan)
-		fmt.Printf("(execute) executed write request -> %d...\n", r.pageId)
+		fmt.Printf("(execute) executing write request -> %d...\n", r.off)
+		dMan.flushPage(r.buff, uint32(r.size), r.off, helpers.BitIsSet(&r.flag, 6))
+		fmt.Printf("(execute) executed write request -> %d...\n", r.off)
 	}
 	fmt.Println("(execute) diskmanager.execute() DONE.")
 }
 
-// Generates new page for test use only
-func NewTestPage(pageId int32) *Page {
-	p := Page{
-		LSN:     [LSN_SIZE_BYTE]byte{},
-		pgeData: [PAGE_SIZE_BYTES]byte{},
-		PageId:  uint32(pageId),
-		Flags:   0x32,
+func (d *DiskManager) newJobQueue(pageId uint32) *JobQueue {
+	return &JobQueue{
+		pageId:   pageId,
+		jobs:     make([]ioReq, 0),
+		running:  false,
+		dManager: d,
 	}
-
-	binary.LittleEndian.PutUint32(p.pgeData[1:5], p.PageId)
-	return &p
 }
 
+// NewDiskManager Opens a database file and returns a new instance of disk manager
 func NewDiskManager(config DiskManagerConfig) (*DiskManager, error) {
-	fmt.Println("IN INIT()")
 	if len(config.DataFile) == 0 {
 		return nil, DiskManagerError{Message: "data file path not provided"}
 	}
 
-	PgFreeList := NewFreeList()
-	PgFreeList.loadFreeList()
-
 	fd, err := os.OpenFile(config.DataFile, os.O_CREATE|os.O_RDWR, 0644)
-
 	if err != nil {
 		fmt.Println("ERR while opening file")
 		log.Fatal(err)
 	}
 
 	diskManager := &DiskManager{
-		// RootNode:  nil,
-		RootPage:  0,
-		PageCount: 0,
-		// Queues:    make(map[uint32]*JobQueue),
-		fd:       fd,
-		freeList: PgFreeList,
+		fd: fd,
 	}
-
-	// Calculate PageCount
-	metadataPage := make([]byte, METADATA_PAGE_SIZE_BYTES)
-	r, err := diskManager.fd.Read(metadataPage)
-
-	if err != nil && !errors.Is(err, io.EOF) {
-		fmt.Println("ERR reading data file: ", err.Error())
-		log.Fatal(err)
-	}
-
-	if r <= 0 {
-		// no metedata page(no data). Create.
-		fmt.Println("Read 0 Bytes => ", r)
-		// Set Root page
-		binary.LittleEndian.PutUint32(metadataPage[:4], uint32(0)) // 0 signifies no root page
-		// Version 1
-		binary.LittleEndian.PutUint32(metadataPage[4:8], uint32(1))
-		// Tree Height
-		binary.LittleEndian.PutUint32(metadataPage[8:12], uint32(0))
-		// No of pages
-		binary.LittleEndian.PutUint32(metadataPage[12:16], uint32(0))
-		// Max page ID
-		binary.LittleEndian.PutUint32(metadataPage[16:], uint32(0))
-		//fmt.Println("METADATA PAGE => ", metadataPage)
-
-		_, err = diskManager.fd.Write(metadataPage)
-
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		// Flush
-		err = diskManager.fd.Sync()
-
-		return diskManager, nil
-	}
-
-	// read root node Page ID
-	rootPgeID := binary.LittleEndian.Uint32(metadataPage[0:4])
-
-	pageCount := binary.LittleEndian.Uint32(metadataPage[12:16])
-	maxPageId := binary.LittleEndian.Uint32(metadataPage[16:])
-	fmt.Printf("Root Page ID => %b, %d\n", metadataPage[0:4], rootPgeID)
-
-	fmt.Println("Page Count => ", pageCount)
-	fmt.Println("Max Page Id => ", maxPageId)
-	diskManager.PageCount = int32(pageCount)
-	diskManager.MaxPageId = int32(maxPageId)
-
-	// If root is present, traverse
-	if rootPgeID != 0 {
-		diskManager.RootPage = int32(rootPgeID)
-
-		return diskManager, nil
-	}
-
-	fmt.Println("DISKBTREE ROOT NODE => ", diskManager.RootPage)
-	fmt.Println("Initialized d....")
 
 	return diskManager, nil
-}
-
-func newJobQueue(pageId uint32) *JobQueue {
-	return &JobQueue{
-		pageId:  pageId,
-		jobs:    make([]ioReq, 0),
-		running: false,
-	}
 }

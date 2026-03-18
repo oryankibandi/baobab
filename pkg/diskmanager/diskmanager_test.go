@@ -39,10 +39,6 @@ func TestNewDiskManager(t *testing.T) {
 
 	defer dm.Close()
 
-	// check free list
-	if dm.freeList == nil {
-		t.Fatalf("Free list not initialized.")
-	}
 }
 
 func TestWritePage(t *testing.T) {
