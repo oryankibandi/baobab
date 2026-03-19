@@ -45,23 +45,18 @@ const (
 )
 
 type Pager struct {
+	// free list
+	freeList *FreeList
+	// disk manager
+	dManager *diskmanager.DiskManager
 	// id of the root page
 	rootPageId uint32
 	// total number of pages
 	pageCount uint32
-	// Number of flushed pages
-	flushedPages uint32
 	// max no of pageId issued. pageId increases monotonically. This is
 	// used to issue new page Ids.
 	maxPageId uint32
-
-	// free list
-	freeList *FreeList
-
-	// disk manager
-	dManager *diskmanager.DiskManager
-
-	mu sync.RWMutex
+	mu        sync.RWMutex
 }
 
 // Create a new Page. Requires at least two keys and values/pointers.
@@ -78,7 +73,7 @@ type Pager struct {
 //	pageid pageId of newly created page
 //	pagenewly created page
 //	error error if any
-func (d *DiskManager) NewPage(lsn []byte, keys [][]byte, values [][]byte, childPageIds []int32, setAsRoot bool) (int32, *Page, error) {
+func (pgr *Pager) NewPage(lsn []byte, keys [][]byte, values [][]byte, childPageIds []int32, setAsRoot bool) (int32, *Page, error) {
 	fmt.Println("(NEW) KEYS ==> ", keys)
 	// internal node
 	if ((len(values) <= 0) && (len(keys) < DEGREE-1 || len(keys) > ORDER-1)) && !setAsRoot {

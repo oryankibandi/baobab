@@ -45,12 +45,15 @@ type DiskManagerConfig struct {
 //	b7: request type. 1 if read request, 0 if write request
 //	b6: dead page flag. 1 if dead page, 0 if not.Dead pages are overwritten
 //	    with zero
+//
+// Total size: 40 bytes
 type ioReq struct {
 	buff    *[]byte
 	size    int64
 	errChan chan error
-	off     uint32
+	off     uint64
 	flag    byte
+	_       [7]byte // padding
 }
 
 type JobQueue struct {
@@ -103,7 +106,7 @@ func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool
 	writeReq := ioReq{
 		buff:    buff,
 		size:    size,
-		off:     off,
+		off:     uint64(off),
 		flag:    flag,
 		errChan: errChan,
 	}
@@ -156,7 +159,7 @@ func (d *DiskManager) ReadReq(buff *[]byte, off uint32, readErr chan error) erro
 	rReq := ioReq{
 		flag:    0x80, // 1000 0000
 		buff:    buff,
-		off:     off,
+		off:     uint64(off),
 		errChan: readErr,
 	}
 
@@ -282,7 +285,7 @@ func (r *ioReq) execute(dMan *DiskManager) {
 	if helpers.BitIsSet(&r.flag, 7) {
 		// Read req. Read from disk, create Page and return that in channel
 		fmt.Println("(execute) executing read request...")
-		err := dMan.loadPage(r.off, r.buff)
+		err := dMan.loadPage(uint32(r.off), r.buff)
 		if err != nil {
 			r.errChan <- err
 		}
@@ -292,7 +295,7 @@ func (r *ioReq) execute(dMan *DiskManager) {
 	} else {
 		// Write page to disk
 		fmt.Printf("(execute) executing write request -> %d...\n", r.off)
-		dMan.flushPage(r.buff, uint32(r.size), r.off, helpers.BitIsSet(&r.flag, 6))
+		dMan.flushPage(r.buff, uint32(r.size), uint32(r.off), helpers.BitIsSet(&r.flag, 6))
 		fmt.Printf("(execute) executed write request -> %d...\n", r.off)
 	}
 	fmt.Println("(execute) diskmanager.execute() DONE.")
