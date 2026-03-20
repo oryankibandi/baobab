@@ -11,6 +11,10 @@ import (
 	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
+const (
+	CACHE_LINE_SIZE = 64
+)
+
 type DiskManager struct {
 	// Map of job queues for read and write requests {PageId: *JobQueue}
 	Queues sync.Map
@@ -50,7 +54,7 @@ type DiskManagerConfig struct {
 type ioReq struct {
 	buff    *[]byte
 	size    int64
-	errChan chan error
+	errChan *chan error
 	off     uint64
 	flag    byte
 	_       [7]byte // padding
@@ -83,14 +87,14 @@ func (d *DiskManager) loadPage(off uint32, buff *[]byte) error {
 	// read into buffer
 	_, err := d.fd.ReadAt(*buff, int64(off))
 	if err != nil && !errors.Is(err, io.EOF) {
-		panic(fmt.Sprintf("Unable to read offset %d: %v", off, err.Error()))
+		return err
 	}
 
 	return nil
 }
 
 // Creates write request for `page` and adds it to queue
-func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool, errChan chan error) error {
+func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool, errChan *chan error) error {
 	if buff == nil {
 		return DiskManagerError{Message: "invalid buffer pointer provided."}
 	}
@@ -101,7 +105,7 @@ func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool
 	var flag byte
 	if isDead {
 		// set dead flag
-		helpers.SetFlag(&flag, 6)
+		helpers.SetFlag(&flag, 6) // 0100 000
 	}
 	writeReq := ioReq{
 		buff:    buff,
@@ -146,7 +150,7 @@ func (d *DiskManager) ForceFlush() {
 }
 
 // Creates a read req for `pageId` and adds it to queue
-func (d *DiskManager) ReadReq(buff *[]byte, off uint32, readErr chan error) error {
+func (d *DiskManager) ReadReq(buff *[]byte, off uint32, readErr *chan error) error {
 	if buff == nil {
 		return DiskManagerError{Message: "invalid buffer pointer provided."}
 	}
@@ -202,61 +206,56 @@ func (d *DiskManager) Close() {
 //	offset offset at which to write data
 //	size size of data being written
 //	isDead if the page is dead(has logically deleted). If true, overwrite with 0
-func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDead bool) {
-	fmt.Println("(flushPage) Flushing page...")
-
+func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDead bool) error {
 	if isDead {
 		// rewrite with zeros
 		d.mu.Lock()
-		for i := range size {
+		// to prevent false sharing, ensure pData is divided into
+		// 64 byte chunks for processing
+		for i := range size / CACHE_LINE_SIZE {
 			d.wg.Add(1)
-			go func() {
-				(*pData)[i] &= 0
+			go func(arr []byte) {
+				for j := range arr {
+					arr[j] &= 0
+				}
 				d.wg.Done()
-			}()
+			}((*pData)[i*CACHE_LINE_SIZE : (i*CACHE_LINE_SIZE)+CACHE_LINE_SIZE])
 		}
+
 		d.wg.Wait()
 		d.mu.Unlock()
 
 		// page marked for deletion, overwrite with 0s
 		_, err := d.fd.WriteAt(*pData, int64(offset))
-
 		if err != nil {
-			panic("Could not write page")
+			return err
 		}
-		return
+
+		return nil
 	}
 
-	// page marked for deletion, overwrite with 0s
 	_, err := d.fd.WriteAt(*pData, int64(offset))
 
 	if err != nil {
-		panic("Could not write page")
+		return err
 	}
-	return
+
+	return nil
 }
 
 func (q *JobQueue) run() {
-	fmt.Println("(run) acquiring queue lock() to set running=true...")
 	q.mu.Lock()
-	fmt.Printf("(run) acquired queue lock() to set running=true on page ID  %d...\n", q.pageId)
 	q.running = true
 	q.mu.Unlock()
 
 	var job ioReq
 	for {
-		fmt.Println("(run) acquiring queue lock()...")
 		q.mu.Lock()
-		fmt.Println("(run) acquired queue lock()...")
 		if len(q.jobs) == 0 {
-			fmt.Println("(run) exiting run goroutine...")
 			q.running = false
 			q.mu.Unlock()
 
-			fmt.Println("(run) is running -> ", q.running)
 			return // all jobs done
-		} else if len(q.jobs) == 0 {
-			panic("Invalid state. Length of jobs is negative")
 		}
 
 		job = q.jobs[0]
@@ -281,24 +280,19 @@ func (q *JobQueue) addJob(job ioReq) {
 
 // executes queue job
 func (r *ioReq) execute(dMan *DiskManager) {
-	fmt.Println("(execute) diskmanager.execute()...")
 	if helpers.BitIsSet(&r.flag, 7) {
 		// Read req. Read from disk, create Page and return that in channel
-		fmt.Println("(execute) executing read request...")
 		err := dMan.loadPage(uint32(r.off), r.buff)
-		if err != nil {
-			r.errChan <- err
-		}
-		fmt.Println("(execute) sending back read page...")
-
-		r.errChan <- nil
+		// send err to channel
+		*(r.errChan) <- err
 	} else {
 		// Write page to disk
-		fmt.Printf("(execute) executing write request -> %d...\n", r.off)
-		dMan.flushPage(r.buff, uint32(r.size), uint32(r.off), helpers.BitIsSet(&r.flag, 6))
-		fmt.Printf("(execute) executed write request -> %d...\n", r.off)
+		err := dMan.flushPage(r.buff, uint32(r.size), uint32(r.off), helpers.BitIsSet(&r.flag, 6))
+
+		// send error to channel
+		*(r.errChan) <- err
+
 	}
-	fmt.Println("(execute) diskmanager.execute() DONE.")
 }
 
 func (d *DiskManager) newJobQueue(pageId uint32) *JobQueue {

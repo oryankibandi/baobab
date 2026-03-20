@@ -1,5 +1,10 @@
 package helpers
 
+import (
+	"fmt"
+	"testing"
+)
+
 const (
 	BOLDRED    = "\033[1m\033[31m"
 	BOLDGREEN  = "\033[1m\033[32m"
@@ -9,3 +14,18 @@ const (
 	BOLDCYAN   = "\033[1m\033[36m"
 	BOLDWHITE  = "\033[1m\033[37m"
 )
+
+// PrintErrorMsg formats an error message with the appropriate color
+func PrintErrorMsg(msg string) {
+	fmt.Println(BOLDRED + " ✗ " + msg + RESET)
+}
+
+// PrintSuccessMsg formats a success message with the appropriate color
+func PrintSuccessMsg(msg string) {
+	fmt.Println(BOLDGREEN + "  ✓ " + msg + RESET)
+}
+
+// PrintTestErrorMsg formats a test error message with the appropriate color
+func PrintTestErrorMsg(msg string, t *testing.T) {
+	t.Fatal(BOLDRED + " ✗ " + msg + RESET)
+}
