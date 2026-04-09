@@ -279,7 +279,6 @@ func TestNormalDistribution(t *testing.T) {
 
 // Zipfian/skewed distribution
 func TestZipfianDistribution(t *testing.T) {
-
 	n := 10000 // number of distinct keys
 	ε := 0.1   // error rate(ε) 0.1%
 	δ := 0.1   // error probability(δ)  0.1%
@@ -312,9 +311,8 @@ func TestZipfianDistribution(t *testing.T) {
 	}
 
 	cSketch, err := NewCMS(ε, δ, NewMapHash())
-
 	if err != nil {
-		t.Fatalf("Expected not error, got %v", err)
+		t.Fatalf("Expected no error, got %v", err)
 	}
 
 	if cSketch == nil {

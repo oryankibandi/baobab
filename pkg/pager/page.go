@@ -106,6 +106,26 @@ func (p *Page) GetPageByteData() (data *[PAGE_SIZE_BYTES]byte, err error) {
 	return &(p.pgeData), nil
 }
 
+// initializePage - sets pageId and internal node flag on a new
+// page(8k byte location)
+func (p *Page) initializePage(pageId uint32, internal bool) error {
+	// PageId 0 reserved for metadata page
+	if pageId == 0 {
+		return PagerError{Message: "Invalid page id provided"}
+	}
+
+	p.rmu.Lock()
+	defer p.rmu.RUnlock()
+
+	// set page id
+	p.PageId = pageId
+	binary.LittleEndian.PutUint32(p.pgeData[1:5], pageId)
+
+	// set is internal
+	helpers.SetFlag(&p.pgeData[0], IsInternal)
+	return nil
+}
+
 // resets the  Page details
 func (p *Page) Clear() error {
 	if p == nil {
