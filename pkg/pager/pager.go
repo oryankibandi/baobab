@@ -105,6 +105,7 @@ func (pgr *Pager) readMetadata(buff *[]byte) error {
 			return e
 		}
 	case <-ctx.Done():
+		cancel()
 		return PagerError{Message: "timeout reading metadata page."}
 	}
 	return nil
@@ -133,6 +134,7 @@ func (pgr *Pager) ReadPage(pageId uint32, buff *[]byte) error {
 			return e
 		}
 	case <-ctx.Done():
+		cancel()
 		return PagerError{Message: "timeout reading metadata page."}
 	}
 	return nil
@@ -152,7 +154,7 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 	isDead := helpers.BitIsSet(&((*buff)[0]), Dead)
 
 	errChan := make(chan error)
-	err := pgr.dManager.WriteReq(pageId*PAGE_SIZE_BYTES, buff, PAGE_SIZE_BYTES, isDead, &errChan)
+	err := pgr.dManager.WriteReq(pageId*PAGE_SIZE_BYTES, buff, PAGE_SIZE_BYTES, isDead, &errChan, false)
 	if err != nil {
 		return err
 	}
@@ -167,6 +169,7 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 			return e
 		}
 	case <-ctx.Done():
+		cancel()
 		return PagerError{Message: "timeout writing metadata page."}
 	}
 
@@ -180,28 +183,29 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 // FlushMetadata flushes metadata page in buff to disk.
 // Parameters:
 //
-//	buff buffer containing metadata page content
+//	buff buffer containing metadata page content. Usually pinned in buffer manager.
 func (pgr *Pager) FlushMetadata(buff *[]byte) error {
 	if len(*buff) != PAGE_SIZE_BYTES {
 		return PagerError{Message: fmt.Sprintf("Invalid buffer size. Expected buffer size of %d bytes", PAGE_SIZE_BYTES)}
 	}
 
 	// update data
-	pgr.mu.RLock()
+	pgr.mu.Lock()
 	binary.LittleEndian.PutUint32((*buff)[0:4], pgr.rootPageId)
 	binary.LittleEndian.PutUint32((*buff)[12:16], pgr.pageCount)
 	binary.LittleEndian.PutUint32((*buff)[16:20], pgr.maxPageId)
-	pgr.mu.RUnlock()
+	pgr.mu.Unlock()
 
 	errChan := make(chan error)
-	err := pgr.dManager.WriteReq(0, buff, PAGE_SIZE_BYTES, false, &errChan)
+	err := pgr.dManager.WriteReq(0, buff, PAGE_SIZE_BYTES, false, &errChan, true)
 	if err != nil {
 		return err
 	}
 
-	testTimeout := 200
+	testTimeout := 800 // calling Sync() takes a bit longer
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
 
+	// writes happen async, wait for write to complete
 	select {
 	case e := <-errChan:
 		cancel()
@@ -209,8 +213,10 @@ func (pgr *Pager) FlushMetadata(buff *[]byte) error {
 			return e
 		}
 	case <-ctx.Done():
+		cancel()
 		return PagerError{Message: "timeout writing metadata page."}
 	}
+
 	return nil
 }
 

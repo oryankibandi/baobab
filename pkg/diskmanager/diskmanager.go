@@ -57,7 +57,8 @@ type ioReq struct {
 	errChan *chan error
 	off     uint64
 	flag    byte
-	_       [7]byte // padding
+	flush   bool
+	_       [6]byte // padding
 }
 
 type JobQueue struct {
@@ -94,7 +95,18 @@ func (d *DiskManager) loadPage(off uint32, buff *[]byte) error {
 }
 
 // Creates write request for `page` and adds it to queue
-func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool, errChan *chan error) error {
+//
+// Parameters:
+//
+//	off  - offset to write at.
+//	buff - pointer to buffer with page byte content
+//	size - size of buff
+//	isDead - if page is marked for deletion
+//	errChan - pointer to channel to receive any errors
+//	flush	- if true, Sync() is called to write content in buffer to disk.
+//		  Should be used cautiously as it's expensive but necessary for
+//		  durability.
+func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool, errChan *chan error, flush bool) error {
 	if buff == nil {
 		return DiskManagerError{Message: "invalid buffer pointer provided."}
 	}
@@ -113,6 +125,7 @@ func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool
 		off:     uint64(off),
 		flag:    flag,
 		errChan: errChan,
+		flush:   flush,
 	}
 
 	// Check queue
@@ -128,7 +141,7 @@ func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool
 	}
 
 	q.(*JobQueue).addJob(writeReq)
-	fmt.Println("(WriteReq) Job added....")
+	//fmt.Println("(WriteReq) Job added....")
 
 	return nil
 }
@@ -158,7 +171,7 @@ func (d *DiskManager) ReadReq(buff *[]byte, off uint32, readErr *chan error) err
 		return DiskManagerError{Message: "invalid error channel provided."}
 	}
 
-	fmt.Println("(diskmanager) Read Req at offset -> ", off)
+	//  fmt.Println("(diskmanager) Read Req at offset -> ", off)
 
 	rReq := ioReq{
 		flag:    0x80, // 1000 0000
@@ -206,7 +219,7 @@ func (d *DiskManager) Close() {
 //	offset offset at which to write data
 //	size size of data being written
 //	isDead if the page is dead(has logically deleted). If true, overwrite with 0
-func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDead bool) error {
+func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDead bool, flush bool) error {
 	if isDead {
 		// rewrite with zeros
 		d.mu.Lock()
@@ -238,6 +251,14 @@ func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDea
 
 	if err != nil {
 		return err
+	}
+
+	if flush {
+		err = d.fd.Sync()
+
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -273,7 +294,7 @@ func (q *JobQueue) addJob(job ioReq) {
 	q.mu.Unlock()
 
 	if shouldStart {
-		fmt.Println("Queue not running, starting job...")
+		// fmt.Println("Queue not running, starting job...")
 		go q.run()
 	}
 }
@@ -287,11 +308,10 @@ func (r *ioReq) execute(dMan *DiskManager) {
 		*(r.errChan) <- err
 	} else {
 		// Write page to disk
-		err := dMan.flushPage(r.buff, uint32(r.size), uint32(r.off), helpers.BitIsSet(&r.flag, 6))
+		err := dMan.flushPage(r.buff, uint32(r.size), uint32(r.off), helpers.BitIsSet(&r.flag, 6), r.flush)
 
 		// send error to channel
 		*(r.errChan) <- err
-
 	}
 }
 
