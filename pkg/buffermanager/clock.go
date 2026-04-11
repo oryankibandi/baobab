@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/oryankibandi/baobab/pkg/diskmanager"
+	"github.com/oryankibandi/baobab/pkg/pager"
 )
 
 const (
@@ -17,6 +17,8 @@ const (
 type clock struct {
 	// entry that the clock hand points to
 	Head *Frame
+	// reserved entry for metadata page
+	Reserved *Frame
 
 	// max number of items allowed in circular buffer
 	capacity uint64
@@ -36,6 +38,12 @@ func (clk *clock) Evict(seg SegmentType) (evicted *Frame, evictedKey int) {
 	defer clk.mu.Unlock()
 
 	for i := 0; i < int(clk.capacity)*MAX_LOOP; i++ {
+		// check if reserved
+		if clk.Head.isReserved() {
+			clk.Head = clk.Head.GetNextLink()
+			continue
+		}
+
 		if clk.Head.accessBitSet() {
 			// access bit set, advance clock hand
 			clk.Head = clk.Head.GetNextLink()
@@ -83,6 +91,11 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
 	defer clk.mu.Unlock()
 
 	for i := 0; i < int(clk.capacity)*MAX_LOOP; i++ {
+		// check if reserved
+		if clk.Head.isReserved() {
+			clk.Head = clk.Head.GetNextLink()
+			continue
+		}
 		// log.Printf("===============================================\n")
 		// log.Printf("CHECKING KEY -----> %d\n", clk.Head.getKey())
 		// log.Printf("IS REFERENCED ----> %t\n", clk.Head.accessBitSet())
@@ -161,12 +174,22 @@ func (clk *clock) addToBpool(e *Frame) error {
 	return nil
 }
 
-// Returns a reference to the frame at the current clock head
+// Returns a reference to the frame at the current clock head. clock head changes
+// whenever clock hand progresses
 func (clk *clock) clockHead() *Frame {
 	clk.mu.RLock()
 	defer clk.mu.RUnlock()
 
 	return clk.Head
+}
+
+// Returns a reference to the frame at the current clock head. clock head changes
+// whenever clock hand progresses
+func (clk *clock) getReserved() *Frame {
+	clk.mu.RLock()
+	defer clk.mu.RUnlock()
+
+	return clk.Reserved
 }
 
 func (clk *clock) getCap() uint64 {
@@ -204,13 +227,13 @@ func (clk *clock) close() error {
 // returns a pointer to the new circular buffer.
 // `size` parameter should be in Kilobytes.
 func NewClock(size uint64) (*clock, error) {
-	minSize := (3 * diskmanager.PAGE_SIZE_BYTES) / 1024
+	minSize := (3 * pager.PAGE_SIZE_BYTES) / 1024
 	// Initialize entries, add to bPool and create the circular buffer
 	if size < uint64(minSize) {
 		return nil, BufferManagerError{Message: fmt.Sprintf("Minimum capacity is %d", minSize)}
 	}
 
-	capacity := (size * 1024) / diskmanager.PAGE_SIZE_BYTES
+	capacity := (size * 1024) / pager.PAGE_SIZE_BYTES
 	clk := &clock{
 		capacity: capacity,
 	}
@@ -250,7 +273,20 @@ func NewClock(size uint64) (*clock, error) {
 		}
 	}
 
-	clk.Head = clk.bPool[capacity-1]
+	// set head at first item
+	clk.Head = clk.bPool[0]
+
+	// reserve one frame
+	f := clk.Pop()
+	if f == nil {
+		return nil, BufferManagerError{"Could not reserve metadata page frame"}
+	}
+
+	f.reserveFrame()
+	// ensure clock hand doesn't point to reserved frame
+	if f == clk.Head {
+		clk.Head = clk.Head.GetNextLink()
+	}
 
 	return clk, nil
 }

@@ -13,6 +13,7 @@ const (
 	FREE_LIST_PAGE_SIZE  = 4096
 	FREE_LIST_ENTRY_SIZE = 4
 	ITEMS_PER_PAGE       = 1024
+	DEFAULT_FILE         = "baobab"
 )
 
 type FreeList struct {
@@ -55,7 +56,7 @@ func (fl *FreeList) add(p uint32) bool {
 	return true
 }
 
-func (fl *FreeList) FlushFreeList(c *chan int) {
+func (fl *FreeList) flushFreeList(c *chan int) {
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
 	if !fl.dirty {
@@ -126,7 +127,6 @@ func (fl *FreeList) FlushFreeList(c *chan int) {
 	fl.dirty = false
 	*c <- written
 
-	return
 }
 
 // Called during startup to read the free list from disk
@@ -186,9 +186,12 @@ func (fl *FreeList) close() {
 	fmt.Println("closed free list file descriptors.")
 }
 
-func NewFreeList() *FreeList {
-	fd, err := os.OpenFile("data_fl", os.O_CREATE|os.O_RDWR, 0644)
+func NewFreeList(flPath string) *FreeList {
+	if len(flPath) == 0 {
+		flPath = DEFAULT_FILE
+	}
 
+	fd, err := os.OpenFile(fmt.Sprintf("%s_fl", flPath), os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		panic(fmt.Sprintf("Unable to open free list file: %v", err))
 	}

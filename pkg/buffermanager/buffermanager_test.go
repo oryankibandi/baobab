@@ -83,7 +83,7 @@ func TestNewCache(t *testing.T) {
 				CacheSize: test.cacheSize,
 			}
 
-			c, err := NewCache(cConfig, test.w, dmConfig)
+			c, err := NewBufferManager(cConfig, test.w, dmConfig)
 			if test.valid {
 				if err != nil {
 					t.Fatalf(helpers.BOLDRED+"Expected no error, got %v"+helpers.RESET, err)
@@ -124,7 +124,7 @@ func TestCreateNewFrame(t *testing.T) {
 		CacheSize: MIN_CACHE_SIZE_KB,
 	}
 
-	cache, err := NewCache(cConfig, w, dmConfig)
+	cache, err := NewBufferManager(cConfig, w, dmConfig)
 	if err != nil {
 		t.Fatalf(helpers.BOLDRED+"Expected no error, got %v"+helpers.RESET, err)
 	}

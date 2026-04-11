@@ -1,12 +1,11 @@
 package buffermanager
 
 import (
-	"context"
 	"log"
 	"sync"
 	"time"
 
-	"github.com/oryankibandi/baobab/pkg/diskmanager"
+	"github.com/oryankibandi/baobab/pkg/pager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
@@ -25,9 +24,9 @@ const (
 type BgWriter struct {
 	writtenPages uint32
 	writtenBytes uint32
-	cache        *Cache
+	cache        *BufferManager
 	wal          *wal.WAL
-	dManager     *diskmanager.DiskManager
+	pgr          *pager.Pager
 
 	// Head of the clock buffer
 	clockBuffer *clock
@@ -42,6 +41,7 @@ func (bw *BgWriter) Start() {
 
 	var currFrame *Frame
 	var nextFrame *Frame
+	var currFrameBuff *[]byte
 	for {
 		for range bw.clockBuffer.getCap() {
 			currFrame = bw.clockBuffer.clockHead()
@@ -56,36 +56,28 @@ func (bw *BgWriter) Start() {
 				continue
 			}
 
-			currFrame.mu.Lock()
+			err := currFrame.Acquire(false)
+			if err != nil {
+				panic("Deadlock acquiring exlusive laatch on frame")
+			}
 			currFrame.Reference()
 
-			wr := make(chan int32)
-			// lsnChan := make(chan [diskmanager.LSN_SIZE_BYTE]byte)
-			err := bw.dManager.WriteReq(&currFrame.page, currFrame.getKey(), wr, nil)
+			currFrameBuff, _, err = currFrame.RawBufferSlice()
+			if err != nil {
+				panic("Unable to get frame buffer")
+			}
 
+			err = bw.pgr.WritePage(currFrame.getKey(), currFrameBuff)
 			if err != nil {
 				log.Printf("Error writing to page: %s\n", err.Error())
 				currFrame = currFrame.GetNextLink()
 				continue
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), PAGE_WRITE_TIMEOUT*time.Millisecond)
-
-			select {
-			case n := <-wr:
-				cancel()
-				log.Printf("Written %d bytes\n", n)
-				currFrame.MarkClean()
-				bw.writtenBytes += uint32(n)
-				bw.writtenPages++
-			case <-ctx.Done():
-				cancel()
-				log.Printf("Timeout when writing page.")
-			}
-
 			nextFrame = currFrame.next
 			currFrame.Unreference()
-			currFrame.mu.Unlock()
+			currFrame.Release(false)
+			bw.writtenPages++
 
 			if bw.writtenPages >= MAX_PAGES {
 				break
@@ -105,10 +97,11 @@ func (bw *BgWriter) watchFreeList() {
 	}
 }
 
-func NewBgWriter(cache *Cache, wal *wal.WAL, clockBuffHead *clock, d *diskmanager.DiskManager) *BgWriter {
+func NewBgWriter(cache *BufferManager, wal *wal.WAL, clockBuffHead *clock, pgr *pager.Pager) *BgWriter {
 	return &BgWriter{
 		cache:       cache,
 		wal:         wal,
 		clockBuffer: clockBuffHead,
+		pgr:         pgr,
 	}
 }

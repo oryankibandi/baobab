@@ -1,8 +1,10 @@
 package buffermanager
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/oryankibandi/baobab/internal/manual"
@@ -18,15 +20,17 @@ type counter struct {
 	unpinCount atomic.Uint64
 }
 
+// Frame - a slot in the buffer that is used to store cached pages
 type Frame struct {
 	// 8K page. Memory initialized manually
-	// x64 -> 8220 bytes, x86 8208 bytes
-	page       pager.Page // 4 byte padding added in x64 systems
-	lsn        [pager.LSN_SIZE_BYTE]byte
+	// 8224 bytes
+	page pager.Page
+	// lsn  [pager.LSN_SIZE_BYTE]byte
+
 	isInternal atomic.Bool
 	isDeleted  atomic.Bool
-	dirty      atomic.Bool
 
+	dirty atomic.Bool
 	// reference bit. Set when an item is accessed and unset by clock hand when
 	// looking for an item to evict
 	ref atomic.Bool
@@ -35,29 +39,31 @@ type Frame struct {
 	// When this item is set the reference bit cannot be unset. The clock hand will
 	// advance past an entry with it's access bit set
 	acc atomic.Bool
+	// true if this frame is reserved for something like the metadata page
+	// This ensures the clock hand passes over this frame when looking for
+	// an eviction candidate
+	reserved atomic.Bool
 
 	// Prev and Next links. Remain constant after initialization
 	prev *Frame
 	next *Frame
 
 	counters counter
+
 	// if its allocated
 	isOccupied atomic.Bool
-
 	//  metadata
 	meta metadata
-
-	// Pointer to manually allocated memory address used to free memory.
-	// Remains constant after initialization.
-	CPtr unsafe.Pointer
 
 	// segment type
 	segType SegmentType
 
-	// Mutex field. In 32 bit systems it is 12 bytes in size
-	// hence will add a padding and should be ordered as the last
-	// item to make byte positioning predictable.
+	// Mutex field. 24 bytes
 	mu sync.RWMutex
+
+	// Pointer to manually allocated memory address used to free memory.
+	// Remains constant after initialization. 4 byte padding added in x86
+	CPtr unsafe.Pointer
 }
 
 func (c *counter) addPinCount() {
@@ -90,8 +96,6 @@ func (f *Frame) isDirty() bool {
 // Sets the access bit and ref bit of an entry. Called when accessing an entry.
 // The process that uses the entry data is required to call Unreference() when done
 func (f *Frame) Reference() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.ref.Store(true)
 	f.acc.Store(true)
 
@@ -127,7 +131,6 @@ func (f *Frame) GetPrevLink() *Frame {
 func (f *Frame) Unreference() {
 	f.counters.addUnpinCount()
 
-	f.mu.Lock()
 	// check current count
 	p := f.counters.getTotalPins()
 
@@ -136,8 +139,6 @@ func (f *Frame) Unreference() {
 		// unset access pin
 		f.acc.Store(false)
 	}
-
-	f.mu.Unlock()
 }
 
 // Returns true if access bit is set, else false
@@ -148,6 +149,16 @@ func (f *Frame) accessBitSet() bool {
 // Returns true if access bit is set, else false
 func (f *Frame) refBitSet() bool {
 	return f.ref.Load()
+}
+
+// Returns true if frame is reserved
+func (f *Frame) isReserved() bool {
+	return f.reserved.Load()
+}
+
+// Reserves a frame
+func (f *Frame) reserveFrame() {
+	f.reserved.Store(true)
 }
 
 // Mark an entry/frame as dirty
@@ -176,9 +187,6 @@ func (f *Frame) unsetRef() {
 }
 
 func (f *Frame) getKey() uint32 {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-
 	return f.meta.key
 }
 
@@ -189,7 +197,7 @@ func (f *Frame) getSegType() SegmentType {
 	return f.segType
 }
 
-func (f *Frame) GetPage() *diskmanager.Page {
+func (f *Frame) GetPage() *pager.Page {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
@@ -197,7 +205,7 @@ func (f *Frame) GetPage() *diskmanager.Page {
 }
 
 // sets data on a frame/entry from a page
-func (f *Frame) SetData(p *diskmanager.Page) error {
+func (f *Frame) SetData(p *pager.Page) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -212,8 +220,8 @@ func (f *Frame) SetData(p *diskmanager.Page) error {
 	f.dirty.Store(true)
 	f.isOccupied.Store(true)
 
-	pgelsn := p.GetLSN()
-	copy(f.lsn[:], pgelsn[:])
+	//	pgelsn := p.GetLSN()
+	//	copy(f.lsn[:], pgelsn[:])
 
 	// entry clock metadata
 	f.ref.Store(false)
@@ -221,21 +229,9 @@ func (f *Frame) SetData(p *diskmanager.Page) error {
 
 	f.meta.key = uint32(p.PageId)
 
-	// page data
-	f.page = diskmanager.Page{}
-	pData, err := p.GetPageByteData()
-	if err != nil {
-		return err
-	}
-
-	err = f.page.SetPageData(pData)
-	if err != nil {
-		return err
-	}
-
 	// pageId & Flags
 	f.page.PageId = p.PageId
-	f.page.Flags = p.Flags
+	// f.page.Flags = p.Flags
 
 	// clear page so that it can be garbage collected
 	p = nil
@@ -243,7 +239,7 @@ func (f *Frame) SetData(p *diskmanager.Page) error {
 	return nil
 }
 
-func (f *Frame) ByteData() (byteData *[diskmanager.PAGE_SIZE_BYTES]byte, err error) {
+func (f *Frame) ByteData() (byteData *[pager.PAGE_SIZE_BYTES]byte, err error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
@@ -289,6 +285,78 @@ func (f *Frame) updateSegment(seg SegmentType) {
 
 	if f.segType != seg {
 		f.segType = seg
+	}
+}
+
+// RawBufferSlice - returns a pointer to a frame's page buffer and its size
+func (f *Frame) RawBufferSlice() (buff *[]byte, size uint64, err error) {
+	data, err := f.page.GetPageByteData()
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if data == nil {
+		return nil, 0, BufferManagerError{Message: "No allocated page for frame."}
+	}
+
+	dataSlice := data[:]
+
+	return &dataSlice, uint64(pager.PAGE_SIZE_BYTES), nil
+}
+
+// Acquires a latch on a frame.
+// returns an error if acquire takes too long (possible deadlock)
+//
+// if shared is true, The latch is shared else it is exclusive.
+func (f *Frame) Acquire(shared bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
+	defer cancel()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		if shared {
+			f.mu.RLock()
+		} else {
+			f.mu.Lock()
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return BufferManagerError{"Deadline exceeded trying to acquire lock on a frame"}
+	case <-done:
+		return nil
+	}
+}
+
+// Releases a latch on a frame.
+// returns an error if release takes too long.
+//
+// Parameters:
+//
+//	shared - set to true if acquired latch is shared, else set to false.
+func (f *Frame) Release(shared bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if shared {
+			f.mu.RUnlock()
+		} else {
+			f.mu.Unlock()
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return BufferManagerError{"Deadline exceeded trying to acquire lock on a frame"}
+	case <-done:
+		return nil
 	}
 }
 

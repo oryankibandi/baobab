@@ -10,13 +10,21 @@ import (
 
 type PageHeaderFlagPos int
 
-// Page 8K
+// Page struct with byte data
+//
+//	pgeData - raw byte data
+//	rmu - reader writer mutex
+//	PageId - Id of page
+//
+//	8220 bytes, alignment 4
 type Page struct {
-	// raw byte data  8192 bytes
+	// raw byte data 8192 bytes
 	pgeData [PAGE_SIZE_BYTES]byte
-	rmu     sync.RWMutex
+	// mutex - 24 bytes, alignment 4
+	rmu sync.RWMutex
 	// PageId/BlockId
 	PageId uint32
+	_      [4]byte // 4 byte padding for better alignment in Frame{}
 }
 
 func (p *Page) UpdateRightPtr(pageId int32) error {
@@ -122,7 +130,10 @@ func (p *Page) initializePage(pageId uint32, internal bool) error {
 	binary.LittleEndian.PutUint32(p.pgeData[1:5], pageId)
 
 	// set is internal
-	helpers.SetFlag(&p.pgeData[0], IsInternal)
+	if internal {
+		helpers.SetFlag(&p.pgeData[0], IsInternal)
+	}
+
 	return nil
 }
 

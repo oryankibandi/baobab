@@ -5,8 +5,8 @@ import (
 	"sync"
 
 	tiny "github.com/oryankibandi/baobab/internal/tinylfu"
-	"github.com/oryankibandi/baobab/pkg/diskmanager"
 	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/pager"
 )
 
 // Frames start with no assigned segment, so 0 represents unassigned stage
@@ -53,7 +53,6 @@ func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
 	}
 
 	cType := f.getSegType()
-
 	if cType == probationSegment {
 		// promote to protected.
 		err := w.promoteToProtected(f)
@@ -205,55 +204,55 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 // By default, all new items are added to the window cache.
 // If window segment is full, an item is evicted or added to main cache.
 // Returns a slice of uint32 keys that have been evicted and error if any
-func (w *WTinyLfu) AddItem(p *diskmanager.Page, isDirty bool) (entry *Frame, evictedKIds []uint32, e error) {
-	if p == nil {
-		panic("(AddItem)frame is required")
-	}
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	// keys that might be evicted if window is full
-	var evictKeys []uint32
-	var err error
-
-	if w.windowCount > w.windowCapacity {
-		panic(helpers.BOLDRED + "window cache exceeded capacity" + helpers.RESET)
-	}
-
-	if w.windowCount == w.windowCapacity {
-		fmt.Println("(cache.AddItem()) WindowCache Is Full, evicting...")
-		// evict window cache first
-		evictKeys, err = w.evictWindow()
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	// retrieve empty entry slot from the circular buffer and add new page data
-	f := w.cBuffer.Pop()
-	if f == nil {
-		return nil, nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
-	}
-
-	f.updateSegment(windowSegment)
-
-	err = f.SetData(p)
-	if err != nil {
-		panic(err)
-	}
-
-	if isDirty {
-		f.MarkDirty()
-	}
-
-	// update count
-	if w.windowCount < w.windowCapacity {
-		w.windowCount++
-	}
-
-	return f, evictKeys, nil
-}
+// func (w *WTinyLfu) AddItem(isDirty bool) (entry *Frame, evictedKIds []uint32, e error) {
+// 	if p == nil {
+// 		panic("(AddItem)frame is required")
+// 	}
+//
+// 	w.mu.Lock()
+// 	defer w.mu.Unlock()
+//
+// 	// keys that might be evicted if window is full
+// 	var evictKeys []uint32
+// 	var err error
+//
+// 	if w.windowCount > w.windowCapacity {
+// 		panic(helpers.BOLDRED + "window cache exceeded capacity" + helpers.RESET)
+// 	}
+//
+// 	if w.windowCount == w.windowCapacity {
+// 		fmt.Println("(cache.AddItem()) WindowCache Is Full, evicting...")
+// 		// evict window cache first
+// 		evictKeys, err = w.evictWindow()
+// 		if err != nil {
+// 			return nil, nil, err
+// 		}
+// 	}
+//
+// 	// retrieve empty entry slot from the circular buffer and add new page data
+// 	f := w.cBuffer.Pop()
+// 	if f == nil {
+// 		return nil, nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
+// 	}
+//
+// 	f.updateSegment(windowSegment)
+//
+// 	err = f.SetData(p)
+// 	if err != nil {
+// 		panic(err)
+// 	}
+//
+// 	if isDirty {
+// 		f.MarkDirty()
+// 	}
+//
+// 	// update count
+// 	if w.windowCount < w.windowCapacity {
+// 		w.windowCount++
+// 	}
+//
+// 	return f, evictKeys, nil
+// }
 
 // getEmptyFrame returns a free frame from the circular buffer. If no frame
 // is available, evict from window cache
@@ -356,8 +355,8 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 		return nil, WTinyLFUError{Message: "Window size is greater than man cache size."}
 	}
 
-	windowItemCount := (windowSize * 1024) / diskmanager.PAGE_SIZE_BYTES
-	mainItemCount := (mainCacheSize * 1024) / diskmanager.PAGE_SIZE_BYTES
+	windowItemCount := (windowSize * 1024) / pager.PAGE_SIZE_BYTES
+	mainItemCount := (mainCacheSize * 1024) / pager.PAGE_SIZE_BYTES
 	probationCap := uint64(float64(mainItemCount) * MAIN_CACHE_RATIO)
 	protectedCap := uint64(float64(mainItemCount) * float64(1.0-MAIN_CACHE_RATIO))
 

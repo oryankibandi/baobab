@@ -48,6 +48,13 @@ const (
 	IsInternal
 )
 
+// I/O Operation timeouts
+const (
+	READ_PAGE_TIMEOUT_MILL     = 200
+	NO_SYNC_WRITE_TIMEOUT_MILL = 200
+	SYNC_WRITE_TIMEOUT_MILL    = 400
+)
+
 type Pager struct {
 	// free list
 	freeList *FreeList
@@ -63,8 +70,18 @@ type Pager struct {
 	mu        sync.RWMutex
 }
 
+type PagerConfig struct {
+	FreeListFile string
+	DManager     *diskmanager.DiskManager
+}
+
 // NewPage - initializes a blank page by assigning a pageId and setting a flag
-func (pgr *Pager) NewPage(isInternal bool, pge *Page) error {
+// returns new page Id, and error if any
+func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page) (uint32, error) {
+	if pge == nil {
+		return 0, PagerError{Message: "No page entry provided."}
+	}
+
 	var newPgeId uint32
 	if n := pgr.freeList.pop(); n < 0 {
 		pgr.mu.Lock()
@@ -77,10 +94,16 @@ func (pgr *Pager) NewPage(isInternal bool, pge *Page) error {
 
 	err := pge.initializePage(newPgeId, isInternal)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	return nil
+	if setAsRoot {
+		pgr.mu.Lock()
+		pgr.rootPageId = newPgeId
+		pgr.mu.Unlock()
+	}
+
+	return newPgeId, nil
 }
 
 // readMetadata get metadata page and reads content into buff
@@ -95,8 +118,7 @@ func (pgr *Pager) readMetadata(buff *[]byte) error {
 		return err
 	}
 
-	testTimeout := 200
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(READ_PAGE_TIMEOUT_MILL)*time.Millisecond)
 
 	select {
 	case e := <-errChan:
@@ -124,8 +146,7 @@ func (pgr *Pager) ReadPage(pageId uint32, buff *[]byte) error {
 		return err
 	}
 
-	testTimeout := 200
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(READ_PAGE_TIMEOUT_MILL)*time.Millisecond)
 
 	select {
 	case e := <-errChan:
@@ -159,8 +180,7 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 		return err
 	}
 
-	testTimeout := 200
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(NO_SYNC_WRITE_TIMEOUT_MILL)*time.Millisecond)
 
 	select {
 	case e := <-errChan:
@@ -202,8 +222,7 @@ func (pgr *Pager) FlushMetadata(buff *[]byte) error {
 		return err
 	}
 
-	testTimeout := 800 // calling Sync() takes a bit longer
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(SYNC_WRITE_TIMEOUT_MILL)*time.Millisecond)
 
 	// writes happen async, wait for write to complete
 	select {
@@ -228,6 +247,56 @@ func (pgr *Pager) UpdateRootPage(pageId uint32) {
 	pgr.rootPageId = pageId
 }
 
+func (pgr *Pager) RootPage() uint32 {
+	pgr.mu.RLock()
+	defer pgr.mu.RUnlock()
+
+	return pgr.rootPageId
+}
+
+func (pgr *Pager) Flush() {
+	pgr.dManager.ForceFlush()
+}
+
+func (pgr *Pager) FlushFreeList() {
+	n := make(chan int)
+	pgr.freeList.flushFreeList(&n)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*SYNC_WRITE_TIMEOUT_MILL)
+	defer cancel()
+
+	select {
+	case t := <-n:
+		fmt.Printf("Flushed free list.Written %d bytes\n", t)
+	case <-ctx.Done():
+		fmt.Println("timeout flushing freelist")
+	}
+}
+
+//	 InitFromMetadata - reads metadata page from disk and sets metadata on pager.
+//				should be called immediately after initializing pager to set pager fields
+//
+//	 Parameters:
+//		metaPge - pointer to page with an allocated location. Read metadata content is stored in this page.
+//	 Returns:
+//		error - error if any
+func (pgr *Pager) InitFromMetadata(metaPge *Page) error {
+	// read metadata page
+	// In order to pass *buffer to readMetadata(), we create a slice backed by
+	// our original array for in place update
+	metadataSlice := metaPge.pgeData[:]
+	err := pgr.readMetadata(&metadataSlice)
+	if err != nil {
+		return err
+	}
+
+	pgr.rootPageId = binary.LittleEndian.Uint32(metaPge.pgeData[0:4])
+	pgr.pageCount = binary.LittleEndian.Uint32(metaPge.pgeData[12:16])
+	pgr.maxPageId = binary.LittleEndian.Uint32(metaPge.pgeData[16:20])
+
+	return nil
+}
+
 // NewPager creates and returns an instance of pager, or error if any
 // Parameters:
 //
@@ -237,27 +306,23 @@ func (pgr *Pager) UpdateRootPage(pageId uint32) {
 //
 //	pager a pointer to a pager
 //	e	error if any
-func NewPager(buff *[]byte, diskmanagerConfig diskmanager.DiskManagerConfig) (pager *Pager, e error) {
-	fl := NewFreeList()
-	dm, err := diskmanager.NewDiskManager(diskmanagerConfig)
-	if err != nil {
-		return nil, err
+func NewPager(pgrConfig PagerConfig) (pager *Pager, e error) {
+	if pgrConfig.DManager == nil {
+		return nil, PagerError{Message: "diskmanager instance not proviided"}
 	}
 
-	// read metadata page
+	fl := NewFreeList(pgrConfig.FreeListFile)
 	pgr := &Pager{
 		freeList: fl,
-		dManager: dm,
+		dManager: pgrConfig.DManager,
 	}
-
-	err = pgr.readMetadata(buff)
-	if err != nil {
-		return nil, err
-	}
-
-	pgr.rootPageId = binary.LittleEndian.Uint32((*buff)[0:4])
-	pgr.pageCount = binary.LittleEndian.Uint32((*buff)[12:16])
-	pgr.maxPageId = binary.LittleEndian.Uint32((*buff)[16:20])
 
 	return pgr, nil
+}
+
+// Syncs all OS buffer content to disk then calls close on diskmanager and freeList
+func (pgr *Pager) Close() {
+	pgr.dManager.ForceFlush()
+	pgr.dManager.Close()
+	pgr.freeList.close()
 }
