@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	FREE_LIST_PAGE_SIZE  = 4096
-	FREE_LIST_ENTRY_SIZE = 4
-	ITEMS_PER_PAGE       = 1024
-	DEFAULT_FILE         = "baobab"
+	FREE_LIST_PAGE_SIZE   = 4096
+	FREE_LIST_ENTRY_SIZE  = 4
+	ITEMS_PER_PAGE        = 1024
+	DEFAULT_FREELIST_FILE = "baobab"
 )
 
 type FreeList struct {
@@ -188,7 +188,7 @@ func (fl *FreeList) close() {
 
 func NewFreeList(flPath string) *FreeList {
 	if len(flPath) == 0 {
-		flPath = DEFAULT_FILE
+		flPath = DEFAULT_FREELIST_FILE
 	}
 
 	fd, err := os.OpenFile(fmt.Sprintf("%s_fl", flPath), os.O_CREATE|os.O_RDWR, 0644)

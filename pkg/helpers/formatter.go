@@ -25,6 +25,11 @@ func PrintSuccessMsg(msg string) {
 	fmt.Println(BOLDGREEN + "  ✓ " + msg + RESET)
 }
 
+// PrintInfoMsg formats an info message with the appropriate color
+func PrintInfoMsg(msg string) {
+	fmt.Println(BOLDCYAN + "  ✓ " + msg + RESET)
+}
+
 // PrintTestErrorMsg formats a test error message with the appropriate color
 func PrintTestErrorMsg(msg string, t *testing.T) {
 	t.Fatal(BOLDRED + " ✗ " + msg + RESET)

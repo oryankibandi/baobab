@@ -3,6 +3,7 @@ package pager
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -28,6 +29,7 @@ func TestNewPager(t *testing.T) {
 		name         string
 		freelistFile string
 		diskMan      *diskmanager.DiskManager
+		dbFile       string
 		isValid      bool
 	}
 
@@ -37,6 +39,7 @@ func TestNewPager(t *testing.T) {
 	tests = append(tests, tTest{
 		name:    "test_newpager_no_freelist",
 		diskMan: dMan,
+		dbFile:  dbFile,
 		isValid: true,
 	})
 
@@ -54,8 +57,9 @@ func TestNewPager(t *testing.T) {
 	})
 
 	// valid
+	dbFileValid := fmt.Sprintf("%s_valid", dbFile)
 	dManConfigValid := diskmanager.DiskManagerConfig{
-		DataFile: fmt.Sprintf("%s_valid", dbFile),
+		DataFile: dbFileValid,
 	}
 	dManValid, err := diskmanager.NewDiskManager(dManConfigValid)
 	if err != nil {
@@ -66,11 +70,13 @@ func TestNewPager(t *testing.T) {
 		name:         "test_newpager_valid",
 		diskMan:      dManValid,
 		freelistFile: fmt.Sprintf("%s_valid", freelistFile),
+		dbFile:       dbFileValid,
 		isValid:      true,
 	})
 
 	for _, v := range tests {
 		t.Run(v.name, func(t *testing.T) {
+			helpers.PrintInfoMsg(fmt.Sprintf("Freelist file -> %s", v.freelistFile))
 			pgr, err := NewPager(PagerConfig{
 				FreeListFile: v.freelistFile,
 				DManager:     v.diskMan,
@@ -85,9 +91,27 @@ func TestNewPager(t *testing.T) {
 					helpers.PrintTestErrorMsg("Expected pager, got nil.", t)
 				}
 
-				helpers.PrintSuccessMsg(fmt.Sprintf("%s success", v.name))
+				// ensure that the files have been created
+				var expectedFlFile string
+
+				if len(v.freelistFile) == 0 {
+					expectedFlFile = fmt.Sprintf("%s_fl", DEFAULT_FREELIST_FILE)
+				} else {
+					expectedFlFile = fmt.Sprintf("%s_fl", v.freelistFile)
+				}
+
+				_, err := os.Stat(expectedFlFile)
+				if err != nil {
+					helpers.PrintTestErrorMsg(fmt.Sprintf("freelist file not created: %s.", err.Error()), t)
+				}
+
+				_, err = os.Stat(v.dbFile)
+				if err != nil {
+					helpers.PrintTestErrorMsg(fmt.Sprintf("dbFile not created: %s", err.Error()), t)
+				}
 
 				pgr.Close()
+				helpers.PrintSuccessMsg(fmt.Sprintf("%s success", v.name))
 			} else {
 				if err == nil {
 					helpers.PrintTestErrorMsg("Expected error, got nil", t)
