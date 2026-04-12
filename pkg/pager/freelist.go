@@ -186,9 +186,9 @@ func (fl *FreeList) close() {
 	fmt.Println("closed free list file descriptors.")
 }
 
-func NewFreeList(flPath string) *FreeList {
+func NewFreeList(flPath string) (*FreeList, error) {
 	if len(flPath) == 0 {
-		flPath = DEFAULT_FREELIST_FILE
+		return nil, FreelistError{Message: "No filepath for freelist provided"}
 	}
 
 	fd, err := os.OpenFile(fmt.Sprintf("%s_fl", flPath), os.O_CREATE|os.O_RDWR, 0644)
@@ -203,5 +203,5 @@ func NewFreeList(flPath string) *FreeList {
 		count:     0,
 	}
 
-	return fl
+	return fl, nil
 }

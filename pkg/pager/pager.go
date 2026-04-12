@@ -81,13 +81,13 @@ func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page) (uint32, e
 	if pge == nil {
 		return 0, PagerError{Message: "No page entry provided."}
 	}
+	pgr.mu.Lock()
+	defer pgr.mu.Unlock()
 
 	var newPgeId uint32
 	if n := pgr.freeList.pop(); n < 0 {
-		pgr.mu.Lock()
 		newPgeId = pgr.maxPageId + 1
 		pgr.maxPageId++
-		pgr.mu.Unlock()
 	} else {
 		newPgeId = uint32(n)
 	}
@@ -98,11 +98,11 @@ func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page) (uint32, e
 	}
 
 	if setAsRoot {
-		pgr.mu.Lock()
 		pgr.rootPageId = newPgeId
-		pgr.mu.Unlock()
 	}
 
+	// increment page count
+	pgr.pageCount++
 	return newPgeId, nil
 }
 
@@ -141,7 +141,7 @@ func (pgr *Pager) ReadPage(pageId uint32, buff *[]byte) error {
 	}
 
 	errChan := make(chan error)
-	err := pgr.dManager.ReadReq(buff, pageId, &errChan)
+	err := pgr.dManager.ReadReq(buff, pageId*PAGE_SIZE_BYTES, &errChan)
 	if err != nil {
 		return err
 	}
@@ -158,6 +158,7 @@ func (pgr *Pager) ReadPage(pageId uint32, buff *[]byte) error {
 		cancel()
 		return PagerError{Message: "timeout reading metadata page."}
 	}
+
 	return nil
 }
 
@@ -196,6 +197,13 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 	// if page was marked as dead, add pageid to free list
 	if isDead {
 		pgr.freeList.add(pageId)
+
+		// one page has been cleared, decrement page count
+		pgr.mu.Lock()
+		if pgr.pageCount > 0 {
+			pgr.pageCount--
+		}
+		pgr.mu.Unlock()
 	}
 	return nil
 }
@@ -274,7 +282,7 @@ func (pgr *Pager) FlushFreeList() {
 }
 
 //	 InitFromMetadata - reads metadata page from disk and sets metadata on pager.
-//				should be called immediately after initializing pager to set pager fields
+//			    should be called immediately after initializing pager to set pager fields
 //
 //	 Parameters:
 //		metaPge - pointer to page with an allocated location. Read metadata content is stored in this page.
@@ -311,7 +319,12 @@ func NewPager(pgrConfig PagerConfig) (pager *Pager, e error) {
 		return nil, PagerError{Message: "diskmanager instance not proviided"}
 	}
 
-	fl := NewFreeList(pgrConfig.FreeListFile)
+	fl, err := NewFreeList(pgrConfig.FreeListFile)
+	if err != nil {
+		return nil, err
+	}
+	fl.loadFreeList()
+
 	pgr := &Pager{
 		freeList: fl,
 		dManager: pgrConfig.DManager,

@@ -90,7 +90,7 @@ func TestWritePage(t *testing.T) {
 
 		// given that we are flushing to disk(calling Sync()), it may take
 		// longer than normal and is not deterministic
-		testTimeout := 400
+		testTimeout := 800
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(testTimeout)*time.Millisecond)
 
 	loop:

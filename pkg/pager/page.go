@@ -123,7 +123,7 @@ func (p *Page) initializePage(pageId uint32, internal bool) error {
 	}
 
 	p.rmu.Lock()
-	defer p.rmu.RUnlock()
+	defer p.rmu.Unlock()
 
 	// set page id
 	p.PageId = pageId
