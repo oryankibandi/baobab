@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/oryankibandi/baobab/pkg/diskmanager"
 	"github.com/oryankibandi/baobab/pkg/helpers"
@@ -420,6 +422,154 @@ func TestReadAndWritePage(t *testing.T) {
 	})
 }
 
-// TODO:
-// 1. Test Syncing a page
-// 2. Concurrent read and write on many pages
+// Concurrent read and write on many pages
+func TestConcurrentReadWrite(t *testing.T) {
+	var wg sync.WaitGroup
+
+	readPageCount := 50
+	writePageCount := 60
+	cacheLine := 64
+
+	readSet := make([]Page, readPageCount)
+	writeSet := make([]Page, writePageCount)
+
+	// initialize pager
+	dir := t.TempDir()
+	dbFile := filepath.Join(dir, "baobab.db")
+	freelistFile := filepath.Join(dir, "baobab")
+
+	dManConfig := diskmanager.DiskManagerConfig{
+		DataFile: dbFile,
+	}
+
+	dMan, err := diskmanager.NewDiskManager(dManConfig)
+	if err != nil {
+		helpers.PrintTestErrorMsg("Unable to initialize disk manager", t)
+	}
+
+	// init pager and read metadata
+	pgr, err := NewPager(PagerConfig{
+		DManager:     dMan,
+		FreeListFile: freelistFile,
+	})
+
+	if err != nil {
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize pager: %s", err.Error()), t)
+	}
+
+	if pgr == nil {
+		helpers.PrintTestErrorMsg("Received nil pager", t)
+	}
+	defer pgr.Close()
+
+	// initialize & fill read set with 0s
+	for i := range readPageCount {
+		_, err := pgr.NewPage(false, false, &readSet[i])
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize read set page: %s", err.Error()), t)
+		}
+
+		for k := range PAGE_SIZE_BYTES / cacheLine {
+			start := cacheLine * k
+			end := start + cacheLine
+			wg.Add(1)
+			go func(arr []byte) {
+				defer wg.Done()
+				for j := range arr {
+					arr[j] |= 1
+				}
+			}(readSet[i].pgeData[start:end])
+		}
+	}
+	wg.Wait()
+
+	// fill write set with 0s
+	for i := range writePageCount {
+		_, err := pgr.NewPage(false, false, &writeSet[i])
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize write set page: %s", err.Error()), t)
+		}
+
+		for k := range PAGE_SIZE_BYTES / cacheLine {
+			start := cacheLine * k
+			end := start + cacheLine
+			wg.Add(1)
+			go func(arr []byte) {
+				defer wg.Done()
+				for j := range arr {
+					arr[j] |= 1
+				}
+			}(writeSet[i].pgeData[start:end])
+		}
+	}
+	wg.Wait()
+
+	// Write readset to disk.
+	for i := range readSet {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			t.Run(fmt.Sprintf("%d_test_readwriteconcurr_writereadset", j), func(t *testing.T) {
+				pgeSlice := readSet[j].pgeData[:]
+				err := pgr.WritePage(readSet[j].PageId, &pgeSlice)
+				if err != nil {
+					helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write readset page; %s", err.Error()), t)
+				}
+			})
+		}(i)
+	}
+	wg.Wait()
+	helpers.PrintSuccessMsg(fmt.Sprintf("Successfully written %d readset pages", readPageCount))
+
+	// schedule read and write operations concurrently
+	start := make(chan struct{})
+	for i := range readPageCount {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			<-start
+			t.Run(fmt.Sprintf("%d_test_readwriteconcurr_read_readset", j), func(t *testing.T) {
+				readSlice := readSet[j].pgeData[:]
+				err := pgr.ReadPage(readSet[j].PageId, &readSlice)
+				if err != nil {
+					helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to read page: %s", err.Error()), t)
+				}
+
+				for idx, b := range readSlice {
+					if b != 0x01 && idx > HEADER_SIZE_BYTES {
+						helpers.PrintTestErrorMsg(fmt.Sprintf("Invalid data at index %d in read page: %b", idx, b), t)
+					}
+				}
+				helpers.PrintSuccessMsg(fmt.Sprintf("%d_test_readwriteconcurr_read_readset success", j))
+			})
+		}(i)
+	}
+
+	for i := range writePageCount {
+		wg.Add(1)
+		go func(j int) {
+			defer wg.Done()
+			<-start
+			t.Run(fmt.Sprintf("%d_test_readwriteconcurr_write_writeset", j), func(t *testing.T) {
+				writeSlice := writeSet[j].pgeData[:]
+				err := pgr.WritePage(writeSet[j].PageId, &writeSlice)
+				if err != nil {
+					helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write page: %s", err.Error()), t)
+				}
+
+				helpers.PrintSuccessMsg(fmt.Sprintf("%d_test_readwriteconcurr_write_writeset success", j))
+			})
+		}(i)
+	}
+
+	startTime := time.Now()
+
+	close(start)
+	wg.Wait()
+
+	dur := time.Since(startTime)
+
+	helpers.PrintSuccessMsg(fmt.Sprintf("TestConcurrentReadWrite success. Successfully written %d pages and read %d pages concurrently in %v", writePageCount, readPageCount, dur))
+}
+
+// TODO: Test freelist
