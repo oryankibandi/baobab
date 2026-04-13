@@ -281,8 +281,9 @@ func (pgr *Pager) FlushFreeList() {
 	}
 }
 
-//	 InitFromMetadata - reads metadata page from disk and sets metadata on pager.
-//			    should be called immediately after initializing pager to set pager fields
+// InitFromMetadata - reads metadata page from disk and sets metadata on pager.
+//
+//			      should be called immediately after initializing pager to set pager fields
 //
 //	 Parameters:
 //		metaPge - pointer to page with an allocated location. Read metadata content is stored in this page.

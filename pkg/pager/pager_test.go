@@ -572,4 +572,94 @@ func TestConcurrentReadWrite(t *testing.T) {
 	helpers.PrintSuccessMsg(fmt.Sprintf("TestConcurrentReadWrite success. Successfully written %d pages and read %d pages concurrently in %v", writePageCount, readPageCount, dur))
 }
 
-// TODO: Test freelist
+// Test freelist
+func TestFreeList(t *testing.T) {
+	var page1, page2, page3 Page
+	var pageId1, pageId2, pageId3 uint32
+
+	// initialize pager
+	dir := t.TempDir()
+	dbFile := filepath.Join(dir, "baobab.db")
+	freelistFile := filepath.Join(dir, "baobab")
+
+	dManConfig := diskmanager.DiskManagerConfig{
+		DataFile: dbFile,
+	}
+
+	dMan, err := diskmanager.NewDiskManager(dManConfig)
+	if err != nil {
+		helpers.PrintTestErrorMsg("Unable to initialize disk manager", t)
+	}
+
+	// init pager and read metadata
+	pgr, err := NewPager(PagerConfig{
+		DManager:     dMan,
+		FreeListFile: freelistFile,
+	})
+
+	if err != nil {
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize pager: %s", err.Error()), t)
+	}
+
+	if pgr == nil {
+		helpers.PrintTestErrorMsg("Received nil pager", t)
+	}
+	defer pgr.Close()
+
+	t.Run("test_freelist", func(t *testing.T) {
+		// initialize the first two pages
+		pageId1, err = pgr.NewPage(false, false, &page1)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize page1: %s", err.Error()), t)
+		}
+
+		pageId2, err = pgr.NewPage(false, false, &page2)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize page2: %s", err.Error()), t)
+		}
+
+		// set last byte to 1 so they can be written
+		page1.pgeData[PAGE_SIZE_BYTES-1] |= 0x01
+		page2.pgeData[PAGE_SIZE_BYTES-1] |= 0x01
+		page3.pgeData[PAGE_SIZE_BYTES-1] |= 0x01 // page id still unassigned
+
+		// write page1 and page2
+		page1Buff := page1.pgeData[:]
+		err = pgr.WritePage(pageId1, &page1Buff)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write page1: %s", err.Error()), t)
+		}
+
+		page2Buff := page2.pgeData[:]
+		err = pgr.WritePage(pageId2, &page2Buff)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write page2: %s", err.Error()), t)
+		}
+
+		// delete page 1
+		helpers.SetFlag(&(page1.pgeData[0]), Dead)
+
+		// flush page1 to ensure it is persisted
+		err = pgr.WritePage(pageId1, &page1Buff)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write page1: %s", err.Error()), t)
+		}
+
+		if p := pgr.pageCount; p != 1 {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected page count to be %d, got %d", 1, p), t)
+		}
+
+		// initialize new page
+		pageId3, err = pgr.NewPage(false, false, &page3)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize page3: %s", err.Error()), t)
+		}
+
+		//  pageId1 should be reassigned to page3
+		if pageId3 != pageId1 {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected pageId: %d, got %d", pageId1, pageId3), t)
+		}
+
+		helpers.PrintSuccessMsg("Freelist test successful")
+	})
+}
