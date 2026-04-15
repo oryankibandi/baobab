@@ -59,6 +59,9 @@ func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+	} else if cType == unassigned {
+		// new item, set as window item
+		f.updateSegment(windowSegment)
 	}
 
 	k := f.getKey()
@@ -107,7 +110,7 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 }
 
 // Evicts an item from the window cache. This is called when the w-cache is full.
-// If main cache is full, compares victims from main cache and window cache
+// If main cache is also full, it compares victims from main cache and window cache
 // and evicts the one with a lesser count.
 func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	if w.probationCount > w.probationCapacity {
@@ -137,7 +140,7 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 
 		w.wg.Wait()
 	} else {
-		// item can be moved to probation segment
+		// item can be moved to probation segment without evicting probation
 		windVictim.fr = w.cBuffer.EvictWithoutClearing(windowSegment)
 		if windVictim.fr == nil {
 			return nil, BufferManagerError{Message: "Unable to find window victim(all frames in use)."}
@@ -145,7 +148,7 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 
 		windVictim.fr.updateSegment(probationSegment)
 		w.probationCount++
-		// w.windowCount++
+		w.windowCount--
 
 		return nil, nil
 	}
@@ -161,14 +164,12 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	// compare counts of window victim and main cache victim
 	windKey := windVictim.fr.getKey()
 	windCount, err := w.tinyFilter.CheckItemCount(toBytes(windKey))
-
 	if err != nil {
 		return nil, err
 	}
 
 	mainKey := probationVictim.fr.getKey()
 	mainCacheCount, err := w.tinyFilter.CheckItemCount(toBytes(mainKey))
-
 	if err != nil {
 		return nil, err
 	}
@@ -176,10 +177,11 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	// del keys
 	var delKeys []uint32
 
+	// FIX: flush frame to disk before evicting
 	if windCount > mainCacheCount {
 		delKeys = append(delKeys, mainKey)
 
-		// Add window victim to probation
+		// Add window victim to probation and readd main cache victim to pool
 		err = w.cBuffer.addToBpool(probationVictim.fr)
 		if err != nil {
 			panic(err)
@@ -264,6 +266,10 @@ func (w *WTinyLfu) getFreeFrame() (fr *Frame, evicted []uint32, e error) {
 	var keysToEvict []uint32
 	var err error
 
+	if w.windowCount > w.windowCapacity {
+		panic("window cache overflow.")
+	}
+
 	if w.windowCount == w.windowCapacity {
 		keysToEvict, err = w.evictWindow()
 		if err != nil {
@@ -278,6 +284,7 @@ func (w *WTinyLfu) getFreeFrame() (fr *Frame, evicted []uint32, e error) {
 	}
 
 	f.updateSegment(windowSegment)
+	w.windowCount++
 
 	return f, keysToEvict, nil
 }
@@ -287,7 +294,7 @@ func (w *WTinyLfu) getFreeFrame() (fr *Frame, evicted []uint32, e error) {
 func (w *WTinyLfu) readdFrameToPool(fr *Frame) error {
 	err := w.cBuffer.addToBpool(fr)
 	if err != nil {
-		fmt.Printf(helpers.BOLDRED + err.Error() + helpers.RESET)
+		fmt.Println(helpers.BOLDRED + err.Error() + helpers.RESET)
 	}
 
 	return err
@@ -358,7 +365,8 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	windowItemCount := (windowSize * 1024) / pager.PAGE_SIZE_BYTES
 	mainItemCount := (mainCacheSize * 1024) / pager.PAGE_SIZE_BYTES
 	probationCap := uint64(float64(mainItemCount) * MAIN_CACHE_RATIO)
-	protectedCap := uint64(float64(mainItemCount) * float64(1.0-MAIN_CACHE_RATIO))
+	// do not include reserved frame for metadata page
+	protectedCap := uint64(float64(mainItemCount)*float64(1.0-MAIN_CACHE_RATIO)) - 1
 
 	cBuff, err := NewClock(windowSize + mainCacheSize)
 	if err != nil {

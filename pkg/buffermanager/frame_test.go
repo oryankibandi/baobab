@@ -10,8 +10,8 @@ import (
 	"unsafe"
 
 	"github.com/oryankibandi/baobab/internal/manual"
-	"github.com/oryankibandi/baobab/pkg/diskmanager"
 	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/pager"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -51,10 +51,10 @@ func TestMemAllocMany(t *testing.T) {
 	var entries []*Frame
 	var m runtime.MemStats
 	var e *Frame
-	var d [diskmanager.PAGE_SIZE_BYTES]byte
+	var d [pager.PAGE_SIZE_BYTES]byte
 
-	for i := range diskmanager.PAGE_SIZE_BYTES {
-		d[i] = 1
+	for i := range pager.PAGE_SIZE_BYTES {
+		d[i] = 0x01
 	}
 
 	var currRss uint64
@@ -78,8 +78,8 @@ func TestMemAllocMany(t *testing.T) {
 				// Since calloc zeros out allocated memory, the OS may
 				// not actually assign the physical memory until data is
 				// added
-				e.page = diskmanager.Page{}
-				e.page.SetPageData(&d)
+				e.page = pager.Page{}
+				e.page.SwapData(&d)
 
 				entries = append(entries, e)
 			}
@@ -158,29 +158,35 @@ func TestSetData(t *testing.T) {
 		t.Fatal("Unsafe pointer not set")
 	}
 
-	var d [diskmanager.PAGE_SIZE_BYTES]byte
+	var d [pager.PAGE_SIZE_BYTES]byte
 
 	key := uint32(25)
 
 	// set key
 	binary.LittleEndian.PutUint32(d[1:5], key)
 
-	for i := range diskmanager.PAGE_SIZE_BYTES {
+	for i := range pager.PAGE_SIZE_BYTES {
 		// skip page id slot
 		if i >= 1 && i < 5 {
 			continue
 		}
-		d[i] = 1
+		d[i] |= 0x01
 	}
 
-	testPage := diskmanager.Page{}
-	testPage.SetPageData(&d)
+	pge := en.GetPage()
+	if pge == nil {
+		assert.NotNilf(t, pge, "Got nil page")
+	}
+	testPage := pager.Page{
+		PageId: key,
+	}
+	pge.SwapData(&d)
 
 	t.Run("set_data", func(t *testing.T) {
 		err := en.SetData(&testPage)
 		assert.Nilf(t, err, "Expected no error, got  %v", err)
 
-		d2, err := en.page.GetPageByteData()
+		d2, err := en.ByteData()
 		assert.Nilf(t, err, "Expected no error, got  %v", err)
 		assert.Equalf(t, d, *d2, "Expected equal data during setData()")
 
@@ -214,19 +220,19 @@ func TestUpdateData(t *testing.T) {
 		t.Fatal("Unsafe pointer not set")
 	}
 
-	var d [diskmanager.PAGE_SIZE_BYTES]byte
+	var d [pager.PAGE_SIZE_BYTES]byte
 
 	key := uint32(25)
 	binary.LittleEndian.PutUint32(d[1:5], key)
-	pge := diskmanager.Page{}
-	pge.SetPageData(&d)
+	pge := pager.Page{}
+	pge.SwapData(&d)
 
-	for i := range diskmanager.PAGE_SIZE_BYTES {
+	for i := range pager.PAGE_SIZE_BYTES {
 		d[i] = 1
 	}
 
 	t.Run("update_data", func(t *testing.T) {
-		err := en.page.SetPageData(&d)
+		err := en.page.SwapData(&d)
 		assert.Nilf(t, err, "Expected no error, got  %s", err)
 
 		d2, err := en.page.GetPageByteData()
@@ -257,15 +263,15 @@ func TestClear(t *testing.T) {
 		t.Fatal("Unsafe pointer not set")
 	}
 
-	var d [diskmanager.PAGE_SIZE_BYTES]byte
-	for i := range diskmanager.PAGE_SIZE_BYTES {
+	var d [pager.PAGE_SIZE_BYTES]byte
+	for i := range pager.PAGE_SIZE_BYTES {
 		d[i] = 1
 	}
 	key := uint32(25)
 
-	pge := diskmanager.Page{}
+	pge := pager.Page{}
 	pge.PageId = key
-	pge.SetPageData(&d)
+	pge.SwapData(&d)
 	err := en.SetData(&pge)
 
 	if err != nil {
@@ -393,7 +399,7 @@ func TestRefAndUnrefConcurrent(t *testing.T) {
 
 func TestMarkDirty(t *testing.T) {
 	var en *Frame
-	var d [diskmanager.PAGE_SIZE_BYTES]byte
+	var d [pager.PAGE_SIZE_BYTES]byte
 	en = NewFrame()
 
 	if en == nil {
@@ -405,7 +411,7 @@ func TestMarkDirty(t *testing.T) {
 	}
 
 	// add data
-	for i := range diskmanager.PAGE_SIZE_BYTES {
+	for i := range pager.PAGE_SIZE_BYTES {
 		if i != 0 {
 			d[i] = 0x01
 		}
@@ -424,7 +430,7 @@ func TestMarkDirty(t *testing.T) {
 			t.Fatalf("Expected no error, got %v", err)
 		}
 
-		set := helpers.BitIsSet(&(pgeData[0]), diskmanager.Dirty)
+		set := helpers.BitIsSet(&(pgeData[0]), pager.Dirty)
 		if !set {
 			t.Fatalf("Expected dirty bit to be set")
 		}
@@ -433,7 +439,7 @@ func TestMarkDirty(t *testing.T) {
 
 func TestMarkClean(t *testing.T) {
 	var en *Frame
-	var d [diskmanager.PAGE_SIZE_BYTES]byte
+	var d [pager.PAGE_SIZE_BYTES]byte
 	en = NewFrame()
 
 	if en == nil {
@@ -445,7 +451,7 @@ func TestMarkClean(t *testing.T) {
 	}
 
 	// add data
-	for i := range diskmanager.PAGE_SIZE_BYTES {
+	for i := range pager.PAGE_SIZE_BYTES {
 		if i != 0 {
 			d[i] = 0x01
 		}
@@ -464,7 +470,7 @@ func TestMarkClean(t *testing.T) {
 			t.Fatalf("Expected no error, got %v", err)
 		}
 
-		set := helpers.BitIsSet(&(pgeData[0]), diskmanager.Dirty)
+		set := helpers.BitIsSet(&(pgeData[0]), pager.Dirty)
 		if set {
 			t.Fatalf("Expected dirty bit to be unset")
 		}

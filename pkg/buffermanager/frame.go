@@ -233,9 +233,6 @@ func (f *Frame) SetData(p *pager.Page) error {
 	f.page.PageId = p.PageId
 	// f.page.Flags = p.Flags
 
-	// clear page so that it can be garbage collected
-	p = nil
-
 	return nil
 }
 

@@ -203,3 +203,16 @@ func (p *Page) SetLSN(lsn []byte) {
 
 	copy(p.pgeData[5:17], lsn)
 }
+
+// swaps page data with provided page p data. Currently only used in tests.
+func (p *Page) SwapData(buff *[PAGE_SIZE_BYTES]byte) error {
+	if buff == nil {
+		return PagerError{Message: "No byte data provided"}
+	}
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+
+	copy(p.pgeData[:], (buff[:]))
+
+	return nil
+}

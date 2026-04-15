@@ -77,6 +77,7 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		return val, nil
 	} else {
 		// get empty frame. this is where the page read from disk will be stored since memory is already allocated.
+		// if window cache is full, a frame will be evicted.
 		fr, evicted, err := c.wTinyLfu.getFreeFrame()
 		if err != nil {
 			return nil, err
@@ -208,7 +209,13 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 		return nil, err
 	}
 
-	// Add to buffer
+	// update frame metadata
+	err = fr.SetData(frPge)
+	if err != nil {
+		return nil, err
+	}
+
+	// Add to buffer manager cache
 	log.Println("Adding new page to cache...")
 	_, err = c.put(uint32(pgeId), fr, true)
 	log.Printf("Added new page to cache. Page ID: %d\n", pgeId)
@@ -368,6 +375,10 @@ func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager) (
 
 	if wal == nil {
 		return nil, BufferManagerError{Message: "wal instance  not provided."}
+	}
+
+	if pgr == nil {
+		return nil, BufferManagerError{Message: "pager instance  not provided."}
 	}
 
 	windSize := uint64(float64(0.01) * float64(cacheConfig.CacheSize))

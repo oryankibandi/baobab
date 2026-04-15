@@ -141,6 +141,7 @@ func (clk *clock) Pop() *Frame {
 	defer clk.mu.Unlock()
 
 	if len(clk.bPool) == 0 {
+		fmt.Println("No item in buffer pool")
 		return nil
 	}
 
@@ -281,8 +282,9 @@ func NewClock(size uint64) (*clock, error) {
 	if f == nil {
 		return nil, BufferManagerError{"Could not reserve metadata page frame"}
 	}
-
+	clk.Reserved = f
 	f.reserveFrame()
+
 	// ensure clock hand doesn't point to reserved frame
 	if f == clk.Head {
 		clk.Head = clk.Head.GetNextLink()
