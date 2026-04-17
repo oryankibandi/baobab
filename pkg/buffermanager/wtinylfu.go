@@ -2,11 +2,16 @@ package buffermanager
 
 import (
 	"fmt"
+	"math"
 	"sync"
 
 	tiny "github.com/oryankibandi/baobab/internal/tinylfu"
 	"github.com/oryankibandi/baobab/pkg/helpers"
 	"github.com/oryankibandi/baobab/pkg/pager"
+)
+
+const (
+	MAIN_CACHE_RATIO = 0.2
 )
 
 // Frames start with no assigned segment, so 0 represents unassigned stage
@@ -83,7 +88,6 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 		return BufferManagerError{Message: "frame to promote no provided"}
 	}
 
-	fmt.Println("wtinylfu.PromoteToProtected()")
 	cType := f.getSegType()
 
 	if cType != probationSegment {
@@ -112,7 +116,7 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 // Evicts an item from the window cache. This is called when the w-cache is full.
 // If main cache is also full, it compares victims from main cache and window cache
 // and evicts the one with a lesser count.
-func (w *WTinyLfu) evictWindow() ([]uint32, error) {
+func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 	if w.probationCount > w.probationCapacity {
 		panic("probation items surpassed allowed max")
 	}
@@ -181,6 +185,20 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 	if windCount > mainCacheCount {
 		delKeys = append(delKeys, mainKey)
 
+		// flush main cache victim
+		buff, err := probationVictim.fr.ByteData()
+		if err != nil {
+			panic("No byte data associated with frame")
+		}
+
+		// create a slice around the buff
+		frSlice := buff[:]
+		err = pgr.WritePage(mainKey, &frSlice)
+		if err != nil {
+			return nil, err
+		}
+		helpers.PrintInfoMsg("Flushed page to be evicted.")
+
 		// Add window victim to probation and readd main cache victim to pool
 		err = w.cBuffer.addToBpool(probationVictim.fr)
 		if err != nil {
@@ -190,6 +208,20 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 		windVictim.fr.updateSegment(probationSegment)
 		w.windowCount--
 	} else {
+		// flush window cache victim
+		buff, err := windVictim.fr.ByteData()
+		if err != nil {
+			panic("No byte data associated with frame")
+		}
+
+		// create a slice around the buff
+		frSlice := buff[:]
+		err = pgr.WritePage(windKey, &frSlice)
+		if err != nil {
+			return nil, err
+		}
+		helpers.PrintInfoMsg("Flushed page to be evicted.")
+
 		err = w.cBuffer.addToBpool(windVictim.fr)
 		if err != nil {
 			panic(err)
@@ -258,7 +290,8 @@ func (w *WTinyLfu) evictWindow() ([]uint32, error) {
 
 // getEmptyFrame returns a free frame from the circular buffer. If no frame
 // is available, evict from window cache
-func (w *WTinyLfu) getFreeFrame() (fr *Frame, evicted []uint32, e error) {
+// pgr - pager instance required to flush any frames that may be evicted
+func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *Frame, evicted []uint32, e error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// check if window is full
@@ -271,7 +304,7 @@ func (w *WTinyLfu) getFreeFrame() (fr *Frame, evicted []uint32, e error) {
 	}
 
 	if w.windowCount == w.windowCapacity {
-		keysToEvict, err = w.evictWindow()
+		keysToEvict, err = w.evictWindow(pgr)
 		if err != nil {
 			return nil, nil, WTinyLFUError{Message: "Unable to evict from window cache"}
 		}
@@ -347,8 +380,8 @@ func (w *WTinyLfu) close() {
 	}
 }
 
-// Creates new instance  of W-TinyLFU. windowSize and mainCacheSize should be
-// in KB
+// Creates new instance  of W-TinyLFU.
+// windowSize and mainCacheSize represents the number of frames for each segment
 func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	if windowSize <= 0 {
 		return nil, WTinyLFUError{Message: "Window size must be greater than 0"}
@@ -362,11 +395,9 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 		return nil, WTinyLFUError{Message: "Window size is greater than man cache size."}
 	}
 
-	windowItemCount := (windowSize * 1024) / pager.PAGE_SIZE_BYTES
-	mainItemCount := (mainCacheSize * 1024) / pager.PAGE_SIZE_BYTES
-	probationCap := uint64(float64(mainItemCount) * MAIN_CACHE_RATIO)
+	probationCap := uint64(math.Round(float64(mainCacheSize) * MAIN_CACHE_RATIO))
 	// do not include reserved frame for metadata page
-	protectedCap := uint64(float64(mainItemCount)*float64(1.0-MAIN_CACHE_RATIO)) - 1
+	protectedCap := uint64(math.Round(float64(mainCacheSize)*float64(1.0-MAIN_CACHE_RATIO))) - 1
 
 	cBuff, err := NewClock(windowSize + mainCacheSize)
 	if err != nil {
@@ -380,7 +411,7 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 
 	w := WTinyLfu{
 		cBuffer:           cBuff,
-		windowCapacity:    windowItemCount,
+		windowCapacity:    windowSize,
 		probationCapacity: probationCap,
 		protectedCapacity: protectedCap,
 		tinyFilter:        t,

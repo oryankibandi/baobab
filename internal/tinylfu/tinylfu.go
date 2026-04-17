@@ -1,7 +1,6 @@
 package tinylfu
 
 import (
-	"log"
 	"sync"
 )
 
@@ -35,20 +34,15 @@ func (t *TinyLFU) IncrementItem(data []byte) error {
 		return TinyLFUError{Message: "Invalid/empty data bytes provided"}
 	}
 
-	log.Println("Checking doorkeeper....")
 	mayExist := t.Doorkeeper.Check(data)
-	log.Println("Checked doorkeeper...")
 
 	if !mayExist {
 		t.Doorkeeper.Add(data)
-		log.Println("Added to doorkeeper....")
 		return nil
 	}
 
 	// increment in main structure
-	log.Println("Incrementing in main structure....")
 	opCount, err := t.MainStruct.Increment(data)
-	log.Println("Incremented in main structure....")
 
 	if err != nil {
 		return err

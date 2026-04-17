@@ -5,8 +5,6 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/oryankibandi/baobab/pkg/pager"
 )
 
 const (
@@ -226,21 +224,21 @@ func (clk *clock) close() error {
 
 // Creates a clock buffer of size 'size`KB and
 // returns a pointer to the new circular buffer.
-// `size` parameter should be in Kilobytes.
-func NewClock(size uint64) (*clock, error) {
-	minSize := (3 * pager.PAGE_SIZE_BYTES) / 1024
+// `itemCount` parameter represents number of entries/frames
+func NewClock(itemCount uint64) (*clock, error) {
+	minItems := 3
 	// Initialize entries, add to bPool and create the circular buffer
-	if size < uint64(minSize) {
-		return nil, BufferManagerError{Message: fmt.Sprintf("Minimum capacity is %d", minSize)}
+	if itemCount < uint64(minItems) {
+		return nil, BufferManagerError{Message: fmt.Sprintf("Minimum capacity is %d", minItems)}
 	}
 
-	capacity := (size * 1024) / pager.PAGE_SIZE_BYTES
+	// capacity := (size * 1024) / pager.PAGE_SIZE_BYTES
 	clk := &clock{
-		capacity: capacity,
+		capacity: itemCount,
 	}
 
 	var wg sync.WaitGroup
-	for range capacity {
+	for range itemCount {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -261,8 +259,8 @@ func NewClock(size uint64) (*clock, error) {
 			// first item
 			ent.SetNextLink(clk.bPool[i+1])
 
-			ent.SetPrevLink(clk.bPool[capacity-1])
-		} else if i == int(capacity)-1 {
+			ent.SetPrevLink(clk.bPool[itemCount-1])
+		} else if i == int(itemCount)-1 {
 			// last item
 			ent.SetPrevLink(clk.bPool[i-1])
 

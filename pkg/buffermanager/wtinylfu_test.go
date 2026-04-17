@@ -2,10 +2,10 @@ package buffermanager
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/oryankibandi/baobab/pkg/helpers"
-	"github.com/oryankibandi/baobab/pkg/pager"
 )
 
 func TestNewWTinyLFU(t *testing.T) {
@@ -24,9 +24,8 @@ func TestNewWTinyLFU(t *testing.T) {
 
 	for i, test := range tests {
 		t.Run(fmt.Sprintf("%d_test_newWtinylfu", i), func(t *testing.T) {
-			winCap := (test.windowSize * 1024) / pager.PAGE_SIZE_BYTES
-			probCap := uint64(float64((test.mainSize*1024)/pager.PAGE_SIZE_BYTES) * float64(MAIN_CACHE_RATIO))
-			protCap := uint64(float64((test.mainSize*1024)/pager.PAGE_SIZE_BYTES)*(float64(1.0)-MAIN_CACHE_RATIO)) - 1
+			probCap := uint64(math.Round(float64(test.mainSize) * MAIN_CACHE_RATIO))
+			protCap := uint64(math.Round(float64(test.mainSize)*(1.0-MAIN_CACHE_RATIO))) - 1
 			w, err := NewWTinylfu(test.windowSize, test.mainSize)
 
 			if !test.valid {
@@ -42,8 +41,8 @@ func TestNewWTinyLFU(t *testing.T) {
 					helpers.PrintTestErrorMsg("Expected wtinylfu instance, got nil", t)
 				}
 
-				if w.windowCapacity != winCap {
-					helpers.PrintTestErrorMsg(fmt.Sprintf("Expected window cache to be of size %d items, got %d items", winCap, w.windowCapacity), t)
+				if w.windowCapacity != test.windowSize {
+					helpers.PrintTestErrorMsg(fmt.Sprintf("Expected window cache to be of size %d items, got %d items", test.windowSize, w.windowCapacity), t)
 				}
 
 				if w.probationCapacity != probCap {
@@ -67,7 +66,11 @@ func TestEvictWindow(t *testing.T) {
 
 	windowCapacity := 48
 	mainCapacity := 2376
-	windowFrameCount := (windowCapacity * 1024) / pager.PAGE_SIZE_BYTES
+	// windowFrameCount := (windowCapacity * 1024) / pager.PAGE_SIZE_BYTES
+
+	// initialize pager
+	pgr := InitPager(t)
+	defer pgr.Close()
 
 	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity))
 	if err != nil {
@@ -76,10 +79,10 @@ func TestEvictWindow(t *testing.T) {
 
 	defer w.close()
 
-	for i := range windowFrameCount {
+	for i := range windowCapacity {
 		t.Run(fmt.Sprintf("%d_testevict_additem", i), func(t *testing.T) {
 			// update frame
-			f, _, err := w.getFreeFrame()
+			f, _, err := w.getFreeFrame(pgr)
 			if err != nil {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 			}
@@ -89,7 +92,7 @@ func TestEvictWindow(t *testing.T) {
 			}
 
 			// pin all frames apart from the most recent.
-			if i+1 < windowFrameCount {
+			if i+1 < windowCapacity {
 				f.Reference()
 			} else {
 				frameToBeEvicted = f
@@ -102,8 +105,8 @@ func TestEvictWindow(t *testing.T) {
 	t.Run("testevict_counters", func(t *testing.T) {
 		wc := w.getWindowCount()
 
-		if wc != uint64(windowFrameCount) {
-			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected window count to be %d but got %d", windowFrameCount, wc), t)
+		if wc != uint64(windowCapacity) {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected window count to be %d but got %d", windowCapacity, wc), t)
 		}
 
 		helpers.PrintSuccessMsg("testevict_counters success")
@@ -117,7 +120,7 @@ func TestEvictWindow(t *testing.T) {
 			helpers.PrintTestErrorMsg("Expected frame to be evicted to be unreferenced", t)
 		}
 
-		fr, _, err := w.getFreeFrame()
+		fr, _, err := w.getFreeFrame(pgr)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 		}
@@ -138,8 +141,12 @@ func TestPromoteToProtected(t *testing.T) {
 	var protectedSegmentCandidate *Frame
 
 	windowCapacity := 48
-	windowFrameCount := (windowCapacity * 1024) / pager.PAGE_SIZE_BYTES
+	// windowFrameCount := (windowCapacity * 1024) / pager.PAGE_SIZE_BYTES
 	mainCapacity := 2376
+
+	// initialize pager
+	pgr := InitPager(t)
+	defer pgr.Close()
 
 	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity))
 	if err != nil {
@@ -148,9 +155,9 @@ func TestPromoteToProtected(t *testing.T) {
 
 	defer w.close()
 
-	for i := range windowFrameCount {
+	for i := range windowCapacity {
 		t.Run(fmt.Sprintf("%d_test_promotetoprotected_additem", i), func(t *testing.T) {
-			f, _, err := w.getFreeFrame()
+			f, _, err := w.getFreeFrame(pgr)
 			if err != nil {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 			}
@@ -160,7 +167,7 @@ func TestPromoteToProtected(t *testing.T) {
 			}
 
 			// pin all frames apart from the most recent.
-			if i+1 < windowFrameCount {
+			if i+1 < windowCapacity {
 				f.Reference()
 			} else {
 				protectedSegmentCandidate = f
@@ -179,7 +186,7 @@ func TestPromoteToProtected(t *testing.T) {
 		}
 
 		// evict item from window cache into probation
-		fr, _, err := w.getFreeFrame()
+		fr, _, err := w.getFreeFrame(pgr)
 
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -226,18 +233,23 @@ func TestPromoteToProtected(t *testing.T) {
 // To test eviction from protected, all segments have to be filled up.
 func TestProtectedEviction(t *testing.T) {
 	var pageCounter int32 = 1
-	var windowCacheSize uint64 = 48
-	var mainCacheSize uint64 = 2376
+	// var windowCacheSize uint64 = 48
+	// var mainCacheSize uint64 = 2376
+	var totCacheSizeKb uint64 = 2424
 
-	windowFrameCount := (windowCacheSize * 1024) / pager.PAGE_SIZE_BYTES
-	mainItemCount := (mainCacheSize * 1024) / pager.PAGE_SIZE_BYTES
-	probationFrameCount := uint64(float64(mainItemCount) * MAIN_CACHE_RATIO)
-	protectedFrameCount := uint64(float64(mainItemCount)*float64(1.0-MAIN_CACHE_RATIO)) - 1
+	windowFrameCount := uint64(math.Round(float64(totCacheSizeKb) * WINDOW_CACHE_RATIO))
+	mainItemCount := uint64(math.Round(float64(totCacheSizeKb) * (1.0 - WINDOW_CACHE_RATIO)))
+	probationFrameCount := uint64(math.Round(float64(mainItemCount) * MAIN_CACHE_RATIO))
+	protectedFrameCount := uint64(math.Round(float64(mainItemCount)*float64(1.0-MAIN_CACHE_RATIO))) - 1
 
 	// number of times protected segment is larger than probation
 	probToProtMultiplier := uint64(1 / MAIN_CACHE_RATIO)
 
-	w, err := NewWTinylfu(uint64(windowCacheSize), uint64(mainCacheSize))
+	// initialize pager
+	pgr := InitPager(t)
+	defer pgr.Close()
+
+	w, err := NewWTinylfu(windowFrameCount, mainItemCount)
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
@@ -246,7 +258,7 @@ func TestProtectedEviction(t *testing.T) {
 
 	// 1. fill window cache
 	for range windowFrameCount {
-		f, _, err := w.getFreeFrame()
+		f, _, err := w.getFreeFrame(pgr)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected not error,got %v", err), t)
 		}
@@ -264,7 +276,7 @@ func TestProtectedEviction(t *testing.T) {
 			// 2. fill probation
 			for j := range probationFrameCount {
 				t.Run(fmt.Sprintf("%d_protectedeviction_addtoprobation", j), func(t *testing.T) {
-					f, _, err := w.getFreeFrame()
+					f, _, err := w.getFreeFrame(pgr)
 					if err != nil {
 						helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error,got %v", err), t)
 					}
@@ -322,7 +334,7 @@ func TestProtectedEviction(t *testing.T) {
 	// 4. refill probation by adding items to window
 	for i := range windowFrameCount {
 		t.Run(fmt.Sprintf("protectedeviction_refillprobation_%d", i), func(t *testing.T) {
-			f, _, err := w.getFreeFrame()
+			f, _, err := w.getFreeFrame(pgr)
 			if err != nil {
 				t.Fatalf("Expected no error,got %v", err)
 			}
@@ -429,7 +441,7 @@ func TestProtectedEviction(t *testing.T) {
 
 	// 7. Add item to window to trigger eviction from probation.
 	t.Run("protectedeviction_evict_from_probation", func(t *testing.T) {
-		f, _, err := w.getFreeFrame()
+		f, _, err := w.getFreeFrame(pgr)
 		if err != nil {
 			t.Fatalf("Expected no error,got %v", err)
 		}
@@ -457,7 +469,7 @@ func TestProtectedEviction(t *testing.T) {
 		}
 
 		// add item
-		_, _, err := w.getFreeFrame()
+		_, _, err := w.getFreeFrame(pgr)
 
 		if err == nil {
 			helpers.PrintTestErrorMsg("Expected an error,got nil", t)
@@ -477,7 +489,7 @@ func TestProtectedEviction(t *testing.T) {
 		}
 
 		// add item
-		f, _, err := w.getFreeFrame()
+		f, _, err := w.getFreeFrame(pgr)
 
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)

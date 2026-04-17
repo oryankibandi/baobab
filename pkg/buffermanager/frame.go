@@ -163,8 +163,6 @@ func (f *Frame) reserveFrame() {
 
 // Mark an entry/frame as dirty
 func (f *Frame) MarkDirty() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.dirty.Store(true)
 	f.page.MarkDirty()
 }

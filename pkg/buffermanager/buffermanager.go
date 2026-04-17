@@ -3,6 +3,8 @@ package buffermanager
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
+	"unsafe"
 
 	//"fmt"
 	"log"
@@ -14,13 +16,12 @@ import (
 
 // Ideally, window cache size ≈ 1%, main cache ≈ 99%
 const (
-	WINDOW_CACHE_SIZE = 20
-	MAIN_CACHE_SIZE   = 800
-	CACHE_KEY_SIZE    = 16
-	CACHE_RATIO       = 0.25
-	MAIN_CACHE_RATIO  = 0.2
-	LSN_SIZE          = 12
-
+	// WINDOW_CACHE_SIZE  = 20
+	WINDOW_CACHE_RATIO = 0.01
+	// MAIN_CACHE_SIZE    = 800
+	CACHE_KEY_SIZE = 16
+	// CACHE_RATIO        = 0.25
+	LSN_SIZE = 12
 	// minimum cache size in KB
 	MIN_CACHE_SIZE_KB = 8192
 )
@@ -78,7 +79,7 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 	} else {
 		// get empty frame. this is where the page read from disk will be stored since memory is already allocated.
 		// if window cache is full, a frame will be evicted.
-		fr, evicted, err := c.wTinyLfu.getFreeFrame()
+		fr, evicted, err := c.wTinyLfu.getFreeFrame(c.pager)
 		if err != nil {
 			return nil, err
 		}
@@ -152,7 +153,6 @@ func (c *BufferManager) Delete(key uint32, flush bool) error {
 	}
 
 	delete(c.CacheMap, key)
-
 	c.freeFrames++
 
 	if c.frameCount > 0 {
@@ -176,14 +176,16 @@ func (c *BufferManager) MarkFrameDirty(f *Frame) error {
 	return nil
 }
 
-// Retrieves a  new frame and assigns it a pageId/blockId
+// retrieves a  new frame and assigns it a pageId/blockId
 //
-//	internal - true if new frame holds an internal node, else false
+//	 parameters:
+//		internal - true if new frame holds an internal node, else false
+//		setAsRoot - if set to true, new pageId is set as the root.
 //
-// setAsRoot - if set to true, new pageId is set as the root.
+//	 returns pointer to new frame, and error if any
 func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) {
 	// retrieve frame from buffer manager
-	fr, evicted, err := c.wTinyLfu.getFreeFrame()
+	fr, evicted, err := c.wTinyLfu.getFreeFrame(c.pager)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +318,7 @@ func (c *BufferManager) SetNewRoot(f *Frame) error {
 // }
 
 // calls disk manager to flush metadata to metadata page
-func (c *BufferManager) flushMetadata() error {
+func (c *BufferManager) FlushMetadata() error {
 	c.rmu.RLock()
 	defer c.rmu.RUnlock()
 
@@ -381,9 +383,10 @@ func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager) (
 		return nil, BufferManagerError{Message: "pager instance  not provided."}
 	}
 
-	windSize := uint64(float64(0.01) * float64(cacheConfig.CacheSize))
-	mainSize := uint64(float64(0.99) * float64(cacheConfig.CacheSize))
-	w, err := NewWTinylfu(windSize, mainSize)
+	totFrames := math.Round(float64(cacheConfig.CacheSize*1024) / float64(unsafe.Sizeof(Frame{})))
+	windSize := math.Round(totFrames * WINDOW_CACHE_RATIO)
+	mainSize := math.Round(totFrames * (1 - WINDOW_CACHE_RATIO))
+	w, err := NewWTinylfu(uint64(windSize), uint64(mainSize))
 	if err != nil {
 		panic(err)
 	}

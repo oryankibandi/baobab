@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"unsafe"
 
 	"github.com/oryankibandi/baobab/internal/manual"
 	"github.com/oryankibandi/baobab/pkg/helpers"
@@ -11,9 +12,10 @@ import (
 )
 
 func TestNewClock(t *testing.T) {
-	var size uint64 = 800 // 800KB
+	var expectedCapacity uint64 = 100
+	var size uint64 = uint64(float64(expectedCapacity) * float64(unsafe.Sizeof(Frame{})))
 	var allocatedRSS uint64
-	expectedCapacity := (size * 1024) / pager.PAGE_SIZE_BYTES
+
 	initialRss, err := manual.CurrentRSSBytes()
 
 	if err != nil {
@@ -22,7 +24,7 @@ func TestNewClock(t *testing.T) {
 	helpers.PrintInfoMsg(fmt.Sprintf("Initial RSS: %dKB", initialRss/1024))
 
 	t.Run("NewClock_low_size", func(t *testing.T) {
-		_, err := NewClock(16)
+		_, err := NewClock(2)
 
 		if err == nil {
 			helpers.PrintTestErrorMsg("Expected function to throw err, got nil", t)
@@ -32,7 +34,7 @@ func TestNewClock(t *testing.T) {
 	})
 
 	t.Run("NewClock", func(t *testing.T) {
-		c, err := NewClock(size)
+		c, err := NewClock(expectedCapacity)
 
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -111,9 +113,10 @@ func TestNewClock(t *testing.T) {
 func TestPop(t *testing.T) {
 	var fr *Frame
 	var testPageData [pager.PAGE_SIZE_BYTES]byte
-	var size uint64 = 800 // KB
+	var size uint64 = 100
 
-	expectedCapacity := (size*1024)/pager.PAGE_SIZE_BYTES - 1
+	expectedFrameCount := size - 1
+
 	c, err := NewClock(size)
 
 	if err != nil {
@@ -127,7 +130,7 @@ func TestPop(t *testing.T) {
 	defer c.close()
 
 	t.Run("test_pop", func(t *testing.T) {
-		for i := range expectedCapacity {
+		for i := range expectedFrameCount {
 			t.Run(fmt.Sprintf("%d_test_pop", i), func(t *testing.T) {
 				fr = c.Pop()
 
@@ -170,9 +173,9 @@ func TestPop(t *testing.T) {
 func TestPopConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	var testPageData [pager.PAGE_SIZE_BYTES]byte
-	var size uint64 = 800 // KB
+	var size uint64 = 100
+	expectedFrameCount := size - 1
 
-	expectedCapacity := (size*1024)/pager.PAGE_SIZE_BYTES - 1
 	c, err := NewClock(size)
 
 	if err != nil {
@@ -187,7 +190,7 @@ func TestPopConcurrent(t *testing.T) {
 
 	t.Run("test_pop_concurrent", func(t *testing.T) {
 		start := make(chan struct{})
-		for i := range expectedCapacity {
+		for i := range expectedFrameCount {
 			wg.Add(1)
 			go func(i uint64) {
 				defer wg.Done()
@@ -196,7 +199,7 @@ func TestPopConcurrent(t *testing.T) {
 					fr := c.Pop()
 
 					if fr == nil {
-						helpers.PrintTestErrorMsg("Expected frame, got nil.", t)
+						helpers.PrintTestErrorMsg(fmt.Sprintf("%d Expected frame, got nil.", i), t)
 					}
 
 					// Ensure frame is empty
@@ -228,10 +231,11 @@ func TestPopConcurrent(t *testing.T) {
 func TestEvictConcurrent(t *testing.T) {
 	var fr *Frame
 	var wg sync.WaitGroup
-	var size uint64 = 800 // KB
+	var size uint64 = 100
 	var unreferencedFrames uint64 = 2
 
-	expectedCapacity := (size*1024)/pager.PAGE_SIZE_BYTES - 1
+	expectedFrameCount := size - 1
+
 	c, err := NewClock(size)
 
 	if err != nil {
@@ -245,7 +249,7 @@ func TestEvictConcurrent(t *testing.T) {
 	defer c.close()
 
 	// add data
-	for i := range expectedCapacity {
+	for i := range expectedFrameCount {
 		fr = c.Pop()
 
 		if fr == nil {
@@ -254,7 +258,7 @@ func TestEvictConcurrent(t *testing.T) {
 
 		fr.MarkOccupied()
 		fr.updateSegment(windowSegment)
-		if i < expectedCapacity-unreferencedFrames {
+		if i < expectedFrameCount-unreferencedFrames {
 			fr.Reference()
 		}
 	}
@@ -297,10 +301,9 @@ func TestEvictConcurrent(t *testing.T) {
 func TestEvictWithoutClearingConcurrent(t *testing.T) {
 	var fr *Frame
 	var wg sync.WaitGroup
-	var size uint64 = 800 // KB
+	var size uint64 = 100
 	var unreferencedFrames uint64 = 2
 
-	expectedCapacity := (size*1024)/pager.PAGE_SIZE_BYTES - 1
 	c, err := NewClock(size)
 
 	if err != nil {
@@ -314,16 +317,16 @@ func TestEvictWithoutClearingConcurrent(t *testing.T) {
 	defer c.close()
 
 	// add data
-	for i := range expectedCapacity {
+	for i := range size - 1 {
 		fr = c.Pop()
 
 		if fr == nil {
-			helpers.PrintTestErrorMsg("Expected frame, got nil", t)
+			helpers.PrintTestErrorMsg(fmt.Sprintf("%d Expected frame, got nil", i), t)
 		}
 
 		fr.MarkOccupied()
 		fr.updateSegment(windowSegment)
-		if i < expectedCapacity-unreferencedFrames {
+		if i < size-unreferencedFrames {
 			fr.Reference()
 		}
 	}
@@ -361,9 +364,9 @@ func TestEvictWithoutClearingConcurrent(t *testing.T) {
 
 func TestAddToBPool(t *testing.T) {
 	var assignedFrames []*Frame
-	var size uint64 = 800 // KB
+	var size uint64 = 100
+	expectedFrameCount := size - 1
 	testItems := 5
-	expectedItemCount := (size*1024)/pager.PAGE_SIZE_BYTES - 1
 
 	c, err := NewClock(size)
 
@@ -389,8 +392,8 @@ func TestAddToBPool(t *testing.T) {
 	}
 
 	t.Run("addtobpool_check_count_after_pop", func(t *testing.T) {
-		if len(c.bPool) != int(expectedItemCount)-testItems {
-			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected %d remaining items in bpool, got %d", int(int(expectedItemCount)-testItems), len(c.bPool)), t)
+		if len(c.bPool) != int(expectedFrameCount)-testItems {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected %d remaining items in bpool, got %d", int(int(expectedFrameCount)-testItems), len(c.bPool)), t)
 		}
 
 		helpers.PrintSuccessMsg("addtobpool_check_count_after_pop success")
@@ -413,8 +416,8 @@ func TestAddToBPool(t *testing.T) {
 	}
 
 	t.Run("addtobpool_check_counter_after_readding", func(t *testing.T) {
-		if len(c.bPool) != int(expectedItemCount) {
-			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected %d frames in bpool, got %d", int(expectedItemCount), len(c.bPool)), t)
+		if len(c.bPool) != int(expectedFrameCount) {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected %d frames in bpool, got %d", int(expectedFrameCount), len(c.bPool)), t)
 		}
 
 		helpers.PrintSuccessMsg("addtobpool_check_counter_after_readding success")
@@ -424,9 +427,9 @@ func TestAddToBPool(t *testing.T) {
 func TestAddToBPoolConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	var assignedFrames []*Frame
-	var size uint64 = 800 // KB
+	var size uint64 = 100
+	expectedFrameCount := size - 1
 	testItems := 5
-	expectedItemCount := (size*1024)/pager.PAGE_SIZE_BYTES - 1
 
 	c, err := NewClock(size)
 
@@ -452,8 +455,8 @@ func TestAddToBPoolConcurrent(t *testing.T) {
 	}
 
 	t.Run("addtobpoolconcurrent_check_counte_after_pop", func(t *testing.T) {
-		if len(c.bPool) != int(expectedItemCount)-testItems {
-			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected %d remaining items in bpool, got %d", int(int(expectedItemCount)-testItems), len(c.bPool)), t)
+		if len(c.bPool) != int(expectedFrameCount)-testItems {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected %d remaining items in bpool, got %d", int(int(expectedFrameCount)-testItems), len(c.bPool)), t)
 		}
 
 		helpers.PrintSuccessMsg("addtobpoolconcurrent_check_counte_after_pop success")
@@ -482,8 +485,8 @@ func TestAddToBPoolConcurrent(t *testing.T) {
 			defer wg.Done()
 			t.Run(fmt.Sprintf("%d_addtobpoolconcurrent_check_counter_after_readding", j), func(t *testing.T) {
 				<-start
-				if len(c.bPool) != int(expectedItemCount) {
-					t.Fatalf("Expected %d frames in bpool, got %d", int(expectedItemCount), len(c.bPool))
+				if len(c.bPool) != int(expectedFrameCount) {
+					t.Fatalf("Expected %d frames in bpool, got %d", int(size), len(c.bPool))
 				}
 
 				helpers.PrintSuccessMsg(fmt.Sprintf("%d_addtobpoolconcurrent_check_counter_after_readding success", j))
