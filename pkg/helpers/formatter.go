@@ -32,5 +32,5 @@ func PrintInfoMsg(msg string) {
 
 // PrintTestErrorMsg formats a test error message with the appropriate color
 func PrintTestErrorMsg(msg string, t *testing.T) {
-	t.Fatal(BOLDRED + " ✗ " + msg + RESET)
+	t.Fatal(BOLDRED + " ✗ " + t.Name() + " " + msg + RESET)
 }

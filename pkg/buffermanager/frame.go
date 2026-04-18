@@ -253,8 +253,10 @@ func (f *Frame) Clear() error {
 		return BufferManagerError{Message: "Frame is not set"}
 	}
 
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	// fmt.Println("(clear) locking...")
+	// f.mu.Lock()
+	// defer f.mu.Unlock()
+	// fmt.Println("(clear) locked....")
 
 	f.ref.Store(false)
 	f.acc.Store(false)

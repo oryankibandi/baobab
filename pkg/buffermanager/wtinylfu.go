@@ -94,12 +94,15 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 		return WTinyLFUError{Message: "(promoteToProtected) Only frames in probation LRU can be promoted to protected LRU."}
 	}
 
+	w.mu.Lock()
 	if w.protectedCount < w.protectedCapacity {
 		// protected segment not full
 		f.updateSegment(protectedSegment)
 		w.probationCount--
 		w.protectedCount++
+		w.mu.Unlock()
 	} else {
+		w.mu.Unlock()
 		protectedVictim := w.cBuffer.EvictWithoutClearing(protectedSegment)
 
 		if protectedVictim == nil {
@@ -181,7 +184,6 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 	// del keys
 	var delKeys []uint32
 
-	// FIX: flush frame to disk before evicting
 	if windCount > mainCacheCount {
 		delKeys = append(delKeys, mainKey)
 
@@ -306,7 +308,7 @@ func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *Frame, evicted []uint32, 
 	if w.windowCount == w.windowCapacity {
 		keysToEvict, err = w.evictWindow(pgr)
 		if err != nil {
-			return nil, nil, WTinyLFUError{Message: "Unable to evict from window cache"}
+			return nil, nil, err
 		}
 	}
 
@@ -355,6 +357,10 @@ func (w *WTinyLfu) getProtectedCount() uint64 {
 	defer w.mu.RUnlock()
 
 	return w.protectedCount
+}
+
+func (w *WTinyLfu) getMetadataPage() *Frame {
+	return w.cBuffer.getReserved()
 }
 
 // List metadata i.e no. of items in all segments

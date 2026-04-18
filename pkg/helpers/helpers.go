@@ -390,3 +390,11 @@ func RandomString(n int) string {
 
 	return sb.String()
 }
+
+func RandomNumber(max uint32) uint32 {
+	if max == 0 {
+		return 0
+	}
+
+	return uint32(rand.Int31n(int32(max) + 1))
+}
