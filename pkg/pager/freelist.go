@@ -25,10 +25,10 @@ type FreeList struct {
 }
 
 func (fl *FreeList) pop() int32 {
-	fmt.Println("(pop) GETTING ITEM FROM FREE LIST...")
+	// fmt.Println("(pop) GETTING ITEM FROM FREE LIST...")
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
-	fmt.Println("(pop) obtained exclusive lock")
+	// fmt.Println("(pop) obtained exclusive lock")
 
 	if fl.count <= 0 {
 		return -1
@@ -40,7 +40,7 @@ func (fl *FreeList) pop() int32 {
 
 	fl.count--
 	fl.dirty = true
-	fmt.Println("FREE LIST AFTER POP() => ", fl.freePages)
+	// fmt.Println("FREE LIST AFTER POP() => ", fl.freePages)
 
 	return int32(p)
 }

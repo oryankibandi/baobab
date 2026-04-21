@@ -58,7 +58,7 @@ func (bw *BgWriter) Start() {
 
 			err := currFrame.Acquire(false)
 			if err != nil {
-				panic("Deadlock acquiring exlusive laatch on frame")
+				panic("Deadlock acquiring exlusive latch on frame")
 			}
 			currFrame.Reference()
 

@@ -36,8 +36,8 @@ type Frame struct {
 	ref atomic.Bool
 
 	// access bit. set when an entry is accessed(pinned) and unset during unpinning
-	// When this item is set the reference bit cannot be unset. The clock hand will
-	// advance past an entry with it's access bit set
+	// When the acc bit is set the reference bit cannot be unset.
+	// The clock hand will advance past an entry with it's access bit set
 	acc atomic.Bool
 	// true if this frame is reserved for something like the metadata page
 	// This ensures the clock hand passes over this frame when looking for
@@ -222,13 +222,13 @@ func (f *Frame) SetData(p *pager.Page) error {
 	//	copy(f.lsn[:], pgelsn[:])
 
 	// entry clock metadata
-	f.ref.Store(false)
-	f.acc.Store(false)
+	// f.ref.Store(false)
+	// f.acc.Store(false)
 
 	f.meta.key = uint32(p.PageId)
 
 	// pageId & Flags
-	f.page.PageId = p.PageId
+	// f.page.PageId = p.PageId
 	// f.page.Flags = p.Flags
 
 	return nil
@@ -311,7 +311,6 @@ func (f *Frame) Acquire(shared bool) error {
 	defer cancel()
 
 	done := make(chan struct{})
-
 	go func() {
 		defer close(done)
 		if shared {
@@ -323,7 +322,7 @@ func (f *Frame) Acquire(shared bool) error {
 
 	select {
 	case <-ctx.Done():
-		return BufferManagerError{"Deadline exceeded trying to acquire lock on a frame"}
+		return BufferManagerError{"Deadline exceeded trying to acquire lock on frame"}
 	case <-done:
 		return nil
 	}
@@ -336,7 +335,7 @@ func (f *Frame) Acquire(shared bool) error {
 //
 //	shared - set to true if acquired latch is shared, else set to false.
 func (f *Frame) Release(shared bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
 	defer cancel()
 
 	done := make(chan struct{})
@@ -351,7 +350,7 @@ func (f *Frame) Release(shared bool) error {
 
 	select {
 	case <-ctx.Done():
-		return BufferManagerError{"Deadline exceeded trying to acquire lock on a frame"}
+		return BufferManagerError{"Deadline exceeded trying to release lock on a frame"}
 	case <-done:
 		return nil
 	}

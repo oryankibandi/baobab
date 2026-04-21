@@ -84,6 +84,7 @@ func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
 
 // Promotes an item from probation to protected
 func (w *WTinyLfu) promoteToProtected(f *Frame) error {
+	fmt.Println("(promoteToProtected)")
 	if f == nil {
 		return BufferManagerError{Message: "frame to promote no provided"}
 	}
@@ -199,7 +200,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		if err != nil {
 			return nil, err
 		}
-		helpers.PrintInfoMsg("Flushed page to be evicted.")
+		helpers.PrintInfoMsg(fmt.Sprintf("Flushed page %d to be evicted from probation.", mainKey))
 
 		// Add window victim to probation and readd main cache victim to pool
 		err = w.cBuffer.addToBpool(probationVictim.fr)
@@ -210,6 +211,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		windVictim.fr.updateSegment(probationSegment)
 		w.windowCount--
 	} else {
+		delKeys = append(delKeys, windKey)
 		// flush window cache victim
 		buff, err := windVictim.fr.ByteData()
 		if err != nil {
@@ -229,7 +231,6 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 			panic(err)
 		}
 
-		delKeys = append(delKeys, windKey)
 		w.windowCount--
 	}
 
@@ -320,6 +321,7 @@ func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *Frame, evicted []uint32, 
 
 	f.updateSegment(windowSegment)
 	w.windowCount++
+	f.Reference()
 
 	return f, keysToEvict, nil
 }
@@ -389,6 +391,7 @@ func (w *WTinyLfu) close() {
 // Creates new instance  of W-TinyLFU.
 // windowSize and mainCacheSize represents the number of frames for each segment
 func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
+	helpers.PrintInfoMsg(fmt.Sprintf("(NewWTinylfu) windSize: %d\tMainSize: %d", windowSize, mainCacheSize))
 	if windowSize <= 0 {
 		return nil, WTinyLFUError{Message: "Window size must be greater than 0"}
 	}

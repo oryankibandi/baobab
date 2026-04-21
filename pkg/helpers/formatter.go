@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 )
 
@@ -32,5 +33,10 @@ func PrintInfoMsg(msg string) {
 
 // PrintTestErrorMsg formats a test error message with the appropriate color
 func PrintTestErrorMsg(msg string, t *testing.T) {
-	t.Fatal(BOLDRED + " ✗ " + t.Name() + " " + msg + RESET)
+	callr := ""
+	_, file, line, ok := runtime.Caller(1)
+	if ok {
+		callr = fmt.Sprintf("%s:%d", file, line)
+	}
+	t.Fatal(BOLDRED + callr + " ✗ " + t.Name() + " " + msg + RESET)
 }

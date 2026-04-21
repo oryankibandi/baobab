@@ -94,10 +94,7 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
 			clk.Head = clk.Head.GetNextLink()
 			continue
 		}
-		// log.Printf("===============================================\n")
-		// log.Printf("CHECKING KEY -----> %d\n", clk.Head.getKey())
-		// log.Printf("IS REFERENCED ----> %t\n", clk.Head.accessBitSet())
-		// log.Printf("===============================================\n")
+
 		if clk.Head.accessBitSet() {
 			// access bit set, advance clock hand
 			clk.Head = clk.Head.GetNextLink()
@@ -122,7 +119,7 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
 			clk.Head = clk.Head.GetNextLink()
 
 			end := time.Since(start)
-			slog.Info(fmt.Sprintf("Evicted in  %v", end))
+			slog.Info(fmt.Sprintf("Evicted page %d in %v", e.getKey(), end))
 			return e
 		}
 	}
@@ -160,7 +157,9 @@ func (clk *clock) addToBpool(e *Frame) error {
 		return BufferManagerError{Message: "Invalid frame"}
 	}
 
+	fmt.Println("(addtobpool) getting latch...")
 	clk.mu.Lock()
+	fmt.Println("(addtobpool) obtained latch...")
 	defer clk.mu.Unlock()
 
 	err := e.Clear()

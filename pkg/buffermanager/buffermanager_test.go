@@ -495,7 +495,7 @@ func TestPutGet(t *testing.T) {
 func TestNewFrameConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 
-	newFrameCount := 1000
+	newFrameCount := 20000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -503,7 +503,7 @@ func TestNewFrameConcurrent(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 16 * 1024, // 16MB
+		CacheSize: 256 * 1024, // 128MB
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -535,9 +535,24 @@ func TestNewFrameConcurrent(t *testing.T) {
 					if fr == nil {
 						helpers.PrintTestErrorMsg("Expected new frame, got nil", t)
 					}
+					// fr.Reference()
+					err = fr.Acquire(true)
+					if err != nil {
+						fr.Unreference()
+						helpers.PrintTestErrorMsg(err.Error(), t)
+					}
 
 					if k := fr.getKey(); k == 0 {
-						helpers.PrintTestErrorMsg("got new frame key as 0. This is reserved for the metadata page", t)
+						fr.Unreference()
+						fr.Release(true)
+						// fmt.Println("PAGEID -> ", fr.page.PageId)
+						helpers.PrintTestErrorMsg(fmt.Sprintf("got new frame key as 0. This is reserved for the metadata page. Frame -> %v", fr), t)
+					}
+
+					fr.Unreference()
+					err = fr.Release(true)
+					if err != nil {
+						helpers.PrintTestErrorMsg(err.Error(), t)
 					}
 
 					helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))

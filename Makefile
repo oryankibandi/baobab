@@ -6,6 +6,7 @@ WAL_PATH="bb.wal"
 CONFIG_PATH="bb_config"
 LOG_PATH="baobab.log"
 TEST_PATH="./..."
+NOCACHE=false
 
 run:
 	@[ -e $(BIN_PATH) ] && rm $(BIN_PATH) || echo ""
@@ -27,7 +28,11 @@ build:
 test:
 	@go test -race $(TEST_PATH)
 test-v:
+ifeq ($(NOCACHE),true)
+	@go test -race -v -count=1 $(TEST_PATH)
+else
 	@go test -race -v $(TEST_PATH)
+endif
 test-asan:
 	@go test -asan -v $(TEST_PATH)
 inspect-page:

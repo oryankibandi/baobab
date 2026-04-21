@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -128,6 +129,52 @@ func TestNewPager(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStartWorkers(t *testing.T) {
+	dir := t.TempDir()
+	dbFile := filepath.Join(dir, "baobab.db")
+	freelistFile := filepath.Join(dir, "baobab")
+
+	dManConfig := diskmanager.DiskManagerConfig{
+		DataFile: dbFile,
+	}
+
+	dMan, err := diskmanager.NewDiskManager(dManConfig)
+	if err != nil {
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize disk manager: %s", err.Error()), t)
+	}
+
+	workerSize := 20
+	pgr, err := NewPager(PagerConfig{
+		FreeListFile: freelistFile,
+		DManager:     dMan,
+		WorkerSize:   uint64(workerSize),
+	})
+
+	if err != nil {
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize pager: %s", err.Error()), t)
+	}
+
+	t.Run("test_jobqueue_initialized", func(t *testing.T) {
+		if pgr.workers.jobQ == nil {
+			helpers.PrintTestErrorMsg("workers not initialized", t)
+		}
+
+		helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
+	})
+
+	pgr.Close()
+
+	t.Run("test_worker_goroutineleak", func(t *testing.T) {
+		activeWrk := runtime.NumGoroutine()
+		if activeWrk >= workerSize {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("goroutine leak on worker pool. Expected less than %d active workers but got %d", workerSize, activeWrk), t)
+		}
+
+		helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
+	})
+	helpers.PrintSuccessMsg("test_startworkers success")
 }
 
 func TestReadAndWritePage(t *testing.T) {
@@ -426,8 +473,8 @@ func TestReadAndWritePage(t *testing.T) {
 func TestConcurrentReadWrite(t *testing.T) {
 	var wg sync.WaitGroup
 
-	readPageCount := 50
-	writePageCount := 60
+	readPageCount := 500
+	writePageCount := 600
 	cacheLine := 64
 
 	readSet := make([]Page, readPageCount)

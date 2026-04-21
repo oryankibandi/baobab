@@ -17,7 +17,7 @@ import (
 // Ideally, window cache size ≈ 1%, main cache ≈ 99%
 const (
 	// WINDOW_CACHE_SIZE  = 20
-	WINDOW_CACHE_RATIO = 0.01
+	WINDOW_CACHE_RATIO = 0.1
 	// MAIN_CACHE_SIZE    = 800
 	CACHE_KEY_SIZE = 16
 	// CACHE_RATIO        = 0.25
@@ -207,7 +207,10 @@ func (c *BufferManager) MarkFrameDirty(f *Frame) error {
 	return nil
 }
 
-// retrieves a  new frame and assigns it a pageId/blockId
+// Retrieves a new frame from the buffer pool and assigns it a pageId/blockId.
+// A new frame is automatically referenced to ensure it is not evicted
+// when initializing so the caller has to ensure they unreference it after use
+// by calling f.Unreference().
 //
 //	 parameters:
 //		internal - true if new frame holds an internal node, else false
@@ -221,8 +224,8 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 	if err != nil {
 		return nil, err
 	}
-	fr.Reference()
-	defer fr.Unreference()
+	// fr.Reference()
+	// defer fr.Unreference()
 
 	// if there are keys evicted, delete from hash table
 	if len(evicted) > 0 {
@@ -239,22 +242,35 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 	if frPge == nil {
 		panic("No page allocated to frame")
 	}
-	// create page
+
+	// initialize page
 	pgeId, err := c.pager.NewPage(setAsRoot, internal, frPge)
 	if err != nil {
+		fr.Unreference()
 		return nil, err
+	}
+
+	if pgeId == 0 {
+		fr.Unreference()
+		// invalid state/wrong logic. Should never happen.
+		panic("Invalid frame ID 0")
 	}
 
 	// update frame metadata
 	err = fr.SetData(frPge)
 	if err != nil {
+		fr.Unreference()
 		return nil, err
+	}
+
+	if fr.getKey() == 0 {
+		panic("Invalid frame ID 0")
 	}
 
 	// Add to buffer manager cache
 	log.Println("Adding new page to cache...")
 	_, err = c.put(uint32(pgeId), fr, true)
-	log.Printf("Added new page to cache. Page ID: %d\n", pgeId)
+	log.Printf("Added new page to cache. Page ID: %d\n", fr.getKey())
 	if err != nil {
 		return nil, err
 	}
