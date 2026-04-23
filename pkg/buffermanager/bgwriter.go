@@ -1,10 +1,11 @@
 package buffermanager
 
 import (
-	"log"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/oryankibandi/baobab/pkg/helpers"
 	"github.com/oryankibandi/baobab/pkg/pager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
@@ -32,68 +33,106 @@ type BgWriter struct {
 	clockBuffer *clock
 	mu          sync.Mutex
 	wg          sync.WaitGroup
+	// exit channel
+	exitchan *chan struct{}
 }
 
-func (bw *BgWriter) Start() {
+func (bw *BgWriter) Start(wg *sync.WaitGroup) {
+	wg.Add(1)
+	defer wg.Done()
 	// Give time for other processes to initialize
-	time.Sleep(time.Second * 60)
-	go bw.watchFreeList()
+	// time.Sleep(time.Second * 2)
+	go bw.watchFreeList(bw.exitchan, wg)
 
 	var currFrame *Frame
 	var nextFrame *Frame
 	var currFrameBuff *[]byte
+
+	clockCount := bw.clockBuffer.getCap()
+	currFrame = bw.clockBuffer.clockHead()
+
+BgWriterLoop:
 	for {
-		for range bw.clockBuffer.getCap() {
-			currFrame = bw.clockBuffer.clockHead()
+		for range clockCount {
+			select {
+			case <-*bw.exitchan:
+				break BgWriterLoop
+			default:
+				if currFrame.isPinned() {
+					// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) %d. curr frame is pinned, continueing", i))
+					currFrame = currFrame.GetNextLink()
+					continue
+				}
 
-			if currFrame.isPinned() {
-				currFrame = currFrame.GetNextLink()
-				continue
+				if !currFrame.isDirty() {
+					// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) %d. curr frame is not dirty, continueing", i))
+					currFrame = currFrame.GetNextLink()
+					continue
+				}
+
+				// helpers.PrintInfoMsg("(bgwriter) Frame dirty and not pinned")
+				currFrame.Reference()
+				err := currFrame.Acquire(false)
+				if err != nil {
+					helpers.PrintErrorMsg(err.Error())
+					currFrame.Unreference()
+					currFrame = currFrame.GetNextLink()
+					continue
+				}
+
+				currFrameBuff, _, err = currFrame.RawBufferSlice()
+				if err != nil {
+					panic("Unable to get frame buffer")
+				}
+
+				err = bw.pgr.WritePage(currFrame.getKey(), currFrameBuff)
+				if err != nil {
+					helpers.PrintErrorMsg(fmt.Sprintf("(bgwriter) Error writing to page: %s\n", err.Error()))
+					currFrame.Release(false)
+					currFrame.Unreference()
+					currFrame = currFrame.GetNextLink()
+					continue
+				}
+
+				nextFrame = currFrame.GetNextLink()
+				err = currFrame.Release(false)
+				if err != nil {
+					panic(err)
+				}
+				currFrame.Unreference()
+				bw.writtenPages++
+
+				if bw.writtenPages >= MAX_PAGES {
+					break
+				}
+
+				currFrame = nextFrame
 			}
-
-			if !currFrame.isDirty() {
-				currFrame = currFrame.GetNextLink()
-				continue
-			}
-
-			err := currFrame.Acquire(false)
-			if err != nil {
-				panic("Deadlock acquiring exlusive latch on frame")
-			}
-			currFrame.Reference()
-
-			currFrameBuff, _, err = currFrame.RawBufferSlice()
-			if err != nil {
-				panic("Unable to get frame buffer")
-			}
-
-			err = bw.pgr.WritePage(currFrame.getKey(), currFrameBuff)
-			if err != nil {
-				log.Printf("Error writing to page: %s\n", err.Error())
-				currFrame = currFrame.GetNextLink()
-				continue
-			}
-
-			nextFrame = currFrame.next
-			currFrame.Unreference()
-			currFrame.Release(false)
-			bw.writtenPages++
-
-			if bw.writtenPages >= MAX_PAGES {
-				break
-			}
-
-			currFrame = nextFrame
 		}
 		time.Sleep(time.Millisecond * BGWRITER_DELAY)
 	}
+
+	helpers.PrintInfoMsg("terminated background writer")
 }
 
 // periodically flushes free list to disk if dirty
-func (bw *BgWriter) watchFreeList() {
+func (bw *BgWriter) watchFreeList(exitChn *chan struct{}, wg *sync.WaitGroup) {
+	wg.Add(1)
+	defer wg.Done()
 	for {
-		bw.cache.flushFreeList()
+		select {
+		case <-*exitChn:
+			helpers.PrintInfoMsg("terminating freelist background writer..")
+			return
+		default:
+			err := bw.cache.flushFreeList()
+			if err != nil {
+				panic(err)
+			}
+
+		}
 		time.Sleep(time.Millisecond * FREELIST_WRITER_DELAY)
+
 	}
 }
 
@@ -103,5 +142,6 @@ func NewBgWriter(cache *BufferManager, wal *wal.WAL, clockBuffHead *clock, pgr *
 		wal:         wal,
 		clockBuffer: clockBuffHead,
 		pgr:         pgr,
+		exitchan:    cache.exitchan,
 	}
 }

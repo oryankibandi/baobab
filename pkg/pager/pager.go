@@ -167,22 +167,29 @@ func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page) (uint32, e
 	if pge == nil {
 		return 0, PagerError{Message: "No page entry provided."}
 	}
+	fmt.Println("acquiring lock for pager...")
 	pgr.mu.Lock()
 	defer pgr.mu.Unlock()
+	fmt.Println("acquired lock for pager...")
 
 	var newPgeId uint32
+	fmt.Println("poping pageid from  freelist...")
 	if n := pgr.freeList.pop(); n < 0 {
+		fmt.Println("got pageId < 0...")
 		newPgeId = pgr.maxPageId + 1
 		pgr.maxPageId++
 	} else {
+		fmt.Println("got a valid pageId...")
 		newPgeId = uint32(n)
 	}
 
+	fmt.Println("calling initializePage...")
 	err := pge.initializePage(newPgeId, isInternal)
 	if err != nil {
 		return 0, err
 	}
 
+	fmt.Println("checking if should set as root...")
 	if setAsRoot {
 		pgr.rootPageId = newPgeId
 	}
@@ -362,7 +369,8 @@ func (pgr *Pager) Flush() {
 
 func (pgr *Pager) FlushFreeList() {
 	n := make(chan int)
-	pgr.freeList.flushFreeList(&n)
+	defer close(n)
+	go pgr.freeList.flushFreeList(&n)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*SYNC_WRITE_TIMEOUT_MILL)
 	defer cancel()
@@ -371,7 +379,7 @@ func (pgr *Pager) FlushFreeList() {
 	case t := <-n:
 		fmt.Printf("Flushed free list.Written %d bytes\n", t)
 	case <-ctx.Done():
-		fmt.Println("timeout flushing freelist")
+		helpers.PrintErrorMsg("timeout flushing freelist")
 	}
 }
 

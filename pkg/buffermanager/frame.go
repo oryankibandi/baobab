@@ -253,11 +253,6 @@ func (f *Frame) Clear() error {
 		return BufferManagerError{Message: "Frame is not set"}
 	}
 
-	// fmt.Println("(clear) locking...")
-	// f.mu.Lock()
-	// defer f.mu.Unlock()
-	// fmt.Println("(clear) locked....")
-
 	f.ref.Store(false)
 	f.acc.Store(false)
 
@@ -307,7 +302,7 @@ func (f *Frame) RawBufferSlice() (buff *[]byte, size uint64, err error) {
 //
 // if shared is true, The latch is shared else it is exclusive.
 func (f *Frame) Acquire(shared bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*20)
 	defer cancel()
 
 	done := make(chan struct{})
@@ -335,7 +330,7 @@ func (f *Frame) Acquire(shared bool) error {
 //
 //	shared - set to true if acquired latch is shared, else set to false.
 func (f *Frame) Release(shared bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*20)
 	defer cancel()
 
 	done := make(chan struct{})

@@ -237,63 +237,12 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 	return delKeys, nil
 }
 
-// Adds a new item to wtinylfu.
-// By default, all new items are added to the window cache.
-// If window segment is full, an item is evicted or added to main cache.
-// Returns a slice of uint32 keys that have been evicted and error if any
-// func (w *WTinyLfu) AddItem(isDirty bool) (entry *Frame, evictedKIds []uint32, e error) {
-// 	if p == nil {
-// 		panic("(AddItem)frame is required")
-// 	}
-//
-// 	w.mu.Lock()
-// 	defer w.mu.Unlock()
-//
-// 	// keys that might be evicted if window is full
-// 	var evictKeys []uint32
-// 	var err error
-//
-// 	if w.windowCount > w.windowCapacity {
-// 		panic(helpers.BOLDRED + "window cache exceeded capacity" + helpers.RESET)
-// 	}
-//
-// 	if w.windowCount == w.windowCapacity {
-// 		fmt.Println("(cache.AddItem()) WindowCache Is Full, evicting...")
-// 		// evict window cache first
-// 		evictKeys, err = w.evictWindow()
-// 		if err != nil {
-// 			return nil, nil, err
-// 		}
-// 	}
-//
-// 	// retrieve empty entry slot from the circular buffer and add new page data
-// 	f := w.cBuffer.Pop()
-// 	if f == nil {
-// 		return nil, nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
-// 	}
-//
-// 	f.updateSegment(windowSegment)
-//
-// 	err = f.SetData(p)
-// 	if err != nil {
-// 		panic(err)
-// 	}
-//
-// 	if isDirty {
-// 		f.MarkDirty()
-// 	}
-//
-// 	// update count
-// 	if w.windowCount < w.windowCapacity {
-// 		w.windowCount++
-// 	}
-//
-// 	return f, evictKeys, nil
-// }
-
 // getEmptyFrame returns a free frame from the circular buffer. If no frame
 // is available, evict from window cache
-// pgr - pager instance required to flush any frames that may be evicted
+//
+// Parameters:
+//
+//	pgr - pager instance required to flush any frames that may be evicted
 func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *Frame, evicted []uint32, e error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

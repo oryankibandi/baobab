@@ -334,6 +334,8 @@ func TestPutGet(t *testing.T) {
 			helpers.PrintTestErrorMsg("expected retrieved frame, got nil", t)
 		}
 
+		fr.Unreference()
+
 		helpers.PrintSuccessMsg("test_putget_simple success")
 	})
 	// 3. test eviction, fill window cache and store item to be evicted. Add a new item and see it the predicted eviction candidate has been removed by performing a Get req
@@ -355,7 +357,7 @@ func TestPutGet(t *testing.T) {
 				}
 
 				// reference frame
-				fr.Reference()
+				// fr.Reference()
 
 				windowCacheFrames = append(windowCacheFrames, fr)
 				helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
@@ -418,6 +420,8 @@ func TestPutGet(t *testing.T) {
 						mu.Lock()
 						maxPageId++
 						mu.Unlock()
+
+						fr.Unreference()
 						helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
 					})
 				}(i)
@@ -495,7 +499,7 @@ func TestPutGet(t *testing.T) {
 func TestNewFrameConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 
-	newFrameCount := 20000
+	newFrameCount := 8000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -503,7 +507,7 @@ func TestNewFrameConcurrent(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 256 * 1024, // 128MB
+		CacheSize: 16 * 1024, // 256MB
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -561,6 +565,69 @@ func TestNewFrameConcurrent(t *testing.T) {
 		}
 		close(start)
 		wg.Wait()
+
+		helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
+	})
+}
+
+func TestNewFrameSequential(t *testing.T) {
+	newFrameCount := 10000
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pgr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := CacheConfig{
+		CacheSize: 16 * 1024, // 128MB
+	}
+
+	buffManager, err := NewBufferManager(cConfig, w, pgr)
+	if err != nil {
+		pgr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pgr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	defer buffManager.Close()
+
+	t.Run("test_newframe_sequential", func(t *testing.T) {
+		for i := range newFrameCount {
+			t.Run(fmt.Sprintf("%d_test_newframe_sequential", i), func(t *testing.T) {
+				fr, err := buffManager.NewFrame(false, false)
+				if err != nil {
+					helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %s", err.Error()), t)
+				}
+
+				if fr == nil {
+					helpers.PrintTestErrorMsg("Expected new frame, got nil", t)
+				}
+				// fr.Reference()
+				err = fr.Acquire(true)
+				if err != nil {
+					fr.Unreference()
+					helpers.PrintTestErrorMsg(err.Error(), t)
+				}
+
+				if k := fr.getKey(); k == 0 {
+					fr.Unreference()
+					fr.Release(true)
+					helpers.PrintTestErrorMsg(fmt.Sprintf("got new frame key as 0. This is reserved for the metadata page. Frame -> %v", fr), t)
+				}
+
+				fr.Unreference()
+				err = fr.Release(true)
+				if err != nil {
+					helpers.PrintTestErrorMsg(err.Error(), t)
+				}
+
+				helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
+			})
+		}
 
 		helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
 	})

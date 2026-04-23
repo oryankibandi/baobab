@@ -3,7 +3,6 @@ package pager
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"sync"
@@ -25,10 +24,10 @@ type FreeList struct {
 }
 
 func (fl *FreeList) pop() int32 {
-	// fmt.Println("(pop) GETTING ITEM FROM FREE LIST...")
+	fmt.Println("(pop) GETTING ITEM FROM FREE LIST...")
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
-	// fmt.Println("(pop) obtained exclusive lock")
+	fmt.Println("(pop) obtained exclusive lock")
 
 	if fl.count <= 0 {
 		return -1
@@ -78,10 +77,11 @@ func (fl *FreeList) flushFreeList(c *chan int) {
 			panic(fmt.Sprintf("Unable to truncate free list: %v", err))
 		}
 
-		log.Println("Cleared file")
-
 		// Sync
-		fl.fd.Sync()
+		err = fl.fd.Sync()
+		if err != nil {
+			panic(err)
+		}
 
 		fl.dirty = false
 		*c <- written
@@ -119,10 +119,11 @@ func (fl *FreeList) flushFreeList(c *chan int) {
 		panic(fmt.Sprintf("Unable to truncate free list: %v", err))
 	}
 
-	fmt.Println("TRUNCATED SUCCESSFULLY...")
-
 	// Sync
-	fl.fd.Sync()
+	err = fl.fd.Sync()
+	if err != nil {
+		panic(err.Error())
+	}
 
 	fl.dirty = false
 	*c <- written

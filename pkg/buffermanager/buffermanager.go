@@ -10,6 +10,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/oryankibandi/baobab/pkg/helpers"
 	pager "github.com/oryankibandi/baobab/pkg/pager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
@@ -39,6 +40,11 @@ type BufferManager struct {
 	freeFrames uint32
 	diryList   *dPages
 	pager      *pager.Pager
+	// exit channel
+	exitchan *chan struct{}
+
+	// wait group
+	wg sync.WaitGroup
 }
 
 // Adds a page to cache, setting k as key. k is the unique page ID.
@@ -224,18 +230,21 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println("retrieved free frame....")
 	// fr.Reference()
 	// defer fr.Unreference()
 
 	// if there are keys evicted, delete from hash table
 	if len(evicted) > 0 {
 		// acquire write lock
+		fmt.Println("items evicted,, deleting from cachemap...")
 		c.rmu.Lock()
 
 		for _, ev := range evicted {
 			delete(c.CacheMap, ev)
 		}
 		c.rmu.Unlock()
+		fmt.Println("items evicted, deleted from cachemap...")
 	}
 
 	frPge := fr.GetPage()
@@ -244,11 +253,14 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 	}
 
 	// initialize page
+	fmt.Println("Initializing page...")
 	pgeId, err := c.pager.NewPage(setAsRoot, internal, frPge)
 	if err != nil {
+		fmt.Println("got error while initializing page...")
 		fr.Unreference()
 		return nil, err
 	}
+	fmt.Println("Initializing page, Done...")
 
 	if pgeId == 0 {
 		fr.Unreference()
@@ -257,11 +269,13 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 	}
 
 	// update frame metadata
+	fmt.Println("setting frame data...")
 	err = fr.SetData(frPge)
 	if err != nil {
 		fr.Unreference()
 		return nil, err
 	}
+	fmt.Println("setting frame data, Done...")
 
 	if fr.getKey() == 0 {
 		panic("Invalid frame ID 0")
@@ -305,8 +319,6 @@ func (c *BufferManager) prepareForEviction(f *Frame) error {
 
 	if !f.isDirty() {
 		// frame not dirty, skip flushing to disk
-		fmt.Println("(prepareForEviction) frame not dirty, skipping flushing")
-
 		return nil
 	}
 
@@ -333,41 +345,6 @@ func (c *BufferManager) SetNewRoot(f *Frame) error {
 
 	return nil
 }
-
-// Syncs contents to the frame's associated page.
-// Called when the materialized node has been updated
-// through DELETEs, PUTs, Merges or Splits
-// func (c *BufferManager) SyncFrame(f *Frame, lsn []byte, keys [][]byte, vals [][]byte, pageIds []int32, rightSibling uint32, leftSibling uint32) error {
-// 	if len(lsn) != pager.LSN_SIZE_BYTE {
-// 		panic(fmt.Errorf("Invalid LSN length. Got length %d, expected length %d", len(lsn), pager.LSN_SIZE_BYTE))
-// 	}
-//
-// 	f.mu.Lock()
-//
-// 	err := f.page.Sync(lsn, keys, vals, pageIds, rightSibling, leftSibling)
-// 	fmt.Println("DONE SYNCING...")
-//
-// 	if err != nil {
-// 		f.mu.Unlock()
-// 		return err
-// 	}
-//
-// 	// update lsn on frame
-// 	f.lsn = lsn
-// 	f.mu.Unlock()
-//
-// 	// mark frame as dirty
-// 	// f.MarkDirty()
-// 	fmt.Println("(SyncFrame) MARKING FRAMS AS DIRTY...")
-// 	err = c.MarkFrameDirty(f)
-// 	fmt.Println("(SyncFrame) MARKED FRAME AS DIRTY...")
-//
-// 	if err != nil {
-// 		return err
-// 	}
-//
-// 	return nil
-// }
 
 // calls disk manager to flush metadata to metadata page
 func (c *BufferManager) FlushMetadata() error {
@@ -403,6 +380,13 @@ func (c *BufferManager) FlushMetadata() error {
 
 // Safely close down cache
 func (c *BufferManager) Close() error {
+	// stop bgwriter
+	if c.exitchan != nil {
+		helpers.PrintInfoMsg("terminating background writers...")
+		close(*c.exitchan)
+		c.wg.Wait()
+	}
+
 	if c.wTinyLfu != nil {
 		c.wTinyLfu.close()
 	}
@@ -454,16 +438,19 @@ func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager) (
 		return nil, BufferManagerError{Message: "Unable to initialize metadata buffer."}
 	}
 
+	// exit channel
+	exChan := make(chan struct{})
 	n := BufferManager{
 		CacheMap: make(map[uint32]*Frame),
 		wTinyLfu: w,
 		diryList: dList,
 		pager:    pgr,
+		exitchan: &exChan,
 	}
 
 	// create new background writer
 	bg := NewBgWriter(&n, wal, w.cBuffer, pgr)
-	go bg.Start()
+	go bg.Start(&n.wg)
 
 	return &n, nil
 }
