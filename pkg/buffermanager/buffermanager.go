@@ -15,7 +15,7 @@ import (
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
-// Ideally, window cache size ≈ 1%, main cache ≈ 99%
+// Ideally, window cache size ≈ 10%, main cache ≈ 90%
 const (
 	// WINDOW_CACHE_SIZE  = 20
 	WINDOW_CACHE_RATIO = 0.1
@@ -233,6 +233,12 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 	fmt.Println("retrieved free frame....")
 	// fr.Reference()
 	// defer fr.Unreference()
+	err = fr.Acquire(false)
+	if err != nil {
+		fr.Unreference()
+		return nil, err
+	}
+	defer fr.Release(false)
 
 	// if there are keys evicted, delete from hash table
 	if len(evicted) > 0 {

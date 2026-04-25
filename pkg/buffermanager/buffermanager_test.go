@@ -17,14 +17,7 @@ import (
 )
 
 // TODO:
-// 1. Test New Buffer manager
-//	- Invalid cache size
-//	- nil wal and pager
-// 2. Test adding item to cache (CreateNewFrame)
-// 3. Test Retrieving items from cache
-//	- Existing item
-//	- Non-existing item
-// 4. Benchmark random and zipfian workloads
+// 1. Benchmark random and zipfian workloads
 
 func TestNewBufferManager(t *testing.T) {
 	// initialize wal, logger and pager
@@ -499,7 +492,7 @@ func TestPutGet(t *testing.T) {
 func TestNewFrameConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 
-	newFrameCount := 8000
+	newFrameCount := 20000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -507,7 +500,7 @@ func TestNewFrameConcurrent(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 16 * 1024, // 256MB
+		CacheSize: 16 * 1024, // 16MB
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -521,7 +514,15 @@ func TestNewFrameConcurrent(t *testing.T) {
 		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
 	}
 
-	defer buffManager.Close()
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
 
 	t.Run("test_newframe_concurrent", func(t *testing.T) {
 		start := make(chan struct{})
@@ -571,7 +572,7 @@ func TestNewFrameConcurrent(t *testing.T) {
 }
 
 func TestNewFrameSequential(t *testing.T) {
-	newFrameCount := 10000
+	newFrameCount := 30000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -579,7 +580,7 @@ func TestNewFrameSequential(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 16 * 1024, // 128MB
+		CacheSize: 16 * 1024, // 16MB
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -593,7 +594,15 @@ func TestNewFrameSequential(t *testing.T) {
 		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
 	}
 
-	defer buffManager.Close()
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
 
 	t.Run("test_newframe_sequential", func(t *testing.T) {
 		for i := range newFrameCount {

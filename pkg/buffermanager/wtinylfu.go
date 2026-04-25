@@ -109,6 +109,7 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 		if protectedVictim == nil {
 			return BufferManagerError{Message: "Could not find eligible victim."}
 		}
+		defer protectedVictim.Unreference()
 
 		protectedVictim.updateSegment(probationSegment)
 		f.updateSegment(protectedSegment)
@@ -158,14 +159,21 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		w.probationCount++
 		w.windowCount--
 
+		windVictim.fr.Unreference()
 		return nil, nil
 	}
 
 	if windVictim.fr == nil {
-		return nil, BufferManagerError{Message: "Could not find window victim(all frames in use)."}
+		if probationVictim.fr != nil {
+			probationVictim.fr.Unreference()
+		}
+		return nil, BufferManagerError{Message: "(probation full) Could not find window victim(all frames in use)."}
 	}
 
-	if probationVictim.fr == nil && probationFull {
+	if probationVictim.fr == nil {
+		if windVictim.fr != nil {
+			windVictim.fr.Unreference()
+		}
 		return nil, BufferManagerError{Message: "Unable to find probation victim(all frames in use)."}
 	}
 
@@ -173,19 +181,23 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 	windKey := windVictim.fr.getKey()
 	windCount, err := w.tinyFilter.CheckItemCount(toBytes(windKey))
 	if err != nil {
+		windVictim.fr.Unreference()
+		probationVictim.fr.Unreference()
 		return nil, err
 	}
 
 	mainKey := probationVictim.fr.getKey()
 	mainCacheCount, err := w.tinyFilter.CheckItemCount(toBytes(mainKey))
 	if err != nil {
+		windVictim.fr.Unreference()
+		probationVictim.fr.Unreference()
 		return nil, err
 	}
 
 	// del keys
 	var delKeys []uint32
 
-	if windCount > mainCacheCount {
+	if windCount >= mainCacheCount {
 		delKeys = append(delKeys, mainKey)
 
 		// flush main cache victim
@@ -209,6 +221,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		}
 
 		windVictim.fr.updateSegment(probationSegment)
+		windVictim.fr.Unreference()
 		w.windowCount--
 	} else {
 		delKeys = append(delKeys, windKey)
@@ -232,6 +245,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		}
 
 		w.windowCount--
+		probationVictim.fr.Unreference()
 	}
 
 	return delKeys, nil

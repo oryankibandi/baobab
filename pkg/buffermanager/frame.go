@@ -2,6 +2,7 @@ package buffermanager
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,6 +86,7 @@ func (c *counter) reset() {
 	c.unpinCount.Store(0)
 }
 
+// Returns true if frame is currently referenced by another goroutine.
 func (f *Frame) isPinned() bool {
 	return f.acc.Load()
 }
@@ -134,6 +136,10 @@ func (f *Frame) Unreference() {
 	// check current count
 	p := f.counters.getTotalPins()
 
+	if p < 0 {
+		panic("negative pin count")
+	}
+
 	// If no pins, unset access bit
 	if p == 0 {
 		// unset access pin
@@ -169,8 +175,6 @@ func (f *Frame) MarkDirty() {
 
 // Mark an entry/frame as clean
 func (f *Frame) MarkClean() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.dirty.Store(false)
 	f.page.MarkClean()
 }
@@ -196,16 +200,16 @@ func (f *Frame) getSegType() SegmentType {
 }
 
 func (f *Frame) GetPage() *pager.Page {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+	// f.mu.RLock()
+	// defer f.mu.RUnlock()
 
 	return &f.page
 }
 
 // sets data on a frame/entry from a page
 func (f *Frame) SetData(p *pager.Page) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	// f.mu.Lock()
+	// defer f.mu.Unlock()
 
 	isIntern, err := p.IsInternal()
 	if err != nil {
@@ -317,7 +321,7 @@ func (f *Frame) Acquire(shared bool) error {
 
 	select {
 	case <-ctx.Done():
-		return BufferManagerError{"Deadline exceeded trying to acquire lock on frame"}
+		return BufferManagerError{fmt.Sprintf("Deadline exceeded trying to acquire lock on frame %d", f.getKey())}
 	case <-done:
 		return nil
 	}

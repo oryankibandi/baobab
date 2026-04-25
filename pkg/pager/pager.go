@@ -173,7 +173,7 @@ func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page) (uint32, e
 	fmt.Println("acquired lock for pager...")
 
 	var newPgeId uint32
-	fmt.Println("poping pageid from  freelist...")
+	fmt.Println("poping pageid from freelist...")
 	if n := pgr.freeList.pop(); n < 0 {
 		fmt.Println("got pageId < 0...")
 		newPgeId = pgr.maxPageId + 1

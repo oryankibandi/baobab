@@ -84,10 +84,12 @@ func (clk *clock) Evict(seg SegmentType) (evicted *Frame, evictedKey int) {
 // advances the clock hand, finds a valid entry.
 // loops around the clock buffer MAX_LOOP times to find entries
 // that may have not been unpinned in the first run. If no slot is found,
-// we release the latch for a period of time to allow other threads to access
-// the buffer then retry (exponential backoff). If we reach MAX_RETRIES,
+// we wait for a period of time to allow other goroutines to free some frames
+// then retry (exponential backoff). If we reach MAX_RETRIES,
 // we simply return nil.
 // Returns the entry without clearing the entry, or nil if none found.
+// Each returned candidate is referenced to prevent eviction by a different
+// goroutine.
 func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
 	for j := range MAX_RETRIES {
 		start := time.Now()
@@ -120,6 +122,8 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
 			} else {
 				// both access bit and reference bit unset
 				e := clk.Head
+				// reference frame so it doesn't get evicted/accese d by other goroutines i.e. bgwriter
+				e.Reference()
 
 				// advance clock hand
 				clk.Head = clk.Head.GetNextLink()
@@ -133,8 +137,9 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
 
 		clk.mu.Unlock()
 		end := time.Since(start)
-		slog.Info(fmt.Sprintf("Evict failed in %v, retrying..", end))
-		time.Sleep(time.Second * time.Duration(j+1))
+		sleepDur := time.Millisecond * time.Duration((j+1)*10)
+		slog.Info(fmt.Sprintf("Evict failed in %v, retrying in %v..", end, sleepDur))
+		time.Sleep(sleepDur)
 	}
 	// unable to find suitable entry. All entries referenced
 	return nil

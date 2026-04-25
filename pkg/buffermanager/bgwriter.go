@@ -58,20 +58,21 @@ BgWriterLoop:
 			case <-*bw.exitchan:
 				break BgWriterLoop
 			default:
+
 				if currFrame.isPinned() {
-					// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) %d. curr frame is pinned, continueing", i))
-					currFrame = currFrame.GetNextLink()
+					nextFrame = currFrame.GetNextLink()
+					currFrame = nextFrame
 					continue
 				}
+				currFrame.Reference()
 
 				if !currFrame.isDirty() {
-					// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) %d. curr frame is not dirty, continueing", i))
-					currFrame = currFrame.GetNextLink()
+					nextFrame = currFrame.GetNextLink()
+					currFrame.Unreference()
+					currFrame = nextFrame
 					continue
 				}
 
-				// helpers.PrintInfoMsg("(bgwriter) Frame dirty and not pinned")
-				currFrame.Reference()
 				err := currFrame.Acquire(false)
 				if err != nil {
 					helpers.PrintErrorMsg(err.Error())
@@ -79,6 +80,8 @@ BgWriterLoop:
 					currFrame = currFrame.GetNextLink()
 					continue
 				}
+				k := currFrame.getKey()
+				helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) acquired latch for frame id: %d", k))
 
 				currFrameBuff, _, err = currFrame.RawBufferSlice()
 				if err != nil {
@@ -88,17 +91,23 @@ BgWriterLoop:
 				err = bw.pgr.WritePage(currFrame.getKey(), currFrameBuff)
 				if err != nil {
 					helpers.PrintErrorMsg(fmt.Sprintf("(bgwriter) Error writing to page: %s\n", err.Error()))
-					currFrame.Release(false)
+					err = currFrame.Release(false)
+					if err != nil {
+						panic(err.Error())
+					}
 					currFrame.Unreference()
 					currFrame = currFrame.GetNextLink()
 					continue
 				}
+
+				currFrame.MarkClean()
 
 				nextFrame = currFrame.GetNextLink()
 				err = currFrame.Release(false)
 				if err != nil {
 					panic(err)
 				}
+				helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) Released latch on frame %d", k))
 				currFrame.Unreference()
 				bw.writtenPages++
 
