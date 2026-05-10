@@ -27,3 +27,21 @@ func InitPager(t *testing.T) *pager.Pager {
 
 	return pgr
 }
+
+func InitPagerBench(t *testing.B) *pager.Pager {
+	tmpDir := t.TempDir()
+	dbFile := filepath.Join(tmpDir, "baobab.db")
+	dman, err := diskmanager.NewDiskManager(diskmanager.DiskManagerConfig{DataFile: dbFile})
+
+	if err != nil {
+		t.Fatalf("Could not initialize disk manager: %s", err.Error())
+	}
+
+	freelistFile := filepath.Join(t.TempDir(), "baobab")
+	pgr, err := pager.NewPager(pager.PagerConfig{DManager: dman, FreeListFile: freelistFile})
+	if err != nil {
+		t.Fatalf("Could not initialize pager: %s", err.Error())
+	}
+
+	return pgr
+}

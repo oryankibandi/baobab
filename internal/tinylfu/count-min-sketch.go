@@ -76,13 +76,7 @@ func (c *CMS) Increment(key []byte) (uint64, error) {
 
 	c.op_counter += 1
 
-	// if c.op_counter >= c.w {
-	// 	fmt.Println("RESET AT ==> ", c.op_counter)
-	// 	c.reset()
-
-	// 	return true, nil
-	// }
-
+	indices = nil
 	return c.op_counter, nil
 }
 
@@ -108,6 +102,7 @@ func (c *CMS) GetCount(key []byte) (int64, error) {
 		}
 	}
 
+	indices = nil
 	return int64(*count), nil
 }
 

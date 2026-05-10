@@ -53,5 +53,7 @@ func DoubleHashIndices(h Hasher, data []byte, k int, m uint64) []uint64 {
 		indices[i] = (h1 + uint64(i)*h2) % m
 	}
 
+	tmp = nil
+
 	return indices
 }

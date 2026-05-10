@@ -54,7 +54,7 @@ type DiskManagerConfig struct {
 type ioReq struct {
 	buff    *[]byte
 	size    int64
-	errChan *chan error
+	errChan chan error
 	off     uint64
 	flag    byte
 	flush   bool
@@ -106,7 +106,7 @@ func (d *DiskManager) loadPage(off uint32, buff *[]byte) error {
 //	flush	- if true, Sync() is called to write content in buffer to disk.
 //		  Should be used cautiously as it's expensive but necessary for
 //		  durability.
-func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool, errChan *chan error, flush bool) error {
+func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool, errChan chan error, flush bool) error {
 	if buff == nil {
 		return DiskManagerError{Message: "invalid buffer pointer provided."}
 	}
@@ -163,7 +163,7 @@ func (d *DiskManager) ForceFlush() {
 }
 
 // Creates a read req for `pageId` and adds it to queue
-func (d *DiskManager) ReadReq(buff *[]byte, off uint32, readErr *chan error) error {
+func (d *DiskManager) ReadReq(buff *[]byte, off uint32, readErr chan error) error {
 	if buff == nil {
 		return DiskManagerError{Message: "invalid buffer pointer provided."}
 	}
@@ -305,13 +305,13 @@ func (r *ioReq) execute(dMan *DiskManager) {
 		// Read req. Read from disk, create Page and return that in channel
 		err := dMan.loadPage(uint32(r.off), r.buff)
 		// send err to channel
-		*(r.errChan) <- err
+		r.errChan <- err
 	} else {
 		// Write page to disk
 		err := dMan.flushPage(r.buff, uint32(r.size), uint32(r.off), helpers.BitIsSet(&r.flag, 6), r.flush)
 
 		// send error to channel
-		*(r.errChan) <- err
+		r.errChan <- err
 	}
 }
 

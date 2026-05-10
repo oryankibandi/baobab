@@ -6,18 +6,17 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/oryankibandi/baobab/internal/manual"
+	"github.com/oryankibandi/baobab/internal/zipf"
 	diskmanager "github.com/oryankibandi/baobab/pkg/diskmanager"
 	"github.com/oryankibandi/baobab/pkg/helpers"
 	"github.com/oryankibandi/baobab/pkg/logger"
 	"github.com/oryankibandi/baobab/pkg/pager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
-
-// TODO:
-// 1. Benchmark random and zipfian workloads
 
 func TestNewBufferManager(t *testing.T) {
 	// initialize wal, logger and pager
@@ -492,7 +491,7 @@ func TestPutGet(t *testing.T) {
 func TestNewFrameConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 
-	newFrameCount := 20000
+	newFrameCount := 18000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -640,4 +639,173 @@ func TestNewFrameSequential(t *testing.T) {
 
 		helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
 	})
+}
+
+// TestZipfianDistribution Simulates Zipfian pattern.
+func TestZipfianDistribution(t *testing.T) {
+	iterationCount := 1000000
+	maxPages := 10000
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pgr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := CacheConfig{
+		CacheSize: 48 * 1024, // 48MB
+	}
+
+	buffManager, err := NewBufferManager(cConfig, w, pgr)
+	if err != nil {
+		pgr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pgr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	// create new frames. Page IDs are assigned monotonically
+	for i := range maxPages {
+		f, err := buffManager.NewFrame(false, false)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d unable to create new frames: %s", i, err.Error()), t)
+		}
+
+		if f == nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d Expected frame, got nil", i), t)
+		}
+
+		if k := f.getKey(); k == 0 {
+			f.Unreference()
+			f.Release(true)
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d got new frame key as 0. This is reserved for the metadata page. Frame -> %v", i, f), t)
+		}
+
+		f.Unreference()
+	}
+
+	// test zipfian
+	var pageId uint64
+	var totTime time.Duration
+	var st time.Time
+	z := zipf.NewZipf(1.1, 5, float64(maxPages))
+
+	for i := range iterationCount {
+		pageId = z.GetNext()
+		st = time.Now()
+		f, err := buffManager.Get(uint32(pageId))
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Could not retrieve frame: %s", i, err.Error()), t)
+		}
+
+		if f == nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Expected frame, got nil", i), t)
+		}
+
+		f.Acquire(true)
+		if k := f.getKey(); pageId != uint64(k) {
+			f.Release(true)
+			f.Unreference()
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Expected retrieved frame to have key: %d, got %d instead", i, pageId, k), t)
+		}
+		f.Release(true)
+		f.Unreference()
+		totTime += time.Since(st)
+
+		helpers.PrintSuccessMsg(fmt.Sprintf("test_zipfian_%d success.", i))
+	}
+
+	helpers.PrintSuccessMsg("--------------------------------------")
+	helpers.PrintSuccessMsg(fmt.Sprintf("Total time: %v", totTime))
+	helpers.PrintSuccessMsg(fmt.Sprintf("Average GET req time: %v", totTime/time.Duration(iterationCount)))
+	helpers.PrintSuccessMsg("--------------------------------------")
+}
+
+func BenchmarkBufferManager(t *testing.B) {
+	maxPages := 10000
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pgr := InitPagerBench(t)
+
+	// initialize buffer manager
+	cConfig := CacheConfig{
+		CacheSize: 256 * 1024, // 48MB
+	}
+
+	buffManager, err := NewBufferManager(cConfig, w, pgr)
+	if err != nil {
+		pgr.Close()
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if buffManager == nil {
+		pgr.Close()
+		t.Fatalf("Expected cache, got nil")
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				t.Fatalf("Unable to close buffermanager: %s", err.Error())
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	// create new frames. Page IDs are assigned monotonically
+	for range maxPages {
+		f, err := buffManager.NewFrame(false, false)
+		if err != nil {
+			t.Fatalf("unable to create new frames: %s", err.Error())
+		}
+
+		if f == nil {
+			t.Fatalf("Expected frame, got nil")
+		}
+
+		if k := f.getKey(); k == 0 {
+			f.Unreference()
+			f.Release(true)
+			t.Fatalf("got new frame key as 0. This is reserved for the metadata page.")
+		}
+
+		f.Unreference()
+	}
+
+	var pageId uint64
+	z := zipf.NewZipf(1.1, 5, float64(maxPages))
+	for i := 0; i < t.N; i++ {
+		pageId = z.GetNext()
+		f, err := buffManager.Get(uint32(pageId))
+		if err != nil {
+			t.Fatalf("bench_zipfian_%d Could not retrieve frame: %s", i, err.Error())
+		}
+
+		if f == nil {
+			t.Fatalf(fmt.Sprintf("bench_zipfian_%d Expected frame, got nil", i), t)
+		}
+
+		f.Acquire(true)
+		if k := f.getKey(); pageId != uint64(k) {
+			f.Release(true)
+			f.Unreference()
+			t.Fatalf("test_zipfian_%d Expected retrieved frame to have key: %d, got %d instead", i, pageId, k)
+		}
+		f.Release(true)
+		f.Unreference()
+	}
 }

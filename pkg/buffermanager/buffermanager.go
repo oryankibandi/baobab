@@ -69,9 +69,7 @@ func (c *BufferManager) put(k uint32, fr *Frame, dirty bool) (*Frame, error) {
 
 // 2. Retrieve item from cache
 func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
-	fmt.Println("(Get) Obtaining lock for cache...")
 	c.rmu.RLock()
-	fmt.Println("(Get) Obtained lock for cache...")
 	// fKey := toKey(key)
 	if pageId == 0 {
 		metaFr := c.wTinyLfu.getMetadataPage()
@@ -88,10 +86,11 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 
 	if ok {
 		// increment count & pin frame
-		fmt.Println("Item found, doing a GetIncrement()")
+		// fmt.Println("Item found, doing a GetIncrement()")
 		c.wTinyLfu.Increment(val)
 		c.rmu.RUnlock()
 
+		val.Reference()
 		return val, nil
 	} else {
 		// get empty frame. this is where the page read from disk will be stored since memory is already allocated.
@@ -113,6 +112,8 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 			}
 			c.rmu.Unlock()
 			c.rmu.RLock()
+
+			evicted = nil
 		}
 
 		// acquire lock on frame before reading
@@ -124,7 +125,7 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		defer fr.Release(false)
 
 		// Retrieve buffer to read into
-		fmt.Println("Item not found, reading from disk")
+		// fmt.Println("Item not found, reading from disk")
 		frBuff, _, err := fr.RawBufferSlice()
 		if err != nil {
 			c.rmu.RUnlock()
@@ -134,7 +135,7 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		// Create read request
 		err = c.pager.ReadPage(uint32(pageId), frBuff)
 		if err != nil {
-			fmt.Println("Error encountered, readding to pool...")
+			// fmt.Println("Error encountered, readding to pool...")
 			// readd frame to circular buffer pool
 			c.wTinyLfu.readdFrameToPool(fr)
 			c.rmu.RUnlock()
@@ -143,21 +144,33 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 
 		// invalid page/page doesn't exist
 		if binary.LittleEndian.Uint32((*frBuff)[1:5]) != pageId {
-			fmt.Println("Invalid pageId provided, readding to pool...")
+			// fmt.Println("Invalid pageId provided, readding to pool...")
 			// readd frame to circular buffer pool
 			c.wTinyLfu.readdFrameToPool(fr)
-			fmt.Println("Readded to  pool successfully...")
+			// fmt.Println("Readded to  pool successfully...")
 			c.rmu.RUnlock()
-			fmt.Println("released lock")
+			// fmt.Println("released lock")
 			return nil, BufferManagerError{Message: "Invalid pageId provided."}
 		}
 
-		fmt.Println("FRAME BUFF AFTER READING: -> ", frBuff)
+		// set pageID from read page
+		err = c.pager.UpdatePageMeta(&fr.page, binary.LittleEndian.Uint32((*frBuff)[1:5]), helpers.BitIsSet(&((*frBuff)[0]), pager.IsInternal))
+		if err != nil {
+			return nil, BufferManagerError{Message: err.Error()}
+		}
+
+		// update frame metadata with page data
+		err = fr.SetData(&fr.page)
+		if err != nil {
+			return nil, BufferManagerError{Message: err.Error()}
+		}
+
+		// fmt.Printf("FRAME BUFF AFTER READING: -> %v\nFRAME -> %v\n", frBuff, fr)
 
 		//  add item  to cache
 		c.rmu.RUnlock()
-		fmt.Println("read page from disk, adding to cache...")
-		fmt.Printf("pageId: %d, Frame: %v\n", pageId, fr)
+		// fmt.Println("read page from disk, adding to cache...")
+		// fmt.Printf("pageId: %d, Frame: %v\n", pageId, fr)
 		f, err := c.put(pageId, fr, false)
 		if err != nil {
 			return nil, BufferManagerError{Message: "No item found"}

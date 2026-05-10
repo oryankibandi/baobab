@@ -83,7 +83,7 @@ func TestWritePage(t *testing.T) {
 		wg.Wait()
 
 		errChan := make(chan error)
-		err = dm.WriteReq(uint32(pageSize)*uint32(pageId), &newPageBuff, int64(pageSize), false, &errChan, true)
+		err = dm.WriteReq(uint32(pageSize)*uint32(pageId), &newPageBuff, int64(pageSize), false, errChan, true)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error on WriteReq, got %s", err.Error()), t)
 		}
@@ -158,7 +158,7 @@ func TestWritePageConcurrent(t *testing.T) {
 				// idx starts at 0, our writable pages start at 1 hence idx + 1. offset 0 reserved for metadata page
 				pageOff := uint32((idx + 1) * pageSize)
 				errChan := make(chan error)
-				err := dm.WriteReq(pageOff, &pages[idx], int64(pageSize), false, &errChan, false)
+				err := dm.WriteReq(pageOff, &pages[idx], int64(pageSize), false, errChan, false)
 				if err != nil {
 					helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error on WriteReq, got %s", err.Error()), t)
 				}
@@ -264,7 +264,7 @@ func TestReadPage(t *testing.T) {
 	// write page to disk
 	t.Run("test_readpage_write", func(t *testing.T) {
 		errChan := make(chan error)
-		err = dm.WriteReq(uint32(pageId*int32(pageSize)), &newPageBuff, int64(pageSize), false, &errChan, false)
+		err = dm.WriteReq(uint32(pageId*int32(pageSize)), &newPageBuff, int64(pageSize), false, errChan, false)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error scheduling write req, got %s", err.Error()), t)
 		}
@@ -281,7 +281,7 @@ func TestReadPage(t *testing.T) {
 		readErr := make(chan error)
 		readPage := make([]byte, pageSize)
 
-		err = dm.ReadReq(&readPage, uint32(pageId*int32(pageSize)), &readErr)
+		err = dm.ReadReq(&readPage, uint32(pageId*int32(pageSize)), readErr)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error while reading page, got %s", err.Error()), t)
 		}
@@ -444,7 +444,7 @@ func TestReadWriteConcurrent(t *testing.T) {
 						<-writeStart
 						errChan := make(chan error)
 						pgeOff := uint32((idx + 1) * pageSize)
-						err := dm.WriteReq(pgeOff, &(pages[i]), int64(pageSize), false, &errChan, false)
+						err := dm.WriteReq(pgeOff, &(pages[i]), int64(pageSize), false, errChan, false)
 						if err != nil {
 							helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error on WriteReq, got %s", err.Error()), t)
 						}
@@ -485,7 +485,7 @@ func TestReadWriteConcurrent(t *testing.T) {
 						readPage := make([]byte, pageSize)
 						readErr := make(chan error)
 						pgeOff := uint32((idx + 1) * pageSize)
-						err := dm.ReadReq(&readPage, pgeOff, &readErr)
+						err := dm.ReadReq(&readPage, pgeOff, readErr)
 						if err != nil {
 							helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error while reading page, got %s", err.Error()), t)
 						}

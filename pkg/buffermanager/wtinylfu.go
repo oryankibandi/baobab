@@ -160,12 +160,17 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		w.windowCount--
 
 		windVictim.fr.Unreference()
+
+		// unref
+		windVictim.fr = nil
 		return nil, nil
 	}
 
 	if windVictim.fr == nil {
 		if probationVictim.fr != nil {
 			probationVictim.fr.Unreference()
+
+			probationVictim.fr = nil
 		}
 		return nil, BufferManagerError{Message: "(probation full) Could not find window victim(all frames in use)."}
 	}
@@ -173,6 +178,8 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 	if probationVictim.fr == nil {
 		if windVictim.fr != nil {
 			windVictim.fr.Unreference()
+
+			windVictim.fr = nil
 		}
 		return nil, BufferManagerError{Message: "Unable to find probation victim(all frames in use)."}
 	}
@@ -183,6 +190,10 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 	if err != nil {
 		windVictim.fr.Unreference()
 		probationVictim.fr.Unreference()
+
+		//unref
+		windVictim.fr = nil
+		probationVictim.fr = nil
 		return nil, err
 	}
 
@@ -191,6 +202,10 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 	if err != nil {
 		windVictim.fr.Unreference()
 		probationVictim.fr.Unreference()
+
+		//unref
+		windVictim.fr = nil
+		probationVictim.fr = nil
 		return nil, err
 	}
 
@@ -210,6 +225,9 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		frSlice := buff[:]
 		err = pgr.WritePage(mainKey, &frSlice)
 		if err != nil {
+			//unref
+			windVictim.fr = nil
+			probationVictim.fr = nil
 			return nil, err
 		}
 		helpers.PrintInfoMsg(fmt.Sprintf("Flushed page %d to be evicted from probation.", mainKey))
@@ -235,6 +253,9 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		frSlice := buff[:]
 		err = pgr.WritePage(windKey, &frSlice)
 		if err != nil {
+			//unref
+			windVictim.fr = nil
+			probationVictim.fr = nil
 			return nil, err
 		}
 		helpers.PrintInfoMsg("Flushed page to be evicted.")
@@ -247,6 +268,10 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		w.windowCount--
 		probationVictim.fr.Unreference()
 	}
+
+	//unref
+	windVictim.fr = nil
+	probationVictim.fr = nil
 
 	return delKeys, nil
 }

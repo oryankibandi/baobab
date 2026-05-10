@@ -68,7 +68,7 @@ type IOJob struct {
 	// 0x05->flush
 	flag       byte
 	buff       *[]byte
-	errCh      *chan error
+	errCh      chan error
 	sizeOfBuff int64
 	pageId     uint32
 }
@@ -76,7 +76,7 @@ type IOJob struct {
 type workerpool struct {
 	// buffered channel to provide back-pressure. This regulates how many requests can be
 	// sent to the diskmanager.
-	jobQ chan IOJob
+	jobQ chan *IOJob
 	wg   sync.WaitGroup
 }
 
@@ -113,9 +113,9 @@ func (j *IOJob) executeJob(pgr *Pager) {
 		flush := helpers.BitIsSet(&j.flag, 0x05)
 
 		errChan := make(chan error)
-		err := pgr.dManager.WriteReq(j.pageId*PAGE_SIZE_BYTES, j.buff, PAGE_SIZE_BYTES, isDead, &errChan, flush)
+		err := pgr.dManager.WriteReq(j.pageId*PAGE_SIZE_BYTES, j.buff, PAGE_SIZE_BYTES, isDead, errChan, flush)
 		if err != nil {
-			*(j.errCh) <- err
+			j.errCh <- err
 			return
 		}
 
@@ -125,20 +125,20 @@ func (j *IOJob) executeJob(pgr *Pager) {
 		case e := <-errChan:
 			cancel()
 			if e != nil {
-				*j.errCh <- e
+				j.errCh <- e
 				return
 			}
 		case <-ctx.Done():
 			cancel()
-			*j.errCh <- PagerError{Message: fmt.Sprintf("timeout writing to page: %d", j.pageId)}
+			j.errCh <- PagerError{Message: fmt.Sprintf("timeout writing to page: %d", j.pageId)}
 			return
 		}
 
 	} else {
 		errChan := make(chan error)
-		err := pgr.dManager.ReadReq(j.buff, j.pageId*PAGE_SIZE_BYTES, &errChan)
+		err := pgr.dManager.ReadReq(j.buff, j.pageId*PAGE_SIZE_BYTES, errChan)
 		if err != nil {
-			*j.errCh <- err
+			j.errCh <- err
 			return
 		}
 
@@ -148,17 +148,17 @@ func (j *IOJob) executeJob(pgr *Pager) {
 		case e := <-errChan:
 			cancel()
 			if e != nil {
-				*j.errCh <- e
+				j.errCh <- e
 				return
 			}
 		case <-ctx.Done():
 			cancel()
-			*j.errCh <- PagerError{Message: "timeout reading page."}
+			j.errCh <- PagerError{Message: "timeout reading page."}
 			return
 		}
 	}
 
-	*j.errCh <- nil
+	j.errCh <- nil
 }
 
 // NewPage - initializes a blank page by assigning a pageId and setting a flag
@@ -199,6 +199,21 @@ func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page) (uint32, e
 	return newPgeId, nil
 }
 
+// UpdatePageMeta updates page metadata(pageId and Isinternal flag).
+// called when a new frame has been evicted and repopulated with new data.
+func (pgr *Pager) UpdatePageMeta(page *Page, pageId uint32, isInternal bool) error {
+	if pageId == 0 {
+		return PagerError{Message: "Invalid pageId"}
+	}
+
+	err := page.initializePage(pageId, isInternal)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // readMetadata get metadata page and reads content into buff
 func (pgr *Pager) readMetadata(buff *[]byte) error {
 	if len(*buff) != PAGE_SIZE_BYTES {
@@ -209,19 +224,24 @@ func (pgr *Pager) readMetadata(buff *[]byte) error {
 	ioJob := IOJob{
 		flag:       0x00, // 0000 0000
 		buff:       buff,
-		errCh:      &workerErrChan,
+		errCh:      workerErrChan,
 		pageId:     0,
 		sizeOfBuff: -1,
 	}
 
 	// blocks if channel is full
-	pgr.workers.jobQ <- ioJob
+	pgr.workers.jobQ <- &ioJob
 
 	// blocks until we a response
 	err := <-workerErrChan
 	if err != nil {
 		return err
 	}
+
+	// dereference
+	ioJob.buff = nil
+	ioJob.errCh = nil
+	workerErrChan = nil
 	return nil
 }
 
@@ -240,19 +260,24 @@ func (pgr *Pager) ReadPage(pageId uint32, buff *[]byte) error {
 	ioJob := IOJob{
 		flag:       0x00, // 0000 0000
 		buff:       buff,
-		errCh:      &workerErrChan,
+		errCh:      workerErrChan,
 		pageId:     pageId,
 		sizeOfBuff: -1,
 	}
 
 	// blocks if channel is full
-	pgr.workers.jobQ <- ioJob
+	pgr.workers.jobQ <- &ioJob
 
 	// blocks until we a response
 	err := <-workerErrChan
 	if err != nil {
 		return err
 	}
+
+	// dereference job struct
+	workerErrChan = nil
+	ioJob.errCh = nil
+	ioJob.buff = nil
 
 	return nil
 }
@@ -284,12 +309,12 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 	ioJob := IOJob{
 		flag:       byte(flag),
 		buff:       buff,
-		errCh:      &workerErrChan,
+		errCh:      workerErrChan,
 		pageId:     pageId,
 		sizeOfBuff: PAGE_SIZE_BYTES,
 	}
 
-	pgr.workers.jobQ <- ioJob
+	pgr.workers.jobQ <- &ioJob
 	err := <-workerErrChan
 	if err != nil {
 		close(workerErrChan)
@@ -307,6 +332,11 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 		}
 		pgr.mu.Unlock()
 	}
+
+	// dereference
+	ioJob.buff = nil
+	ioJob.errCh = nil
+	workerErrChan = nil
 	return nil
 }
 
@@ -334,16 +364,21 @@ func (pgr *Pager) FlushMetadata(buff *[]byte) error {
 	ioJob := IOJob{
 		flag:       byte(flag),
 		buff:       buff,
-		errCh:      &workerErrChan,
+		errCh:      workerErrChan,
 		pageId:     0,
 		sizeOfBuff: PAGE_SIZE_BYTES,
 	}
 
-	pgr.workers.jobQ <- ioJob
+	pgr.workers.jobQ <- &ioJob
 	err := <-workerErrChan
 	if err != nil {
 		return err
 	}
+
+	// dereference
+	ioJob.buff = nil
+	ioJob.errCh = nil
+	workerErrChan = nil
 
 	return nil
 }
@@ -426,7 +461,8 @@ func (w *workerpool) startWorkers(pgr *Pager, poolsize uint64) error {
 		go func() {
 			defer w.wg.Done()
 			for j := range w.jobQ {
-				j.executeJob(pgr)
+				(*j).executeJob(pgr)
+				j = nil
 			}
 		}()
 	}
@@ -461,7 +497,7 @@ func NewPager(pgrConfig PagerConfig) (pager *Pager, e error) {
 	fmt.Println("PAGER CONFIG -> ", pgrConfig)
 	if pgrConfig.WorkerSize == 0 {
 		// set default value
-		fmt.Println("no poolsie provided, setting to default")
+		fmt.Println("no pool size provided, setting to default")
 		pgrConfig.WorkerSize = MAX_WORKERS
 	}
 
@@ -472,7 +508,7 @@ func NewPager(pgrConfig PagerConfig) (pager *Pager, e error) {
 	fl.loadFreeList()
 
 	wrk := workerpool{
-		jobQ: make(chan IOJob, MAX_REQ_JOBS),
+		jobQ: make(chan *IOJob, MAX_REQ_JOBS),
 	}
 
 	pgr := &Pager{

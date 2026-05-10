@@ -1,7 +1,6 @@
 package buffermanager
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -210,6 +209,7 @@ func (f *Frame) GetPage() *pager.Page {
 func (f *Frame) SetData(p *pager.Page) error {
 	// f.mu.Lock()
 	// defer f.mu.Unlock()
+	fmt.Printf("Setting data on frame...\n")
 
 	isIntern, err := p.IsInternal()
 	if err != nil {
@@ -222,18 +222,8 @@ func (f *Frame) SetData(p *pager.Page) error {
 	f.dirty.Store(true)
 	f.isOccupied.Store(true)
 
-	//	pgelsn := p.GetLSN()
-	//	copy(f.lsn[:], pgelsn[:])
-
-	// entry clock metadata
-	// f.ref.Store(false)
-	// f.acc.Store(false)
-
 	f.meta.key = uint32(p.PageId)
-
-	// pageId & Flags
-	// f.page.PageId = p.PageId
-	// f.page.Flags = p.Flags
+	fmt.Printf("Key after setting -> %d\nPageId: %d\n", f.meta.key, p.PageId)
 
 	return nil
 }
@@ -306,8 +296,8 @@ func (f *Frame) RawBufferSlice() (buff *[]byte, size uint64, err error) {
 //
 // if shared is true, The latch is shared else it is exclusive.
 func (f *Frame) Acquire(shared bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*20)
-	defer cancel()
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
 
 	done := make(chan struct{})
 	go func() {
@@ -320,7 +310,7 @@ func (f *Frame) Acquire(shared bool) error {
 	}()
 
 	select {
-	case <-ctx.Done():
+	case <-timer.C:
 		return BufferManagerError{fmt.Sprintf("Deadline exceeded trying to acquire lock on frame %d", f.getKey())}
 	case <-done:
 		return nil
@@ -334,8 +324,8 @@ func (f *Frame) Acquire(shared bool) error {
 //
 //	shared - set to true if acquired latch is shared, else set to false.
 func (f *Frame) Release(shared bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*20)
-	defer cancel()
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
 
 	done := make(chan struct{})
 	go func() {
@@ -348,7 +338,7 @@ func (f *Frame) Release(shared bool) error {
 	}()
 
 	select {
-	case <-ctx.Done():
+	case <-timer.C:
 		return BufferManagerError{"Deadline exceeded trying to release lock on a frame"}
 	case <-done:
 		return nil
