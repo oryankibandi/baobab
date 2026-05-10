@@ -51,9 +51,9 @@ const (
 
 // I/O Operation timeouts
 const (
-	READ_PAGE_TIMEOUT_MILL     = 200
-	NO_SYNC_WRITE_TIMEOUT_MILL = 200
-	SYNC_WRITE_TIMEOUT_MILL    = 400
+	READ_PAGE_TIMEOUT_MILL     = 20
+	NO_SYNC_WRITE_TIMEOUT_MILL = 20
+	SYNC_WRITE_TIMEOUT_MILL    = 40
 )
 
 const (
@@ -102,7 +102,7 @@ type PagerConfig struct {
 	WorkerSize   uint64
 }
 
-func (j *IOJob) executeJob(pgr *Pager) {
+func (j *IOJob) executeJob(pgr *Pager, timer *time.Timer) {
 	if pgr == nil {
 		panic("No pager provided")
 	}
@@ -119,17 +119,16 @@ func (j *IOJob) executeJob(pgr *Pager) {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(NO_SYNC_WRITE_TIMEOUT_MILL)*time.Millisecond)
+		timer.Reset(time.Duration(NO_SYNC_WRITE_TIMEOUT_MILL) * time.Millisecond)
+		defer timer.Stop()
 
 		select {
 		case e := <-errChan:
-			cancel()
 			if e != nil {
 				j.errCh <- e
 				return
 			}
-		case <-ctx.Done():
-			cancel()
+		case <-timer.C:
 			j.errCh <- PagerError{Message: fmt.Sprintf("timeout writing to page: %d", j.pageId)}
 			return
 		}
@@ -142,17 +141,16 @@ func (j *IOJob) executeJob(pgr *Pager) {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(READ_PAGE_TIMEOUT_MILL)*time.Millisecond)
+		timer.Reset(time.Duration(READ_PAGE_TIMEOUT_MILL) * time.Millisecond)
+		defer timer.Stop()
 
 		select {
 		case e := <-errChan:
-			cancel()
 			if e != nil {
 				j.errCh <- e
 				return
 			}
-		case <-ctx.Done():
-			cancel()
+		case <-timer.C:
 			j.errCh <- PagerError{Message: "timeout reading page."}
 			return
 		}
@@ -318,6 +316,7 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 	err := <-workerErrChan
 	if err != nil {
 		close(workerErrChan)
+		workerErrChan = nil
 		return err
 	}
 
@@ -460,8 +459,14 @@ func (w *workerpool) startWorkers(pgr *Pager, poolsize uint64) error {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
+			// create a reusable a timer
+			timer := time.NewTimer(time.Second)
+			if !timer.Stop() {
+				<-timer.C
+			}
+
 			for j := range w.jobQ {
-				(*j).executeJob(pgr)
+				(*j).executeJob(pgr, timer)
 				j = nil
 			}
 		}()
@@ -494,7 +499,6 @@ func NewPager(pgrConfig PagerConfig) (pager *Pager, e error) {
 		return nil, PagerError{Message: "diskmanager instance not proviided"}
 	}
 
-	fmt.Println("PAGER CONFIG -> ", pgrConfig)
 	if pgrConfig.WorkerSize == 0 {
 		// set default value
 		fmt.Println("no pool size provided, setting to default")

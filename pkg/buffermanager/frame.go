@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/oryankibandi/baobab/internal/manual"
@@ -296,25 +295,13 @@ func (f *Frame) RawBufferSlice() (buff *[]byte, size uint64, err error) {
 //
 // if shared is true, The latch is shared else it is exclusive.
 func (f *Frame) Acquire(shared bool) error {
-	timer := time.NewTimer(20 * time.Millisecond)
-	defer timer.Stop()
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if shared {
-			f.mu.RLock()
-		} else {
-			f.mu.Lock()
-		}
-	}()
-
-	select {
-	case <-timer.C:
-		return BufferManagerError{fmt.Sprintf("Deadline exceeded trying to acquire lock on frame %d", f.getKey())}
-	case <-done:
-		return nil
+	if shared {
+		f.mu.RLock()
+	} else {
+		f.mu.Lock()
 	}
+
+	return nil
 }
 
 // Releases a latch on a frame.
@@ -324,25 +311,14 @@ func (f *Frame) Acquire(shared bool) error {
 //
 //	shared - set to true if acquired latch is shared, else set to false.
 func (f *Frame) Release(shared bool) error {
-	timer := time.NewTimer(20 * time.Millisecond)
-	defer timer.Stop()
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if shared {
-			f.mu.RUnlock()
-		} else {
-			f.mu.Unlock()
-		}
-	}()
-
-	select {
-	case <-timer.C:
-		return BufferManagerError{"Deadline exceeded trying to release lock on a frame"}
-	case <-done:
-		return nil
+	if shared {
+		f.mu.RUnlock()
+	} else {
+		f.mu.Unlock()
 	}
+
+	return nil
 }
 
 // Returns a pointer to new entry

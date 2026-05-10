@@ -40,8 +40,7 @@ type BgWriter struct {
 func (bw *BgWriter) Start(wg *sync.WaitGroup) {
 	wg.Add(1)
 	defer wg.Done()
-	// Give time for other processes to initialize
-	// time.Sleep(time.Second * 2)
+
 	go bw.watchFreeList(bw.exitchan, wg)
 
 	var currFrame *Frame
