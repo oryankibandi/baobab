@@ -51,14 +51,14 @@ const (
 
 // I/O Operation timeouts
 const (
-	READ_PAGE_TIMEOUT_MILL     = 20
-	NO_SYNC_WRITE_TIMEOUT_MILL = 20
-	SYNC_WRITE_TIMEOUT_MILL    = 40
+	READ_PAGE_TIMEOUT_MILL     = 200
+	NO_SYNC_WRITE_TIMEOUT_MILL = 200
+	SYNC_WRITE_TIMEOUT_MILL    = 400
 )
 
 const (
 	MAX_REQ_JOBS = 100 // max number of io requests to send to disk manager
-	MAX_WORKERS  = 50  // default no. of workers.
+	MAX_WORKERS  = 500 // default no. of workers.
 )
 
 type IOJob struct {
@@ -512,7 +512,7 @@ func NewPager(pgrConfig PagerConfig) (pager *Pager, e error) {
 	fl.loadFreeList()
 
 	wrk := workerpool{
-		jobQ: make(chan *IOJob, MAX_REQ_JOBS),
+		jobQ: make(chan *IOJob, pgrConfig.WorkerSize),
 	}
 
 	pgr := &Pager{

@@ -20,7 +20,7 @@ func InitPager(t *testing.T) *pager.Pager {
 	}
 
 	freelistFile := filepath.Join(t.TempDir(), "baobab")
-	pgr, err := pager.NewPager(pager.PagerConfig{DManager: dman, FreeListFile: freelistFile})
+	pgr, err := pager.NewPager(pager.PagerConfig{DManager: dman, FreeListFile: freelistFile, WorkerSize: 200})
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Could not initialize pager: %s", err.Error()), t)
 	}

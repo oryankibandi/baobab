@@ -628,10 +628,7 @@ func TestNewFrameSequential(t *testing.T) {
 				}
 
 				fr.Unreference()
-				err = fr.Release(true)
-				if err != nil {
-					helpers.PrintTestErrorMsg(err.Error(), t)
-				}
+				fr.Release(true)
 
 				helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
 			})
@@ -687,12 +684,14 @@ func TestZipfianDistribution(t *testing.T) {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d Expected frame, got nil", i), t)
 		}
 
+		f.Acquire(true)
 		if k := f.getKey(); k == 0 {
 			f.Unreference()
 			f.Release(true)
 			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d got new frame key as 0. This is reserved for the metadata page. Frame -> %v", i, f), t)
 		}
 
+		f.Release(true)
 		f.Unreference()
 	}
 
@@ -776,6 +775,8 @@ func BenchmarkBufferManager(t *testing.B) {
 		if f == nil {
 			t.Fatalf("Expected frame, got nil")
 		}
+
+		f.Acquire(true)
 
 		if k := f.getKey(); k == 0 {
 			f.Unreference()

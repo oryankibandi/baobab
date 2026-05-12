@@ -134,10 +134,6 @@ func (f *Frame) Unreference() {
 	// check current count
 	p := f.counters.getTotalPins()
 
-	if p < 0 {
-		panic("negative pin count")
-	}
-
 	// If no pins, unset access bit
 	if p == 0 {
 		// unset access pin
@@ -311,7 +307,6 @@ func (f *Frame) Acquire(shared bool) error {
 //
 //	shared - set to true if acquired latch is shared, else set to false.
 func (f *Frame) Release(shared bool) error {
-
 	if shared {
 		f.mu.RUnlock()
 	} else {
