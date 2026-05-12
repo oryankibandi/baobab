@@ -640,7 +640,7 @@ func TestNewFrameSequential(t *testing.T) {
 
 // TestZipfianDistribution Simulates Zipfian pattern.
 func TestZipfianDistribution(t *testing.T) {
-	iterationCount := 100000
+	iterationCount := 1000000
 	maxPages := 10000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)

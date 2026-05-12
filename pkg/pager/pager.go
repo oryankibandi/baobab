@@ -102,7 +102,7 @@ type PagerConfig struct {
 	WorkerSize   uint64
 }
 
-func (j *IOJob) executeJob(pgr *Pager, timer *time.Timer) {
+func (j *IOJob) executeJob(pgr *Pager) {
 	if pgr == nil {
 		panic("No pager provided")
 	}
@@ -119,20 +119,11 @@ func (j *IOJob) executeJob(pgr *Pager, timer *time.Timer) {
 			return
 		}
 
-		timer.Reset(time.Duration(NO_SYNC_WRITE_TIMEOUT_MILL) * time.Millisecond)
-		defer timer.Stop()
-
-		select {
-		case e := <-errChan:
-			if e != nil {
-				j.errCh <- e
-				return
-			}
-		case <-timer.C:
-			j.errCh <- PagerError{Message: fmt.Sprintf("timeout writing to page: %d", j.pageId)}
+		e := <-errChan
+		if e != nil {
+			j.errCh <- e
 			return
 		}
-
 	} else {
 		errChan := make(chan error)
 		err := pgr.dManager.ReadReq(j.buff, j.pageId*PAGE_SIZE_BYTES, errChan)
@@ -141,17 +132,9 @@ func (j *IOJob) executeJob(pgr *Pager, timer *time.Timer) {
 			return
 		}
 
-		timer.Reset(time.Duration(READ_PAGE_TIMEOUT_MILL) * time.Millisecond)
-		defer timer.Stop()
-
-		select {
-		case e := <-errChan:
-			if e != nil {
-				j.errCh <- e
-				return
-			}
-		case <-timer.C:
-			j.errCh <- PagerError{Message: "timeout reading page."}
+		e := <-errChan
+		if e != nil {
+			j.errCh <- e
 			return
 		}
 	}
@@ -459,14 +442,9 @@ func (w *workerpool) startWorkers(pgr *Pager, poolsize uint64) error {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			// create a reusable a timer
-			timer := time.NewTimer(time.Second)
-			if !timer.Stop() {
-				<-timer.C
-			}
 
 			for j := range w.jobQ {
-				(*j).executeJob(pgr, timer)
+				(*j).executeJob(pgr)
 				j = nil
 			}
 		}()
