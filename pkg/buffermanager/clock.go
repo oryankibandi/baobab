@@ -2,83 +2,60 @@ package buffermanager
 
 import (
 	"fmt"
-	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
+
+	"github.com/oryankibandi/baobab/internal/manual"
 )
 
 const (
 	// max number of times we loop the clock entries to find a suitable candidate
-	MAX_LOOP    = 25
+	// This gives us a chance to find slots that were given a second chance
+	// by the clock sweep algorithm
+	MAX_LOOP    = 2
 	MAX_RETRIES = 5
 )
 
+type clockentry struct {
+	entry Frame
+	// reference bit. Set when an item is accessed and unset by clock hand when
+	// looking for an item to evict
+	ref bool
+	// access bit. set when an entry is accessed(pinned) and unset during unpinning
+	// When the acc bit is set the reference bit cannot be unset.
+	// The clock hand will advance past an entry with it's access bit set
+	acc bool
+	// true if this frame is reserved for something like the metadata page
+	// This ensures the clock hand passes over this frame when looking for
+	// an eviction candidate
+	reserved bool
+
+	// if its allocated
+	isOccupied bool
+
+	// counters
+	pinCount   atomic.Uint64
+	unpinCount atomic.Uint64
+
+	segtype SegmentType
+
+	mu sync.RWMutex
+}
+
 type clock struct {
-	// entry that the clock hand points to
-	Head *Frame
+	// index clock hand points to
+	Head int
 	// reserved entry for metadata page
-	Reserved *Frame
+	Reserved *clockentry
 
 	// max number of items allowed in circular buffer
 	capacity uint64
 	mu       sync.RWMutex
 
 	// Pool of unassigned cache slots. Freed slots are also added here
-	bPool []*Frame
-}
-
-// advances the clock hand, finds a valid entry to evict and
-// clears the entry. Returns evicted entry and it's  key.
-// If no suitable entry is found after MAX_LOOP return nil entry
-// and -1 as evictedKey
-func (clk *clock) Evict(seg SegmentType) (evicted *Frame, evictedKey int) {
-	start := time.Now()
-	clk.mu.Lock()
-	defer clk.mu.Unlock()
-
-	for i := 0; i < int(clk.capacity)*MAX_LOOP; i++ {
-		// check if reserved
-		if clk.Head.isReserved() {
-			clk.Head = clk.Head.GetNextLink()
-			continue
-		}
-
-		if clk.Head.accessBitSet() {
-			// access bit set, advance clock hand
-			clk.Head = clk.Head.GetNextLink()
-			continue
-		}
-
-		if clk.Head.segType != seg {
-			clk.Head = clk.Head.GetNextLink()
-			continue
-		}
-
-		if clk.Head.refBitSet() {
-			// ref bit set, unset it
-			clk.Head.unsetRef()
-
-			clk.Head = clk.Head.GetNextLink()
-		} else {
-			// both access bit and reference bit unset, clear and evict
-			eKey := clk.Head.getKey()
-			// clk.Head.clear()
-			e := clk.Head
-			e.Clear()
-
-			// advance clock hand
-			clk.Head = clk.Head.GetNextLink()
-
-			end := time.Since(start)
-			slog.Info(fmt.Sprintf("Evicted in  %v", end))
-			return e, int(eKey)
-		}
-	}
-
-	end := time.Since(start)
-	slog.Info(fmt.Sprintf("Evict failed in %v", end))
-	// unable to find suitable entry. All entries referenced
-	return nil, -1
+	bPool []clockentry
 }
 
 // advances the clock hand, finds a valid entry.
@@ -90,115 +67,98 @@ func (clk *clock) Evict(seg SegmentType) (evicted *Frame, evictedKey int) {
 // Returns the entry without clearing the entry, or nil if none found.
 // Each returned candidate is referenced to prevent eviction by a different
 // goroutine.
-func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *Frame) {
+func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 	for j := range MAX_RETRIES {
-		start := time.Now()
+		// start := time.Now()
 		clk.mu.Lock()
+		clkCap := clk.capacity
 
-		for i := 0; i < int(clk.capacity)*MAX_LOOP; i++ {
+		for i := 0; i < int(clkCap)*MAX_LOOP; i++ {
 			// check if reserved
-			if clk.Head.isReserved() {
-				clk.Head = clk.Head.GetNextLink()
+			if clk.bPool[clk.Head].reserved {
+				clk.Head = (clk.Head + 1) % int(clkCap)
 				continue
 			}
 
-			if clk.Head.accessBitSet() {
+			if clk.bPool[clk.Head].acc {
 				// access bit set, advance clock hand
-				clk.Head = clk.Head.GetNextLink()
+				clk.Head = (clk.Head + 1) % int(clkCap)
 				continue
 			}
 
-			if clk.Head.segType != seg {
-				clk.Head = clk.Head.GetNextLink()
+			if clk.bPool[clk.Head].segtype != seg {
+				clk.Head = (clk.Head + 1) % int(clkCap)
 				continue
 			}
 
-			if clk.Head.refBitSet() {
+			if clk.bPool[clk.Head].ref {
 				// ref bit set, unset it
-				clk.Head.unsetRef()
+				clk.bPool[clk.Head].ref = false
 
-				clk.Head = clk.Head.GetNextLink()
+				clk.Head = (clk.Head + 1) % int(clkCap)
 				continue
 			} else {
 				// both access bit and reference bit unset
-				e := clk.Head
+				e := &clk.bPool[clk.Head]
 				// reference frame so it doesn't get evicted/accese d by other goroutines i.e. bgwriter
-				e.Reference()
+				e.ref = true
 
 				// advance clock hand
-				clk.Head = clk.Head.GetNextLink()
+				clk.Head = (clk.Head + 1) % int(clkCap)
 
-				end := time.Since(start)
-				slog.Info(fmt.Sprintf("Evicted page %d in %v", e.getKey(), end))
 				clk.mu.Unlock()
+				// end := time.Since(start)
+				// slog.Info(fmt.Sprintf("(%v) Evicted in %v in %d cycle(s).", seg, end, (i/int(clkCap))+1))
 				return e
 			}
 		}
 
 		clk.mu.Unlock()
-		end := time.Since(start)
+		// end := time.Since(start)
 		sleepDur := time.Millisecond * time.Duration((j+1)*10)
-		slog.Info(fmt.Sprintf("Evict failed in %v, retrying in %v..", end, sleepDur))
+		// slog.Info(fmt.Sprintf("Evict failed in %v, retrying in %v..", end, sleepDur))
 		time.Sleep(sleepDur)
 	}
 	// unable to find suitable entry. All entries referenced
 	return nil
 }
 
-// Retrieve an available entry. If no entry is available return nil.
-func (clk *clock) Pop() *Frame {
-	clk.mu.Lock()
-	defer clk.mu.Unlock()
-
-	if len(clk.bPool) == 0 {
-		fmt.Println("No item in buffer pool")
-		return nil
+// resets an entry after is has been evicted so it's ready
+// for the next user.
+func (clk *clock) clearEntry(e *clockentry) error {
+	if e == nil {
+		return BufferManagerError{Message: "clearentry: No entry provided"}
 	}
 
-	e := clk.bPool[len(clk.bPool)-1]
-	clk.bPool = append(clk.bPool[:len(clk.bPool)-1], []*Frame{}...)
-
-	return e
-}
-
-// Clears entry and adds it back to the pool.
-// Returns error if any.
-func (clk *clock) addToBpool(f *Frame) error {
-	if f == nil {
-		return BufferManagerError{Message: "Received nil frame to add to pool"}
-	}
-
-	if f.GetNextLink() == nil || f.GetPrevLink() == nil {
-		return BufferManagerError{Message: "Invalid frame"}
-	}
-
-	fmt.Println("(addtobpool) getting latch...")
-	clk.mu.Lock()
-	fmt.Println("(addtobpool) obtained latch...")
-	defer clk.mu.Unlock()
-
-	err := f.Clear()
+	err := e.entry.Clear()
 	if err != nil {
 		return err
 	}
 
-	clk.bPool = append(clk.bPool, f)
+	e.acc = false
+	e.ref = false
+	e.isOccupied = false
+
+	e.pinCount.Store(0)
+	e.unpinCount.Store(0)
+
+	e.segtype = unassigned
 
 	return nil
 }
 
 // Returns a reference to the frame at the current clock head. clock head changes
 // whenever clock hand progresses
-func (clk *clock) clockHead() *Frame {
+func (clk *clock) clockHead() *clockentry {
 	clk.mu.RLock()
 	defer clk.mu.RUnlock()
 
-	return clk.Head
+	return &clk.bPool[clk.Head]
 }
 
 // Returns a reference to the frame at the current clock head. clock head changes
 // whenever clock hand progresses
-func (clk *clock) getReserved() *Frame {
+func (clk *clock) getReserved() *clockentry {
 	clk.mu.RLock()
 	defer clk.mu.RUnlock()
 
@@ -216,24 +176,58 @@ func (clk *clock) close() error {
 	clk.mu.Lock()
 	defer clk.mu.Unlock()
 
-	var f *Frame
-
-	for range clk.capacity {
-		f = clk.Head
-		clk.Head = f.next
-
-		err := f.Clear()
-		if err != nil {
-			return err
-		}
-
-		err = FreeFrame(f)
-		if err != nil {
-			return err
-		}
-	}
+	manual.FreeMem(unsafe.Pointer(&clk.bPool[0]))
 
 	return nil
+}
+
+func (cEntry *clockentry) markOccupied() {
+	cEntry.isOccupied = true
+}
+
+func (cEntry *clockentry) markVacant() {
+	cEntry.isOccupied = false
+}
+
+func (cEntry *clockentry) updateSegment(seg SegmentType) {
+	cEntry.segtype = seg
+}
+
+func (cEntry *clockentry) reference() {
+	cEntry.mu.Lock()
+	defer cEntry.mu.Unlock()
+	cEntry.acc = true
+	cEntry.ref = true
+
+	cEntry.pinCount.Add(1)
+}
+
+func (cEntry *clockentry) unref() {
+	pinCount := cEntry.pinCount.Load()
+	unpinCount := cEntry.unpinCount.Load()
+
+	if pinCount == unpinCount {
+		return
+	}
+
+	cEntry.unpinCount.Add(1)
+
+	if pinCount-unpinCount == 1 {
+		cEntry.acc = false
+	}
+}
+
+func (cEntry *clockentry) isReferenced() bool {
+	cEntry.mu.RLock()
+	defer cEntry.mu.RUnlock()
+
+	return cEntry.acc
+}
+
+func (cEntry *clockentry) getSegType() SegmentType {
+	cEntry.mu.RLock()
+	defer cEntry.mu.RUnlock()
+	return cEntry.segtype
 }
 
 // Creates a clock buffer of size 'size`KB and
@@ -251,56 +245,21 @@ func NewClock(itemCount uint64) (*clock, error) {
 		capacity: itemCount,
 	}
 
-	var wg sync.WaitGroup
-	for range itemCount {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			e := NewFrame()
-			if e == nil {
-				panic("Unable to create entry")
-			}
-
-			clk.mu.Lock()
-			clk.bPool = append(clk.bPool, e)
-			clk.mu.Unlock()
-		}()
-	}
-	wg.Wait()
-
-	for i, ent := range clk.bPool {
-		if i == 0 {
-			// first item
-			ent.SetNextLink(clk.bPool[i+1])
-
-			ent.SetPrevLink(clk.bPool[itemCount-1])
-		} else if i == int(itemCount)-1 {
-			// last item
-			ent.SetPrevLink(clk.bPool[i-1])
-
-			ent.SetNextLink(clk.bPool[0])
-		} else {
-			ent.SetNextLink(clk.bPool[i+1])
-
-			ent.SetPrevLink(clk.bPool[i-1])
-		}
-	}
+	// allocate buffer space
+	p := manual.Alloc(uintptr(itemCount) * unsafe.Sizeof(clockentry{}))
+	firstItem := (*clockentry)(p)
+	clk.bPool = unsafe.Slice(firstItem, itemCount)
 
 	// set head at first item
-	clk.Head = clk.bPool[0]
+	clk.Head = 0
 
-	// reserve one frame
-	f := clk.Pop()
-	if f == nil {
+	// reserve one entry
+	e := clk.EvictWithoutClearing(unassigned)
+	if e == nil {
 		return nil, BufferManagerError{"Could not reserve metadata page frame"}
 	}
-	clk.Reserved = f
-	f.reserveFrame()
-
-	// ensure clock hand doesn't point to reserved frame
-	if f == clk.Head {
-		clk.Head = clk.Head.GetNextLink()
-	}
+	clk.Reserved = e
+	e.reserved = true
 
 	return clk, nil
 }

@@ -33,7 +33,7 @@ type CacheConfig struct {
 }
 
 type BufferManager struct {
-	CacheMap   map[uint32]*Frame
+	CacheMap   map[uint32]*clockentry
 	wTinyLfu   *WTinyLfu
 	rmu        sync.RWMutex
 	frameCount uint32
@@ -48,7 +48,7 @@ type BufferManager struct {
 }
 
 // Adds a page to cache, setting k as key. k is the unique page ID.
-func (c *BufferManager) put(k uint32, fr *Frame, dirty bool) (*Frame, error) {
+func (c *BufferManager) put(k uint32, en *clockentry, dirty bool) (*Frame, error) {
 	fmt.Println("cache.Put")
 	c.rmu.Lock()
 	fmt.Println("cache.put() acquired xclusive latch")
@@ -59,12 +59,16 @@ func (c *BufferManager) put(k uint32, fr *Frame, dirty bool) (*Frame, error) {
 		c.wTinyLfu.Increment(val)
 	}
 
-	c.CacheMap[k] = fr
+	c.CacheMap[k] = en
+	// inject methods
+	en.entry.Reference = en.reference
+	en.entry.Unreference = en.unref
+	en.entry.getSegType = en.getSegType
 
 	log.Println("Printing stats ....")
 	c.rmu.Unlock()
 	//go c.wTinyLfu.Stat()
-	return fr, nil
+	return &en.entry, nil
 }
 
 // 2. Retrieve item from cache
@@ -90,12 +94,12 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		c.wTinyLfu.Increment(val)
 		c.rmu.RUnlock()
 
-		val.Reference()
-		return val, nil
+		val.reference()
+		return &val.entry, nil
 	} else {
 		// get empty frame. this is where the page read from disk will be stored since memory is already allocated.
 		// if window cache is full, a frame will be evicted.
-		fr, evicted, err := c.wTinyLfu.getFreeFrame(c.pager)
+		en, evicted, err := c.wTinyLfu.getFreeFrame(c.pager)
 		if err != nil {
 			c.rmu.RUnlock()
 			return nil, err
@@ -117,16 +121,16 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		}
 
 		// acquire lock on frame before reading
-		err = fr.Acquire(false)
+		err = en.entry.Acquire(false)
 		if err != nil {
 			c.rmu.RUnlock()
 			return nil, err
 		}
-		defer fr.Release(false)
+		defer en.entry.Release(false)
 
 		// Retrieve buffer to read into
 		// fmt.Println("Item not found, reading from disk")
-		frBuff, _, err := fr.RawBufferSlice()
+		frBuff, _, err := en.entry.RawBufferSlice()
 		if err != nil {
 			c.rmu.RUnlock()
 			return nil, err
@@ -137,7 +141,7 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		if err != nil {
 			// fmt.Println("Error encountered, readding to pool...")
 			// readd frame to circular buffer pool
-			c.wTinyLfu.readdFrameToPool(fr)
+			c.wTinyLfu.readdFrameToPool(en)
 			c.rmu.RUnlock()
 			return nil, err
 		}
@@ -146,7 +150,7 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		if binary.LittleEndian.Uint32((*frBuff)[1:5]) != pageId {
 			// fmt.Println("Invalid pageId provided, readding to pool...")
 			// readd frame to circular buffer pool
-			c.wTinyLfu.readdFrameToPool(fr)
+			c.wTinyLfu.readdFrameToPool(en)
 			// fmt.Println("Readded to  pool successfully...")
 			c.rmu.RUnlock()
 			// fmt.Println("released lock")
@@ -154,13 +158,13 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		}
 
 		// set pageID from read page
-		err = c.pager.UpdatePageMeta(&fr.page, binary.LittleEndian.Uint32((*frBuff)[1:5]), helpers.BitIsSet(&((*frBuff)[0]), pager.IsInternal))
+		err = c.pager.UpdatePageMeta(&en.entry.page, binary.LittleEndian.Uint32((*frBuff)[1:5]), helpers.BitIsSet(&((*frBuff)[0]), pager.IsInternal))
 		if err != nil {
 			return nil, BufferManagerError{Message: err.Error()}
 		}
 
 		// update frame metadata with page data
-		err = fr.SetData(&fr.page)
+		err = en.entry.SetData(&en.entry.page)
 		if err != nil {
 			return nil, BufferManagerError{Message: err.Error()}
 		}
@@ -171,7 +175,7 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 		c.rmu.RUnlock()
 		// fmt.Println("read page from disk, adding to cache...")
 		// fmt.Printf("pageId: %d, Frame: %v\n", pageId, fr)
-		f, err := c.put(pageId, fr, false)
+		f, err := c.put(pageId, en, false)
 		if err != nil {
 			return nil, BufferManagerError{Message: "No item found"}
 		}
@@ -182,36 +186,36 @@ func (c *BufferManager) Get(pageId uint32) (*Frame, error) {
 }
 
 // Delete an item from cache. flush parameter is set to true if it's a direct request from client. If bgwriter, it is false since the page is already flushed.
-func (c *BufferManager) Delete(key uint32, flush bool) error {
-	c.rmu.Lock()
-	defer c.rmu.Unlock()
-	val, ok := c.CacheMap[key]
-	if !ok {
-		return BufferManagerError{Message: "No key in cache"}
-	}
-
-	if flush && val.isDirty() {
-		err := c.prepareForEviction(val)
-		fmt.Println("(Delete) prepared for eviction...")
-
-		if err != nil {
-			panic(err)
-		}
-
-		// delete from dirty page list
-		c.diryList.removePage(key)
-	}
-
-	delete(c.CacheMap, key)
-	c.freeFrames++
-
-	if c.frameCount > 0 {
-		c.frameCount++
-	}
-
-	fmt.Println("c.Delete() DONE>..")
-	return nil
-}
+// func (c *BufferManager) Delete(key uint32, flush bool) error {
+// 	c.rmu.Lock()
+// 	defer c.rmu.Unlock()
+// 	val, ok := c.CacheMap[key]
+// 	if !ok {
+// 		return BufferManagerError{Message: "No key in cache"}
+// 	}
+//
+// 	if flush && val.isDirty() {
+// 		err := c.prepareForEviction(val)
+// 		fmt.Println("(Delete) prepared for eviction...")
+//
+// 		if err != nil {
+// 			panic(err)
+// 		}
+//
+// 		// delete from dirty page list
+// 		c.diryList.removePage(key)
+// 	}
+//
+// 	delete(c.CacheMap, key)
+// 	c.freeFrames++
+//
+// 	if c.frameCount > 0 {
+// 		c.frameCount++
+// 	}
+//
+// 	fmt.Println("c.Delete() DONE>..")
+// 	return nil
+// }
 
 func (c *BufferManager) GetRootPageId() uint32 {
 	return c.pager.RootPage()
@@ -239,16 +243,17 @@ func (c *BufferManager) MarkFrameDirty(f *Frame) error {
 func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) {
 	fmt.Println("Creating new frame.....")
 	// retrieve frame from buffer manager
-	fr, evicted, err := c.wTinyLfu.getFreeFrame(c.pager)
+	en, evicted, err := c.wTinyLfu.getFreeFrame(c.pager)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Println("retrieved free frame....")
+	fr := &en.entry
 	// fr.Reference()
 	// defer fr.Unreference()
 	err = fr.Acquire(false)
 	if err != nil {
-		fr.Unreference()
+		en.unref()
 		return nil, err
 	}
 	defer fr.Release(false)
@@ -276,13 +281,13 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 	pgeId, err := c.pager.NewPage(setAsRoot, internal, frPge)
 	if err != nil {
 		fmt.Println("got error while initializing page...")
-		fr.Unreference()
+		en.unref()
 		return nil, err
 	}
 	fmt.Println("Initializing page, Done...")
 
 	if pgeId == 0 {
-		fr.Unreference()
+		en.unref()
 		// invalid state/wrong logic. Should never happen.
 		panic("Invalid frame ID 0")
 	}
@@ -291,7 +296,7 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 	fmt.Println("setting frame data...")
 	err = fr.SetData(frPge)
 	if err != nil {
-		fr.Unreference()
+		en.unref()
 		return nil, err
 	}
 	fmt.Println("setting frame data, Done...")
@@ -302,7 +307,7 @@ func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) 
 
 	// Add to buffer manager cache
 	log.Println("Adding new page to cache...")
-	_, err = c.put(uint32(pgeId), fr, true)
+	_, err = c.put(uint32(pgeId), en, true)
 	log.Printf("Added new page to cache. Page ID: %d\n", fr.getKey())
 	if err != nil {
 		return nil, err
@@ -370,19 +375,20 @@ func (c *BufferManager) FlushMetadata() error {
 	c.rmu.RLock()
 	defer c.rmu.RUnlock()
 
-	metaFrame := c.wTinyLfu.cBuffer.getReserved()
-	if metaFrame == nil {
+	metaEntry := c.wTinyLfu.cBuffer.getReserved()
+	if metaEntry == nil {
 		return BufferManagerError{Message: "No metadata frame available"}
 	}
 
+	metaFrame := &metaEntry.entry
 	err := metaFrame.Acquire(false)
 	if err != nil {
 		return err
 	}
 	defer metaFrame.Release(false)
 
-	metaFrame.Reference()
-	defer metaFrame.Unreference()
+	metaEntry.reference()
+	defer metaEntry.unref()
 
 	metaBuff, _, err := metaFrame.RawBufferSlice()
 	if err != nil {
@@ -407,11 +413,15 @@ func (c *BufferManager) Close() error {
 	}
 
 	if c.wTinyLfu != nil {
+		helpers.PrintInfoMsg("terminating wtinylfu...")
 		c.wTinyLfu.close()
+		helpers.PrintInfoMsg("terminated wtinylfu successfully.")
 	}
 
 	if c.pager != nil {
+		helpers.PrintInfoMsg("terminating pager...")
 		c.pager.Close()
+		helpers.PrintInfoMsg("pager terminated successfully.")
 	}
 
 	return nil
@@ -448,11 +458,12 @@ func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager) (
 
 	dList := NewDirtyPageList()
 
-	metadataFr := w.cBuffer.getReserved()
-	if metadataFr == nil {
+	metadataEntry := w.cBuffer.getReserved()
+	if metadataEntry == nil {
 		return nil, BufferManagerError{Message: "Unable to initialize metadata frame"}
 	}
-	metadataPage := metadataFr.GetPage()
+
+	metadataPage := metadataEntry.entry.GetPage()
 	if metadataPage == nil {
 		return nil, BufferManagerError{Message: "Unable to initialize metadata buffer."}
 	}
@@ -460,7 +471,7 @@ func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager) (
 	// exit channel
 	exChan := make(chan struct{})
 	n := BufferManager{
-		CacheMap: make(map[uint32]*Frame),
+		CacheMap: make(map[uint32]*clockentry),
 		wTinyLfu: w,
 		diryList: dList,
 		pager:    pgr,

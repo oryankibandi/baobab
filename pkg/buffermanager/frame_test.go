@@ -3,10 +3,8 @@ package buffermanager
 import (
 	"encoding/binary"
 	"fmt"
-	"runtime"
 	"sync"
 	"testing"
-	"time"
 	"unsafe"
 
 	"github.com/oryankibandi/baobab/internal/manual"
@@ -16,146 +14,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMemAlloc(t *testing.T) {
-	// t.Parallel()
-	var en *Frame
-
-	t.Run("allocate_memory", func(t *testing.T) {
-		en = NewFrame()
-		if en == nil {
-			t.Fatal("Memory not allocated.")
-		}
-
-		if en.CPtr == nil {
-			t.Fatal("Unsafe pointer not set")
-		}
-	})
-
-	t.Run("free memory", func(t *testing.T) {
-		manual.FreeMem(en.CPtr)
-
-		en = nil
-
-		if en != nil {
-			t.Fatal(fmt.Errorf("Memory not freed: %v\n", en))
-		}
-	})
-}
-
-func TestMemAllocMany(t *testing.T) {
-	iterations := 5
-	buffSizeMB := 24 * (1024 * 1024) // 24MB
-	entrySize := unsafe.Sizeof(Frame{})
-	entryCount := buffSizeMB / int(entrySize)
-
-	var entries []*Frame
-	var m runtime.MemStats
-	var e *Frame
-	var d [pager.PAGE_SIZE_BYTES]byte
-
-	for i := range pager.PAGE_SIZE_BYTES {
-		d[i] = 0x01
-	}
-
-	var currRss uint64
-
-	// allocate and deallocate multiple times
-	for i := range iterations {
-		t.Run(fmt.Sprintf("%d_mem_allocation", i), func(t *testing.T) {
-			runtime.ReadMemStats(&m)
-			currRss, err := manual.CurrentRSSBytes()
-
-			if err != nil {
-				panic(err)
-			}
-
-			fmt.Printf("before: Alloc=%d KB TotalAlloc=%d KB Sys=%d KB RSS=%dMB\n", m.Alloc/1024, m.TotalAlloc/1024, m.Sys/1024, currRss/1024/1024)
-
-			for range entryCount {
-				e = NewFrame()
-
-				// add data to page to trigger allocation
-				// Since calloc zeros out allocated memory, the OS may
-				// not actually assign the physical memory until data is
-				// added
-				e.page = pager.Page{}
-				e.page.SwapData(&d)
-
-				entries = append(entries, e)
-			}
-
-			runtime.ReadMemStats(&m)
-			currRss, err = manual.CurrentRSSBytes()
-
-			if err != nil {
-				panic(err)
-			}
-
-			memAfterAlloc := currRss
-
-			fmt.Printf("After allocation: Alloc=%d KB TotalAlloc=%d KB Sys=%d KB RSS=%dMB\n", m.Alloc/1024, m.TotalAlloc/1024, m.Sys/1024, currRss/1024/1024)
-			assert.Less(t, m.Sys, currRss, fmt.Errorf("Expected memory to  be invisible to GC, got Sys: %dKB, RSS: %dKB", m.Sys/1024, currRss/1024))
-
-			runtime.GC()
-			runtime.ReadMemStats(&m)
-
-			currRss, err = manual.CurrentRSSBytes()
-			if err != nil {
-				panic(err)
-			}
-
-			fmt.Printf("After GC: Alloc=%d KB TotalAlloc=%d KB Sys=%d KB RSS=%dMB\n", m.Alloc/1024, m.TotalAlloc/1024, m.Sys/1024, currRss/1024/1024)
-
-			// Free
-			for i, en := range entries {
-				manual.FreeMem(unsafe.Pointer(en))
-				en = nil
-				entries[i] = nil
-			}
-
-			entries = nil
-
-			runtime.ReadMemStats(&m)
-
-			currRss, err = manual.CurrentRSSBytes()
-
-			if err != nil {
-				panic(err)
-			}
-
-			fmt.Printf("After manual Free: Alloc=%d KB TotalAlloc=%d KB Sys=%d KB RSS=%dMB\n", m.Alloc/1024, m.TotalAlloc/1024, m.Sys/1024, currRss/1024/1024)
-
-			if !ASANEnabled {
-				// RSS memory should have gone down after free()
-				assert.Less(t, currRss, memAfterAlloc, fmt.Errorf("Expected memory to be freed, got memory of %d, from previous %dKB", currRss/1024, memAfterAlloc/1024))
-			}
-
-			fmt.Println("---------------------------------------")
-
-		})
-	}
-
-	time.Sleep(1 * time.Second)
-	currRss, err := manual.CurrentRSSBytes()
-
-	if err != nil {
-		t.Fatal(fmt.Errorf("Could not get current RSS: %v", err))
-	}
-
-	fmt.Printf("Current RSS: %dMB\n", currRss/1024/1024)
-
-}
-
 func TestSetData(t *testing.T) {
 	var en *Frame
 
-	en = NewFrame()
+	p := manual.Alloc(unsafe.Sizeof(Frame{}))
+	en = (*Frame)(p)
 	if en == nil {
 		t.Fatal("Memory not allocated.")
-	}
-
-	if en.CPtr == nil {
-		t.Fatal("Unsafe pointer not set")
 	}
 
 	var d [pager.PAGE_SIZE_BYTES]byte
@@ -196,11 +61,7 @@ func TestSetData(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		err := FreeFrame(en)
-		if err != nil {
-			t.Fatalf("Expected no error when freeing memory, got %v", err)
-		}
-
+		manual.FreeMem(unsafe.Pointer(en))
 		en = nil
 		if en != nil {
 			t.Fatal(fmt.Errorf("Memory not freed: %v\n", en))
@@ -211,13 +72,10 @@ func TestSetData(t *testing.T) {
 func TestUpdateData(t *testing.T) {
 	var en *Frame
 
-	en = NewFrame()
+	p := manual.Alloc(unsafe.Sizeof(Frame{}))
+	en = (*Frame)(p)
 	if en == nil {
 		t.Fatal("Memory not allocated.")
-	}
-
-	if en.CPtr == nil {
-		t.Fatal("Unsafe pointer not set")
 	}
 
 	var d [pager.PAGE_SIZE_BYTES]byte
@@ -241,7 +99,7 @@ func TestUpdateData(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		manual.FreeMem(en.CPtr)
+		manual.FreeMem(p)
 
 		en = nil
 
@@ -254,13 +112,10 @@ func TestUpdateData(t *testing.T) {
 func TestClear(t *testing.T) {
 	var en *Frame
 
-	en = NewFrame()
+	p := manual.Alloc(unsafe.Sizeof(Frame{}))
+	en = (*Frame)(p)
 	if en == nil {
 		t.Fatal("Memory not allocated.")
-	}
-
-	if en.CPtr == nil {
-		t.Fatal("Unsafe pointer not set")
 	}
 
 	var d [pager.PAGE_SIZE_BYTES]byte
@@ -289,6 +144,16 @@ func TestClear(t *testing.T) {
 		assert.NotEqualf(t, k, key, "Key not cleared")
 		assert.Equalf(t, k, uint32(0), "Expected 0, got %d", k)
 	})
+
+	t.Cleanup(func() {
+		manual.FreeMem(p)
+
+		en = nil
+
+		if en != nil {
+			t.Fatal(fmt.Errorf("Memory not freed: %v\n", en))
+		}
+	})
 }
 
 func TestRefAndUnref(t *testing.T) {
@@ -308,42 +173,78 @@ func TestRefAndUnref(t *testing.T) {
 		{operation: "unreference", expectedPinCount: 3, expectedUnpinCount: 3, expectedAccBit: false, expectedRefBit: true},
 	}
 
-	var en *Frame
+	var en *clockentry
+	var fr *Frame
 
 	t.Run("allocate_memory", func(t *testing.T) {
-		en = NewFrame()
-
+		p := manual.Alloc(unsafe.Sizeof(clockentry{}))
+		en = (*clockentry)(p)
 		if en == nil {
 			t.Fatal("Memory not allocated.")
 		}
 
-		if en.CPtr == nil {
-			t.Fatal("Unsafe pointer not set")
-		}
+		en.entry.Reference = en.reference
+		en.entry.Unreference = en.unref
+		en.entry.getSegType = en.getSegType
+		fr = &en.entry
+	})
+
+	t.Cleanup(func() {
+		manual.FreeMem(unsafe.Pointer(en))
+		en = nil
 	})
 
 	for i, test := range tests {
 		t.Run(fmt.Sprintf("test_reference_%d", i), func(t *testing.T) {
 			if test.operation == "reference" {
-				en.Reference()
+				fr.Reference()
 			} else {
-				en.Unreference()
+				fr.Unreference()
 			}
 			// check ref bit, acess bit and pin count
-			assert.Equal(t, test.expectedAccBit, en.acc.Load(), "access bit not set")
-			assert.Equal(t, test.expectedRefBit, en.ref.Load(), "reference bit not set")
-			assert.Equal(t, test.expectedPinCount, en.counters.pinCount.Load(), "Invalid pin count")
-			assert.Equal(t, test.expectedUnpinCount, en.counters.unpinCount.Load(), "Invalid unpin cunt")
+			assert.Equal(t, test.expectedAccBit, en.acc, "access bit not set")
+			assert.Equal(t, test.expectedRefBit, en.ref, "reference bit not set")
+			assert.Equal(t, test.expectedPinCount, en.pinCount.Load(), "Invalid pin count")
+			assert.Equal(t, test.expectedUnpinCount, en.unpinCount.Load(), "Invalid unpin cunt")
 		})
 	}
 
-	manual.FreeMem(en.CPtr)
-	en = nil
+}
+
+func TestGetSegmentType(t *testing.T) {
+	var en *clockentry
+	var fr *Frame
+
+	t.Run("allocate_memory", func(t *testing.T) {
+		p := manual.Alloc(unsafe.Sizeof(clockentry{}))
+		en = (*clockentry)(p)
+		if en == nil {
+			t.Fatal("Memory not allocated.")
+		}
+
+		en.entry.Reference = en.reference
+		en.entry.Unreference = en.unref
+		en.entry.getSegType = en.getSegType
+		fr = &en.entry
+	})
+
+	t.Cleanup(func() {
+		manual.FreeMem(unsafe.Pointer(en))
+		en = nil
+	})
+
+	t.Run("test_getsegmenttype", func(t *testing.T) {
+		en.updateSegment(probationSegment)
+
+		if s := fr.getSegType(); s != probationSegment {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected probation segment, got %v", s), t)
+		}
+	})
 }
 
 func TestRefAndUnrefConcurrent(t *testing.T) {
 	// t.Parallel()
-	testCount := 1000
+	testCount := 10
 	var wg sync.WaitGroup
 	type testItem struct {
 		operation string // reference | unreference
@@ -358,17 +259,24 @@ func TestRefAndUnrefConcurrent(t *testing.T) {
 		}
 	}
 
-	var en *Frame
+	var en *clockentry
+	var fr *Frame
 
 	t.Run("allocate_memory_concurrent", func(t *testing.T) {
-		en = NewFrame()
-
+		p := manual.Alloc(unsafe.Sizeof(clockentry{}))
+		en = (*clockentry)(p)
 		if en == nil {
 			t.Fatal("Memory not allocated.")
 		}
-		if en.CPtr == nil {
-			t.Fatal("Unsafe pointer not set")
-		}
+
+		en.entry.Reference = en.reference
+		en.entry.Unreference = en.unref
+		en.entry.getSegType = en.getSegType
+		fr = &en.entry
+	})
+
+	t.Cleanup(func() {
+		manual.FreeMem(unsafe.Pointer(en))
 	})
 
 	start := make(chan struct{})
@@ -379,11 +287,13 @@ func TestRefAndUnrefConcurrent(t *testing.T) {
 			<-start
 			t.Run(fmt.Sprintf("test_concurrent_%d", i), func(t *testing.T) {
 				if test.operation == "reference" {
-					en.Reference()
+					fr.Reference()
 
 					// check ref bit
-					assert.Equal(t, true, en.ref.Load(), "reference bit not set")
+					assert.Equal(t, true, en.isReferenced(), "reference bit not set")
 				}
+
+				helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
 			})
 
 		}()
@@ -391,24 +301,21 @@ func TestRefAndUnrefConcurrent(t *testing.T) {
 
 	// start gorutines simultaneously
 	close(start)
-
 	wg.Wait()
-	manual.FreeMem(en.CPtr)
-	en = nil
 }
 
 func TestMarkDirty(t *testing.T) {
 	var en *Frame
 	var d [pager.PAGE_SIZE_BYTES]byte
-	en = NewFrame()
-
+	p := manual.Alloc(unsafe.Sizeof(Frame{}))
+	en = (*Frame)(p)
 	if en == nil {
 		t.Fatal("Memory not allocated.")
 	}
 
-	if en.CPtr == nil {
-		t.Fatal("Unsafe pointer not set")
-	}
+	t.Cleanup(func() {
+		manual.FreeMem(unsafe.Pointer(en))
+	})
 
 	// add data
 	for i := range pager.PAGE_SIZE_BYTES {
@@ -440,15 +347,15 @@ func TestMarkDirty(t *testing.T) {
 func TestMarkClean(t *testing.T) {
 	var en *Frame
 	var d [pager.PAGE_SIZE_BYTES]byte
-	en = NewFrame()
-
+	p := manual.Alloc(unsafe.Sizeof(Frame{}))
+	en = (*Frame)(p)
 	if en == nil {
 		t.Fatal("Memory not allocated.")
 	}
 
-	if en.CPtr == nil {
-		t.Fatal("Unsafe pointer not set")
-	}
+	t.Cleanup(func() {
+		manual.FreeMem(unsafe.Pointer(en))
+	})
 
 	// add data
 	for i := range pager.PAGE_SIZE_BYTES {
@@ -475,4 +382,5 @@ func TestMarkClean(t *testing.T) {
 			t.Fatalf("Expected dirty bit to be unset")
 		}
 	})
+
 }

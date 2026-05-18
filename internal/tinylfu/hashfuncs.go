@@ -48,7 +48,7 @@ func DoubleHashIndices(h Hasher, data []byte, k int, m uint64) []uint64 {
 		h2++
 	}
 
-	for i := 0; i < k; i++ {
+	for i := range k {
 		// use modulo m (bucket count)
 		indices[i] = (h1 + uint64(i)*h2) % m
 	}

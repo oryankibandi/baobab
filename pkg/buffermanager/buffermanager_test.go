@@ -233,9 +233,10 @@ func TestMarkFrameDirty(t *testing.T) {
 	defer cache.Close()
 
 	t.Run("test_markframedirty", func(t *testing.T) {
-		f := NewFrame()
+		p := manual.Alloc(unsafe.Sizeof(Frame{}))
+		f := (*Frame)(p)
 		if f == nil {
-			helpers.PrintTestErrorMsg("Expected frame, got nil", t)
+			t.Fatal("Memory not allocated.")
 		}
 
 		f.Acquire(false)
@@ -244,7 +245,7 @@ func TestMarkFrameDirty(t *testing.T) {
 			helpers.PrintTestErrorMsg("Expected new  frame to be clean, new frame was marked as dirty", t)
 		}
 
-		defer manual.FreeMem(f.CPtr)
+		defer manual.FreeMem(unsafe.Pointer(f))
 
 		err = cache.MarkFrameDirty(f)
 		if err != nil {
@@ -310,11 +311,6 @@ func TestPutGet(t *testing.T) {
 
 		if fr == nil {
 			helpers.PrintTestErrorMsg("expected frame, got nil", t)
-		}
-
-		_, err = buffManager.put(frKey, fr, false)
-		if err != nil {
-			helpers.PrintTestErrorMsg(fmt.Sprintf("expected no error, got %s", err), t)
 		}
 
 		evictCandidate, err = buffManager.Get(frKey)
@@ -705,6 +701,7 @@ func TestZipfianDistribution(t *testing.T) {
 		pageId = z.GetNext()
 		st = time.Now()
 		f, err := buffManager.Get(uint32(pageId))
+		totTime += time.Since(st)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Could not retrieve frame: %s", i, err.Error()), t)
 		}
@@ -721,14 +718,208 @@ func TestZipfianDistribution(t *testing.T) {
 		}
 		f.Release(true)
 		f.Unreference()
-		totTime += time.Since(st)
 
 		helpers.PrintSuccessMsg(fmt.Sprintf("test_zipfian_%d success.", i))
 	}
 
 	helpers.PrintSuccessMsg("--------------------------------------")
+	helpers.PrintSuccessMsg("	  ZIPFIAN DISTRIBUTION  	")
 	helpers.PrintSuccessMsg(fmt.Sprintf("Total time: %v", totTime))
 	helpers.PrintSuccessMsg(fmt.Sprintf("Average GET req time: %v", totTime/time.Duration(iterationCount)))
+	helpers.PrintSuccessMsg(fmt.Sprintf("%d Op/sec", iterationCount/int(totTime.Seconds())))
+	helpers.PrintSuccessMsg("--------------------------------------")
+}
+
+func TestRandomDistribution(t *testing.T) {
+	iterationCount := 1000000
+	maxPages := 100000
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pgr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := CacheConfig{
+		CacheSize: 128 * 1024, // 48MB
+	}
+
+	buffManager, err := NewBufferManager(cConfig, w, pgr)
+	if err != nil {
+		pgr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pgr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	// create new frames. Page IDs are assigned monotonically
+	for i := range maxPages {
+		f, err := buffManager.NewFrame(false, false)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d unable to create new frames: %s", i, err.Error()), t)
+		}
+
+		if f == nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d Expected frame, got nil", i), t)
+		}
+
+		f.Acquire(true)
+		if k := f.getKey(); k == 0 {
+			f.Unreference()
+			f.Release(true)
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d got new frame key as 0. This is reserved for the metadata page. Frame -> %v", i, f), t)
+		}
+
+		f.Release(true)
+		f.Unreference()
+	}
+
+	// test zipfian
+	var pageId uint64
+	var totTime time.Duration
+	var st time.Time
+
+	for i := range iterationCount {
+		pageId = uint64(helpers.RandomNumber(uint32(maxPages)))
+		st = time.Now()
+		f, err := buffManager.Get(uint32(pageId))
+		totTime += time.Since(st)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Could not retrieve frame: %s", i, err.Error()), t)
+		}
+
+		if f == nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Expected frame, got nil", i), t)
+		}
+
+		f.Acquire(true)
+		if k := f.getKey(); pageId != uint64(k) {
+			f.Release(true)
+			f.Unreference()
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Expected retrieved frame to have key: %d, got %d instead", i, pageId, k), t)
+		}
+		f.Release(true)
+		f.Unreference()
+
+		helpers.PrintSuccessMsg(fmt.Sprintf("test_zipfian_%d success.", i))
+	}
+
+	helpers.PrintSuccessMsg("--------------------------------------")
+	helpers.PrintSuccessMsg("	   RANDOM DISTRIBUTION  	")
+	helpers.PrintSuccessMsg(fmt.Sprintf("Total time: %v", totTime))
+	helpers.PrintSuccessMsg(fmt.Sprintf("Average GET req time: %v", totTime/time.Duration(iterationCount)))
+	helpers.PrintSuccessMsg(fmt.Sprintf("%d Op/sec", iterationCount/int(totTime.Seconds())))
+	helpers.PrintSuccessMsg("--------------------------------------")
+}
+
+func TestSequentialDistribution(t *testing.T) {
+	iterationCount := 1000000
+	maxPages := 100000
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pgr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := CacheConfig{
+		CacheSize: 128 * 1024, // 48MB
+	}
+
+	buffManager, err := NewBufferManager(cConfig, w, pgr)
+	if err != nil {
+		pgr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pgr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	// create new frames. Page IDs are assigned monotonically
+	for i := range maxPages {
+		f, err := buffManager.NewFrame(false, false)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d unable to create new frames: %s", i, err.Error()), t)
+		}
+
+		if f == nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d Expected frame, got nil", i), t)
+		}
+
+		f.Acquire(true)
+		if k := f.getKey(); k == 0 {
+			f.Unreference()
+			f.Release(true)
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_new_frame_%d got new frame key as 0. This is reserved for the metadata page. Frame -> %v", i, f), t)
+		}
+
+		f.Release(true)
+		f.Unreference()
+	}
+
+	// test zipfian
+	var pageId uint64
+	var totTime time.Duration
+	var st time.Time
+
+	pageId = 0
+	for i := range iterationCount {
+		pageId += 1
+		st = time.Now()
+		f, err := buffManager.Get(uint32(pageId))
+		totTime += time.Since(st)
+		if err != nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Could not retrieve frame: %s", i, err.Error()), t)
+		}
+
+		if f == nil {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Expected frame, got nil", i), t)
+		}
+
+		f.Acquire(true)
+		if k := f.getKey(); pageId != uint64(k) {
+			f.Release(true)
+			f.Unreference()
+			helpers.PrintTestErrorMsg(fmt.Sprintf("test_zipfian_%d Expected retrieved frame to have key: %d, got %d instead", i, pageId, k), t)
+		}
+		f.Release(true)
+		f.Unreference()
+
+		if pageId == uint64(maxPages) {
+			pageId = 0
+		}
+
+		helpers.PrintSuccessMsg(fmt.Sprintf("test_zipfian_%d success.", i))
+	}
+
+	helpers.PrintSuccessMsg("--------------------------------------")
+	helpers.PrintSuccessMsg("	  SEQUENTIAL DISTRIBUTION  	")
+	helpers.PrintSuccessMsg(fmt.Sprintf("Total time: %v", totTime))
+	helpers.PrintSuccessMsg(fmt.Sprintf("Average GET req time: %v", totTime/time.Duration(iterationCount)))
+	helpers.PrintSuccessMsg(fmt.Sprintf("%d Op/sec", iterationCount/int(totTime.Seconds())))
 	helpers.PrintSuccessMsg("--------------------------------------")
 }
 
@@ -784,6 +975,7 @@ func BenchmarkBufferManager(t *testing.B) {
 			t.Fatalf("got new frame key as 0. This is reserved for the metadata page.")
 		}
 
+		f.Release(true)
 		f.Unreference()
 	}
 

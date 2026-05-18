@@ -45,31 +45,31 @@ type WTinyLfu struct {
 }
 
 type paddedFramePtr struct {
-	fr *Frame
+	en *clockentry
 	_  [56]byte
 }
 
 // Increments count of an item in TinyLFU.
 // If item is in probation, it is promoted to protected. If any cache is full one of it's items is evicted.
 // Returns true if operation is successful, else false and the error
-func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
-	if f == nil {
-		panic("(Increment) frame is required")
+func (w *WTinyLfu) Increment(en *clockentry) (bool, error) {
+	if en == nil {
+		panic("(Increment) clockentry is required")
 	}
 
-	cType := f.getSegType()
+	cType := en.getSegType()
 	if cType == probationSegment {
 		// promote to protected.
-		err := w.promoteToProtected(f)
+		err := w.promoteToProtected(en)
 		if err != nil {
 			return false, err
 		}
 	} else if cType == unassigned {
 		// new item, set as window item
-		f.updateSegment(windowSegment)
+		en.updateSegment(windowSegment)
 	}
 
-	k := f.getKey()
+	k := en.entry.getKey()
 
 	go func(key []byte) {
 		err := w.tinyFilter.IncrementItem(key)
@@ -83,13 +83,13 @@ func (w *WTinyLfu) Increment(f *Frame) (bool, error) {
 }
 
 // Promotes an item from probation to protected
-func (w *WTinyLfu) promoteToProtected(f *Frame) error {
-	fmt.Println("(promoteToProtected)")
-	if f == nil {
-		return BufferManagerError{Message: "frame to promote no provided"}
+func (w *WTinyLfu) promoteToProtected(entry *clockentry) error {
+	// fmt.Println("(promoteToProtected)")
+	if entry == nil {
+		return BufferManagerError{Message: "entry to promote no provided"}
 	}
 
-	cType := f.getSegType()
+	cType := entry.segtype
 
 	if cType != probationSegment {
 		return WTinyLFUError{Message: "(promoteToProtected) Only frames in probation LRU can be promoted to protected LRU."}
@@ -98,7 +98,7 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 	w.mu.Lock()
 	if w.protectedCount < w.protectedCapacity {
 		// protected segment not full
-		f.updateSegment(protectedSegment)
+		entry.updateSegment(protectedSegment)
 		w.probationCount--
 		w.protectedCount++
 		w.mu.Unlock()
@@ -109,10 +109,10 @@ func (w *WTinyLfu) promoteToProtected(f *Frame) error {
 		if protectedVictim == nil {
 			return BufferManagerError{Message: "Could not find eligible victim."}
 		}
-		defer protectedVictim.Unreference()
+		defer protectedVictim.unref()
 
 		protectedVictim.updateSegment(probationSegment)
-		f.updateSegment(protectedSegment)
+		entry.updateSegment(protectedSegment)
 	}
 
 	return nil
@@ -126,86 +126,87 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		panic("probation items surpassed allowed max")
 	}
 
+	if w.windowCount < w.windowCapacity {
+		return nil, WTinyLFUError{Message: "Window cache is not full"}
+	}
+
 	// use padded struct to prevent false sharing
 	windVictim := paddedFramePtr{}
 	probationVictim := paddedFramePtr{}
 
 	probationFull := w.probationCount >= w.probationCapacity
-	if w.windowCount < w.windowCapacity {
-		return nil, WTinyLFUError{Message: "Window cache is not full"}
-	}
 
 	if probationFull {
 		w.wg.Add(2)
-		go func(e **Frame) {
+		go func(e **clockentry) {
 			*e = w.cBuffer.EvictWithoutClearing(windowSegment)
 			w.wg.Done()
-		}(&(windVictim.fr))
+		}(&(windVictim.en))
 
-		go func(e **Frame) {
+		go func(e **clockentry) {
 			*e = w.cBuffer.EvictWithoutClearing(probationSegment)
 			w.wg.Done()
-		}(&(probationVictim.fr))
+		}(&(probationVictim.en))
 
 		w.wg.Wait()
 	} else {
 		// item can be moved to probation segment without evicting probation
-		windVictim.fr = w.cBuffer.EvictWithoutClearing(windowSegment)
-		if windVictim.fr == nil {
+		windVictim.en = w.cBuffer.EvictWithoutClearing(windowSegment)
+		if windVictim.en == nil {
 			return nil, BufferManagerError{Message: "Unable to find window victim(all frames in use)."}
 		}
 
-		windVictim.fr.updateSegment(probationSegment)
+		windVictim.en.updateSegment(probationSegment)
 		w.probationCount++
 		w.windowCount--
 
-		windVictim.fr.Unreference()
+		windVictim.en.unref()
 
 		// unref
-		windVictim.fr = nil
+		windVictim.en = nil
 		return nil, nil
 	}
 
-	if windVictim.fr == nil {
-		if probationVictim.fr != nil {
-			probationVictim.fr.Unreference()
+	if windVictim.en == nil {
+		if probationVictim.en != nil {
+			probationVictim.en.unref()
 
-			probationVictim.fr = nil
+			probationVictim.en = nil
 		}
 		return nil, BufferManagerError{Message: "(probation full) Could not find window victim(all frames in use)."}
 	}
 
-	if probationVictim.fr == nil {
-		if windVictim.fr != nil {
-			windVictim.fr.Unreference()
+	if probationVictim.en == nil {
+		if windVictim.en != nil {
+			windVictim.en.unref()
 
-			windVictim.fr = nil
+			windVictim.en = nil
 		}
 		return nil, BufferManagerError{Message: "Unable to find probation victim(all frames in use)."}
 	}
 
 	// compare counts of window victim and main cache victim
-	windKey := windVictim.fr.getKey()
+	windKey := windVictim.en.entry.getKey()
 	windCount, err := w.tinyFilter.CheckItemCount(toBytes(windKey))
 	if err != nil {
-		windVictim.fr.Unreference()
-		probationVictim.fr.Unreference()
+		windVictim.en.unref()
+		probationVictim.en.unref()
 
 		//unref
-		windVictim.fr = nil
-		probationVictim.fr = nil
+		windVictim.en = nil
+		probationVictim.en = nil
 		return nil, err
 	}
 
-	mainKey := probationVictim.fr.getKey()
+	mainKey := probationVictim.en.entry.getKey()
 	mainCacheCount, err := w.tinyFilter.CheckItemCount(toBytes(mainKey))
 	if err != nil {
-		windVictim.fr.Unreference()
-		probationVictim.fr.Unreference()
+		windVictim.en.unref()
+		probationVictim.en.unref()
 
 		//unref
-		windVictim.fr = nil
-		probationVictim.fr = nil
+		windVictim.en = nil
+		probationVictim.en = nil
 		return nil, err
 	}
 
@@ -216,7 +217,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		delKeys = append(delKeys, mainKey)
 
 		// flush main cache victim
-		buff, err := probationVictim.fr.ByteData()
+		buff, err := probationVictim.en.entry.ByteData()
 		if err != nil {
 			panic("No byte data associated with frame")
 		}
@@ -226,25 +227,25 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		err = pgr.WritePage(mainKey, &frSlice)
 		if err != nil {
 			//unref
-			windVictim.fr = nil
-			probationVictim.fr = nil
+			windVictim.en = nil
+			probationVictim.en = nil
 			return nil, err
 		}
 		helpers.PrintInfoMsg(fmt.Sprintf("Flushed page %d to be evicted from probation.", mainKey))
 
 		// Add window victim to probation and readd main cache victim to pool
-		err = w.cBuffer.addToBpool(probationVictim.fr)
+		err = w.cBuffer.clearEntry(probationVictim.en)
 		if err != nil {
 			panic(err)
 		}
 
-		windVictim.fr.updateSegment(probationSegment)
-		windVictim.fr.Unreference()
+		windVictim.en.updateSegment(probationSegment)
+		windVictim.en.unref()
 		w.windowCount--
 	} else {
 		delKeys = append(delKeys, windKey)
 		// flush window cache victim
-		buff, err := windVictim.fr.ByteData()
+		buff, err := windVictim.en.entry.ByteData()
 		if err != nil {
 			panic("No byte data associated with frame")
 		}
@@ -254,24 +255,24 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 		err = pgr.WritePage(windKey, &frSlice)
 		if err != nil {
 			//unref
-			windVictim.fr = nil
-			probationVictim.fr = nil
+			windVictim.en = nil
+			probationVictim.en = nil
 			return nil, err
 		}
 		helpers.PrintInfoMsg("Flushed page to be evicted.")
 
-		err = w.cBuffer.addToBpool(windVictim.fr)
+		err = w.cBuffer.clearEntry(windVictim.en)
 		if err != nil {
 			panic(err)
 		}
 
 		w.windowCount--
-		probationVictim.fr.Unreference()
+		probationVictim.en.unref()
 	}
 
 	//unref
-	windVictim.fr = nil
-	probationVictim.fr = nil
+	windVictim.en = nil
+	probationVictim.en = nil
 
 	return delKeys, nil
 }
@@ -282,7 +283,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 // Parameters:
 //
 //	pgr - pager instance required to flush any frames that may be evicted
-func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *Frame, evicted []uint32, e error) {
+func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *clockentry, evicted []uint32, e error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// check if window is full
@@ -295,6 +296,7 @@ func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *Frame, evicted []uint32, 
 	}
 
 	if w.windowCount == w.windowCapacity {
+		fmt.Println("WINDOW  CACHE FULL...")
 		keysToEvict, err = w.evictWindow(pgr)
 		if err != nil {
 			return nil, nil, err
@@ -302,22 +304,22 @@ func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *Frame, evicted []uint32, 
 	}
 
 	// Get empty frame from cbuffer
-	f := w.cBuffer.Pop()
-	if f == nil {
+	en := w.cBuffer.EvictWithoutClearing(unassigned)
+	if en == nil {
 		return nil, nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
 	}
 
-	f.updateSegment(windowSegment)
+	en.updateSegment(windowSegment)
 	w.windowCount++
-	f.Reference()
+	en.reference()
 
-	return f, keysToEvict, nil
+	return en, keysToEvict, nil
 }
 
 // readdFrameToPool  re-adds a frame to bpool after clearing its content first.
 // Returns error if any
-func (w *WTinyLfu) readdFrameToPool(fr *Frame) error {
-	err := w.cBuffer.addToBpool(fr)
+func (w *WTinyLfu) readdFrameToPool(entry *clockentry) error {
+	err := w.cBuffer.clearEntry(entry)
 	if err != nil {
 		fmt.Println(helpers.BOLDRED + err.Error() + helpers.RESET)
 	}
@@ -350,7 +352,7 @@ func (w *WTinyLfu) getProtectedCount() uint64 {
 }
 
 func (w *WTinyLfu) getMetadataPage() *Frame {
-	return w.cBuffer.getReserved()
+	return &w.cBuffer.getReserved().entry
 }
 
 // List metadata i.e no. of items in all segments
@@ -379,7 +381,6 @@ func (w *WTinyLfu) close() {
 // Creates new instance  of W-TinyLFU.
 // windowSize and mainCacheSize represents the number of frames for each segment
 func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
-	helpers.PrintInfoMsg(fmt.Sprintf("(NewWTinylfu) windSize: %d\tMainSize: %d", windowSize, mainCacheSize))
 	if windowSize <= 0 {
 		return nil, WTinyLFUError{Message: "Window size must be greater than 0"}
 	}
@@ -389,7 +390,7 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	}
 
 	if windowSize >= mainCacheSize {
-		return nil, WTinyLFUError{Message: "Window size is greater than man cache size."}
+		return nil, WTinyLFUError{Message: "Window size is greater than main cache size."}
 	}
 
 	probationCap := uint64(math.Round(float64(mainCacheSize) * MAIN_CACHE_RATIO))

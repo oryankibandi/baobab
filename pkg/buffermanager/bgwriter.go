@@ -30,9 +30,10 @@ type BgWriter struct {
 	pgr          *pager.Pager
 
 	// Head of the clock buffer
-	clockBuffer *clock
-	mu          sync.Mutex
-	wg          sync.WaitGroup
+	clockBuffer   *clock
+	clockCapacity uint64
+	mu            sync.Mutex
+	wg            sync.WaitGroup
 	// exit channel
 	exitchan *chan struct{}
 }
@@ -44,39 +45,33 @@ func (bw *BgWriter) Start(wg *sync.WaitGroup) {
 	go bw.watchFreeList(bw.exitchan, wg)
 
 	var currFrame *Frame
+	var currEntry *clockentry
 	var nextFrame *Frame
 	var currFrameBuff *[]byte
 
-	clockCount := bw.clockBuffer.getCap()
-	currFrame = bw.clockBuffer.clockHead()
-
 BgWriterLoop:
 	for {
-		for range clockCount {
+		for i := range bw.clockCapacity {
 			select {
 			case <-*bw.exitchan:
 				break BgWriterLoop
 			default:
-
-				if currFrame.isPinned() {
-					nextFrame = currFrame.GetNextLink()
-					currFrame = nextFrame
+				currEntry = &bw.clockBuffer.bPool[i]
+				if currEntry.isReferenced() {
 					continue
 				}
-				currFrame.Reference()
+
+				currEntry.reference()
+				currFrame = &currEntry.entry
 
 				if !currFrame.isDirty() {
-					nextFrame = currFrame.GetNextLink()
-					currFrame.Unreference()
-					currFrame = nextFrame
 					continue
 				}
 
 				err := currFrame.Acquire(false)
 				if err != nil {
 					helpers.PrintErrorMsg(err.Error())
-					currFrame.Unreference()
-					currFrame = currFrame.GetNextLink()
+					currEntry.unref()
 					continue
 				}
 				k := currFrame.getKey()
@@ -94,20 +89,18 @@ BgWriterLoop:
 					if err != nil {
 						panic(err.Error())
 					}
-					currFrame.Unreference()
-					currFrame = currFrame.GetNextLink()
+					currEntry.unref()
 					continue
 				}
 
 				currFrame.MarkClean()
 
-				nextFrame = currFrame.GetNextLink()
 				err = currFrame.Release(false)
 				if err != nil {
 					panic(err)
 				}
 				helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) Released latch on frame %d", k))
-				currFrame.Unreference()
+				currEntry.unref()
 				bw.writtenPages++
 
 				if bw.writtenPages >= MAX_PAGES {
@@ -146,10 +139,11 @@ func (bw *BgWriter) watchFreeList(exitChn *chan struct{}, wg *sync.WaitGroup) {
 
 func NewBgWriter(cache *BufferManager, wal *wal.WAL, clockBuffHead *clock, pgr *pager.Pager) *BgWriter {
 	return &BgWriter{
-		cache:       cache,
-		wal:         wal,
-		clockBuffer: clockBuffHead,
-		pgr:         pgr,
-		exitchan:    cache.exitchan,
+		cache:         cache,
+		wal:           wal,
+		clockBuffer:   clockBuffHead,
+		clockCapacity: clockBuffHead.capacity,
+		pgr:           pgr,
+		exitchan:      cache.exitchan,
 	}
 }

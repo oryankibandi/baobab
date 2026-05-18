@@ -8,6 +8,10 @@ import (
 	"github.com/oryankibandi/baobab/pkg/helpers"
 )
 
+const (
+	CACHE_LINE_SIZE = 646
+)
+
 type PageHeaderFlagPos int
 
 // Page struct with byte data
@@ -214,5 +218,29 @@ func (p *Page) SwapData(buff *[PAGE_SIZE_BYTES]byte) error {
 
 	copy(p.pgeData[:], (buff[:]))
 
+	return nil
+}
+
+// TestAddDummyData fills a 8K bufferwith 1s
+func (p *Page) TestAddDummyData() error {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	var wg sync.WaitGroup
+
+	// to prevent false sharing, ensure p.pgeData is divided into
+	// 64 byte chunks for processing
+	for i := range PAGE_SIZE_BYTES / CACHE_LINE_SIZE {
+		// skip initial header metadata
+		if i > 0 {
+			wg.Add(1)
+			go func(arr []byte) {
+				for j := range arr {
+					arr[j] |= 1
+				}
+				wg.Done()
+			}((p.pgeData)[i*CACHE_LINE_SIZE : (i*CACHE_LINE_SIZE)+CACHE_LINE_SIZE])
+		}
+	}
+	wg.Wait()
 	return nil
 }

@@ -62,7 +62,7 @@ func TestNewWTinyLFU(t *testing.T) {
 }
 
 func TestEvictWindow(t *testing.T) {
-	var frameToBeEvicted *Frame
+	var frameToBeEvicted *clockentry
 
 	windowCapacity := 48
 	mainCapacity := 2376
@@ -82,23 +82,26 @@ func TestEvictWindow(t *testing.T) {
 	for i := range windowCapacity {
 		t.Run(fmt.Sprintf("%d_testevict_additem", i), func(t *testing.T) {
 			// update frame
-			f, _, err := w.getFreeFrame(pgr)
+			en, _, err := w.getFreeFrame(pgr)
 			if err != nil {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 			}
+			f := &en.entry
+			f.Reference = en.reference
+			f.Unreference = en.unref
+			f.getSegType = en.getSegType
 
-			if seg := f.getSegType(); seg != windowSegment {
+			if seg := en.getSegType(); seg != windowSegment {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be in window segment, got %v", seg), t)
 			}
 
 			// pin all frames apart from the most recent.
-			if i+1 < windowCapacity {
-				f.Reference()
-			} else {
-				frameToBeEvicted = f
+			if i+1 >= windowCapacity {
+				f.Unreference()
+				frameToBeEvicted = en
 			}
 
-			helpers.PrintSuccessMsg("%d_testevict_additem success")
+			helpers.PrintSuccessMsg(fmt.Sprintf("%d_testevict_additem success", i))
 		})
 	}
 
@@ -116,20 +119,23 @@ func TestEvictWindow(t *testing.T) {
 		if frameToBeEvicted == nil {
 			helpers.PrintTestErrorMsg("No frame to be evicted set", t)
 		}
-		if frameToBeEvicted.refBitSet() {
+		if frameToBeEvicted.isReferenced() {
 			helpers.PrintTestErrorMsg("Expected frame to be evicted to be unreferenced", t)
 		}
 
-		fr, _, err := w.getFreeFrame(pgr)
+		en, _, err := w.getFreeFrame(pgr)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 		}
+		fr := &en.entry
+		fr.Reference = en.reference
+		fr.Unreference = en.unref
 
-		if seg := fr.getSegType(); seg != windowSegment {
+		if seg := en.getSegType(); seg != windowSegment {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be in window segment, got %v", seg), t)
 		}
 
-		if seg := frameToBeEvicted.getSegType(); seg != probationSegment {
+		if seg := frameToBeEvicted.segtype; seg != probationSegment {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected evicted frame to be in probation segment, got %v", seg), t)
 		}
 
@@ -138,7 +144,7 @@ func TestEvictWindow(t *testing.T) {
 }
 
 func TestPromoteToProtected(t *testing.T) {
-	var protectedSegmentCandidate *Frame
+	var protectedSegmentCandidate *clockentry
 
 	windowCapacity := 48
 	// windowFrameCount := (windowCapacity * 1024) / pager.PAGE_SIZE_BYTES
@@ -157,20 +163,19 @@ func TestPromoteToProtected(t *testing.T) {
 
 	for i := range windowCapacity {
 		t.Run(fmt.Sprintf("%d_test_promotetoprotected_additem", i), func(t *testing.T) {
-			f, _, err := w.getFreeFrame(pgr)
+			en, _, err := w.getFreeFrame(pgr)
 			if err != nil {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 			}
 
-			if seg := f.getSegType(); seg != windowSegment {
+			if seg := en.getSegType(); seg != windowSegment {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be in window segment, got %v", seg), t)
 			}
 
 			// pin all frames apart from the most recent.
-			if i+1 < windowCapacity {
-				f.Reference()
-			} else {
-				protectedSegmentCandidate = f
+			if i+1 >= windowCapacity {
+				en.unref()
+				protectedSegmentCandidate = en
 			}
 
 			helpers.PrintSuccessMsg(fmt.Sprintf("%d_test_promotetoprotected_additem success", i))
@@ -181,7 +186,7 @@ func TestPromoteToProtected(t *testing.T) {
 		if protectedSegmentCandidate == nil {
 			helpers.PrintTestErrorMsg("No frame to be evicted set", t)
 		}
-		if protectedSegmentCandidate.refBitSet() {
+		if protectedSegmentCandidate.isReferenced() {
 			helpers.PrintTestErrorMsg("Expected frame to be evicted to be unreferenced", t)
 		}
 
@@ -235,10 +240,10 @@ func TestProtectedEviction(t *testing.T) {
 	var pageCounter int32 = 1
 	// var windowCacheSize uint64 = 48
 	// var mainCacheSize uint64 = 2376
-	var totCacheSizeKb uint64 = 2424
+	var totCacheSize uint64 = 100000
 
-	windowFrameCount := uint64(math.Round(float64(totCacheSizeKb) * WINDOW_CACHE_RATIO))
-	mainItemCount := uint64(math.Round(float64(totCacheSizeKb) * (1.0 - WINDOW_CACHE_RATIO)))
+	windowFrameCount := uint64(math.Round(float64(totCacheSize) * WINDOW_CACHE_RATIO))
+	mainItemCount := uint64(math.Round(float64(totCacheSize) * (1.0 - WINDOW_CACHE_RATIO)))
 	probationFrameCount := uint64(math.Round(float64(mainItemCount) * MAIN_CACHE_RATIO))
 	protectedFrameCount := uint64(math.Round(float64(mainItemCount)*float64(1.0-MAIN_CACHE_RATIO))) - 1
 
@@ -254,7 +259,9 @@ func TestProtectedEviction(t *testing.T) {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
 
-	defer w.close()
+	t.Cleanup(func() {
+		w.close()
+	})
 
 	// 1. fill window cache
 	for range windowFrameCount {
@@ -262,6 +269,8 @@ func TestProtectedEviction(t *testing.T) {
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected not error,got %v", err), t)
 		}
+		// unref to make available for eviction
+		f.unref()
 
 		if seg := f.getSegType(); seg != windowSegment {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be in window segment, got %v", seg), t)
@@ -280,6 +289,7 @@ func TestProtectedEviction(t *testing.T) {
 					if err != nil {
 						helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error,got %v", err), t)
 					}
+					f.unref()
 
 					if seg := f.getSegType(); seg != windowSegment {
 						helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be in window segment, got %v", seg), t)
@@ -289,23 +299,21 @@ func TestProtectedEviction(t *testing.T) {
 				})
 			}
 
-			helpers.PrintInfoMsg("Printing wtinylfu stats------------")
-			w.Stat()
-			helpers.PrintInfoMsg("Done ------------")
-
 			// 3. fill protected segment.
 			// Iterate over clock buffer and increment count items in probation.
 			itemsPromoted := 0
 			itemsIterated := 0
-			currFrame := w.cBuffer.Head
+			frIdx := 0
+
 			totCap := w.cBuffer.capacity
 			for itemsPromoted < int(probationFrameCount) {
+				currFrame := &w.cBuffer.bPool[frIdx%int(w.cBuffer.capacity)]
 				if itemsIterated >= int(totCap) {
 					helpers.PrintTestErrorMsg(fmt.Sprintf("Iterated over all %d frames but did not fill probation capacity of %d, with total capacity of %d, only managed to fill %d probation items", itemsIterated, probationFrameCount, totCap, itemsPromoted), t)
 				}
 				if seg := currFrame.getSegType(); seg != probationSegment {
-					currFrame = currFrame.GetNextLink()
 					itemsIterated++
+					frIdx++
 					continue
 				}
 
@@ -320,7 +328,7 @@ func TestProtectedEviction(t *testing.T) {
 
 				itemsPromoted++
 				itemsIterated++
-				currFrame = currFrame.GetNextLink()
+				frIdx++
 			}
 
 			helpers.PrintSuccessMsg(fmt.Sprintf("%d_protectedeviction_fillprotected success", i))
@@ -328,18 +336,17 @@ func TestProtectedEviction(t *testing.T) {
 	}
 
 	helpers.PrintSuccessMsg("Succesfully filled protected cache. printing stats..")
-	w.Stat()
-	helpers.PrintSuccessMsg("Done----")
 
 	// 4. refill probation by adding items to window
 	for i := range windowFrameCount {
 		t.Run(fmt.Sprintf("protectedeviction_refillprobation_%d", i), func(t *testing.T) {
-			f, _, err := w.getFreeFrame(pgr)
+			en, _, err := w.getFreeFrame(pgr)
 			if err != nil {
 				t.Fatalf("Expected no error,got %v", err)
 			}
+			en.unref()
 
-			if seg := f.getSegType(); seg != windowSegment {
+			if seg := en.getSegType(); seg != windowSegment {
 				t.Fatalf("Expected new frame to be in window segment, got %v", seg)
 			}
 
@@ -367,43 +374,54 @@ func TestProtectedEviction(t *testing.T) {
 
 	// 5. Iterate through clock buffer and pin all frames except one
 	//    in probation and protected
-	var unreferencedProbationFrame *Frame
-	var unreferencedProtectedFrame *Frame
-	probationFrames := make([]*Frame, 0)
-	protectedFrames := make([]*Frame, 0)
-	currFrame := w.cBuffer.clockHead()
+	var unreferencedProbationFrame *clockentry
+	var unreferencedProtectedFrame *clockentry
+	probationFrames := make([]*clockentry, 0)
+	protectedFrames := make([]*clockentry, 0)
+	currEntry := &w.cBuffer.bPool[0]
+	reservedWindowFrames := 0
 	for i := range w.cBuffer.capacity {
-		t.Run(fmt.Sprintf("protectedeviction_pinframes_%d", i), func(t *testing.T) {
-			switch currFrame.getSegType() {
+		j := i
+		currEntry = &w.cBuffer.bPool[j]
+		t.Run(fmt.Sprintf("protectedeviction_pinframes_%d", j), func(t *testing.T) {
+			switch currEntry.getSegType() {
 			case probationSegment:
 				if unreferencedProbationFrame == nil {
-					unreferencedProbationFrame = currFrame
-					probationFrames = append(probationFrames, currFrame)
+					unreferencedProbationFrame = currEntry
+					probationFrames = append(probationFrames, currEntry)
 				} else {
-					currFrame.Reference()
-					probationFrames = append(probationFrames, currFrame)
-					if !currFrame.accessBitSet() {
+					currEntry.reference()
+					probationFrames = append(probationFrames, currEntry)
+					if !currEntry.acc {
 						t.Fatalf("probation frame not pinned")
 					}
 				}
-				currFrame = currFrame.GetNextLink()
 			case protectedSegment:
 				if unreferencedProtectedFrame == nil {
-					unreferencedProtectedFrame = currFrame
-					protectedFrames = append(protectedFrames, currFrame)
+					unreferencedProtectedFrame = currEntry
+					protectedFrames = append(protectedFrames, currEntry)
+					fmt.Printf("5. unrefprotectedframe ref count -> %d\n", unreferencedProtectedFrame.pinCount.Load()-unreferencedProtectedFrame.unpinCount.Load())
 				} else {
-					currFrame.Reference()
-					protectedFrames = append(protectedFrames, currFrame)
-					if !currFrame.accessBitSet() {
+					currEntry.reference()
+					protectedFrames = append(protectedFrames, currEntry)
+					if !currEntry.acc {
 						t.Fatalf("protected frame not pinned")
 					}
 				}
-				currFrame = currFrame.GetNextLink()
+			case windowSegment:
+				// reference window cache item.
+				if reservedWindowFrames == 0 {
+					reservedWindowFrames++
+					fmt.Println("Reserving window  frame item(not referencing)")
+				} else {
+					currEntry.reference()
+					fmt.Println("protectedeviction window frame ref count after pin: ", currEntry.pinCount.Load()-currEntry.unpinCount.Load())
+				}
 			default:
-				currFrame = currFrame.GetNextLink()
+				fmt.Println("unassigned, continue")
 			}
 
-			helpers.PrintSuccessMsg(fmt.Sprintf("protectedeviction_pinframes_%d success", i))
+			helpers.PrintSuccessMsg(fmt.Sprintf("protectedeviction_pinframes_%d success", j))
 		})
 	}
 
@@ -443,11 +461,11 @@ func TestProtectedEviction(t *testing.T) {
 	t.Run("protectedeviction_evict_from_probation", func(t *testing.T) {
 		f, _, err := w.getFreeFrame(pgr)
 		if err != nil {
-			t.Fatalf("Expected no error,got %v", err)
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error,got %v", err), t)
 		}
 
 		if seg := f.getSegType(); seg != windowSegment {
-			t.Fatalf("Expected new frame to be in window segment, got %v", seg)
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be in window segment, got %v", seg), t)
 		}
 
 		pageCounter++
@@ -457,40 +475,41 @@ func TestProtectedEviction(t *testing.T) {
 
 	// 8. Test adding to full cache with all items pinned
 	t.Run("protectedeviction_add_to_full_cache", func(t *testing.T) {
-		unreferencedProbationFrame.Reference()
+		w.Stat()
+		unreferencedProbationFrame.reference()
 
-		if !unreferencedProbationFrame.accessBitSet() {
+		if !unreferencedProbationFrame.acc {
 			helpers.PrintTestErrorMsg("Unable to reference frame", t)
 		}
 
-		unreferencedProtectedFrame.Reference()
-		if !unreferencedProtectedFrame.accessBitSet() {
+		unreferencedProtectedFrame.reference()
+		if !unreferencedProtectedFrame.acc {
 			helpers.PrintTestErrorMsg("Unable to reference frame", t)
 		}
 
 		// add item
 		_, _, err := w.getFreeFrame(pgr)
-
 		if err == nil {
 			helpers.PrintTestErrorMsg("Expected an error,got nil", t)
 		}
 
 		pageCounter++
 
+		unreferencedProtectedFrame.unref()
 		helpers.PrintSuccessMsg("protectedeviction_add_to_full_cache success")
 	})
 
 	// 9. Test adding to not full cache
 	t.Run("protectedeviction_add_to_full_cache_with_available_frames", func(t *testing.T) {
-		// unreferencedProtectedFrame is now in probation as a reult of previus test above
-		unreferencedProtectedFrame.Unreference()
-		if unreferencedProtectedFrame.accessBitSet() {
+		// unreferencedProtectedFrame is now in probation as a result of previous test above
+		unreferencedProtectedFrame.unref()
+		if unreferencedProtectedFrame.acc {
 			t.Fatal("Unable to dereference frame")
 		}
 
 		// add item
+		w.Stat()
 		f, _, err := w.getFreeFrame(pgr)
-
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 		}
