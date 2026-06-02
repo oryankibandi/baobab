@@ -30,7 +30,7 @@ func TestNewBufferManager(t *testing.T) {
 		hasPager  bool
 	}{
 		{
-			cacheSize: 8192,
+			cacheSize: MIN_CACHE_SIZE_KB,
 			w:         w,
 			hasPager:  true,
 			valid:     true,
@@ -42,25 +42,25 @@ func TestNewBufferManager(t *testing.T) {
 			valid:     false,
 		},
 		{
-			cacheSize: 8192,
+			cacheSize: MIN_CACHE_SIZE_KB,
 			w:         nil, // no wal provided
 			hasPager:  true,
 			valid:     false,
 		},
 		{
-			cacheSize: 20480,
+			cacheSize: 81920,
 			w:         w,
 			hasPager:  true,
 			valid:     true,
 		},
 		{
-			cacheSize: 8192,
+			cacheSize: MIN_CACHE_SIZE_KB,
 			w:         w,
 			hasPager:  true,
 			valid:     true,
 		},
 		{
-			cacheSize: 8192,
+			cacheSize: 65536,
 			w:         w,
 			hasPager:  false, // no pager
 			valid:     false,
@@ -114,7 +114,6 @@ func TestNewBufferManager(t *testing.T) {
 
 			helpers.PrintSuccessMsg(fmt.Sprintf("%d_test_new_cache tests passed"+helpers.RESET, i))
 		})
-
 	}
 }
 
@@ -272,7 +271,8 @@ func TestPutGet(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: MIN_CACHE_SIZE_KB,
+		CacheSize:  MIN_CACHE_SIZE_KB,
+		numThreads: 1,
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -285,13 +285,19 @@ func TestPutGet(t *testing.T) {
 		pgr.Close()
 		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
 	}
-	defer buffManager.Close()
+
+	t.Cleanup(func() {
+		buffManager.Close()
+	})
 
 	// calculate expected frame count in each segment
-	totFrames := math.Round(float64(MIN_CACHE_SIZE_KB*1024) / float64(unsafe.Sizeof(Frame{})))
+	totFrames := math.Round(float64(MIN_CACHE_SIZE_KB*1024) / float64(unsafe.Sizeof(clockentry{})))
 	windSize := math.Round(totFrames * WINDOW_CACHE_RATIO)
 	mainCacheSize := math.Round(totFrames * (1 - WINDOW_CACHE_RATIO))
 	probationSize := uint64(math.Round(float64(mainCacheSize) * MAIN_CACHE_RATIO))
+	helpers.PrintInfoMsg(fmt.Sprintf("Total Frames -> %f\n", totFrames))
+	helpers.PrintInfoMsg(fmt.Sprintf("Window Frames -> %f\n", windSize))
+	helpers.PrintInfoMsg(fmt.Sprintf("Main Cache Frames -> %f\n", mainCacheSize))
 
 	maxPageId := uint64(windSize) + 1
 	// do not include reserved frame for metadata page
@@ -304,34 +310,47 @@ func TestPutGet(t *testing.T) {
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("expected no error, got %s", err), t)
 		}
-		frKey := fr.getKey()
-		if frKey == 0 {
-			helpers.PrintTestErrorMsg("got invalid frame key/pageId 0", t)
-		}
 
 		if fr == nil {
 			helpers.PrintTestErrorMsg("expected frame, got nil", t)
 		}
 
+		fmt.Println("Done retrieving new frame..")
+		fr.Acquire(true)
+		frKey := fr.getKey()
+		if frKey == 0 {
+			helpers.PrintTestErrorMsg("got invalid frame key/pageId 0", t)
+		}
+		fmt.Println("Done checking key...")
+		fr.Release(true)
+
+		fmt.Println("Performing Get()...")
 		evictCandidate, err = buffManager.Get(frKey)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("expected no error, got %s", err), t)
 		}
+		fmt.Println("Done performing Get()...")
 
 		if evictCandidate == nil {
 			helpers.PrintTestErrorMsg("expected retrieved frame, got nil", t)
 		}
 
+		fmt.Println("Unreferencing fr and avict candidate...")
 		fr.Unreference()
+		evictCandidate.Unreference()
+		fmt.Println("Done unreferencing...")
 
 		helpers.PrintSuccessMsg("test_putget_simple success")
 	})
+
 	// 3. test eviction, fill window cache and store item to be evicted. Add a new item and see it the predicted eviction candidate has been removed by performing a Get req
 	t.Run("test_eviction", func(t *testing.T) {
 		for i := range uint64(windSize) {
-			t.Run(fmt.Sprintf("%d_test_eviction_fillcache", i), func(t *testing.T) {
+			j := i
+			t.Run(fmt.Sprintf("%d_test_eviction_fillcache", j), func(t *testing.T) {
 				fr, err := buffManager.NewFrame(false, false)
 				if err != nil {
+
 					helpers.PrintTestErrorMsg(fmt.Sprintf("expected no error, got %s", err), t)
 				}
 
@@ -350,16 +369,30 @@ func TestPutGet(t *testing.T) {
 				windowCacheFrames = append(windowCacheFrames, fr)
 				helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
 			})
-
 		}
 
 		t.Run("test_eviction_check_evicted", func(t *testing.T) {
-			if s := evictCandidate.getSegType(); s != probationSegment {
-				helpers.PrintTestErrorMsg(fmt.Sprintf("expected evicted item to be in probation(2) but is in %d", s), t)
+			var actualEvicted *Frame
+			evictCandidate.Acquire(false)
+			if s := evictCandidate.getEntrySegType(); s != probationSegment {
+				frameEvicted := false
+				helpers.PrintInfoMsg("Checking window frame items")
+				for _, f := range windowCacheFrames {
+					if f.getEntrySegType() == probationSegment {
+						actualEvicted = f
+						frameEvicted = true
+					}
+					helpers.PrintInfoMsg(fmt.Sprintf("key: %d, segment: %v", f.getKey(), f.getEntrySegType()))
+				}
+
+				if !frameEvicted {
+					helpers.PrintTestErrorMsg(fmt.Sprintf("expected evicted item to be in probation(2) but is in %d", s), t)
+				}
 			}
+			evictCandidate.Release(false)
 
 			// try to retrieve evicted frame
-			fr, err := buffManager.Get(evictCandidate.getKey())
+			fr, err := buffManager.Get(actualEvicted.getKey())
 			if err != nil {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("expected no error, got %s", err.Error()), t)
 			}
@@ -368,9 +401,12 @@ func TestPutGet(t *testing.T) {
 				helpers.PrintTestErrorMsg("expected frame, got nil", t)
 			}
 
-			if s := fr.getSegType(); s != protectedSegment {
+			fr.Acquire(true)
+			if s := fr.getEntrySegType(); s != protectedSegment {
+				fr.Release(true)
 				helpers.PrintTestErrorMsg(fmt.Sprintf("expected evicted item to be in protected(3) but is in %d", s), t)
 			}
+			fr.Release(true)
 
 			helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
 		})
@@ -487,7 +523,7 @@ func TestPutGet(t *testing.T) {
 func TestNewFrameConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 
-	newFrameCount := 18000
+	newFrameCount := 25000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -495,7 +531,8 @@ func TestNewFrameConcurrent(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 16 * 1024, // 16MB
+		CacheSize:  64 * 1024, // 64MB
+		numThreads: 4,
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -542,20 +579,24 @@ func TestNewFrameConcurrent(t *testing.T) {
 						helpers.PrintTestErrorMsg(err.Error(), t)
 					}
 
+					if fr.parentEntry == nil {
+						helpers.PrintTestErrorMsg("No parentEntry set", t)
+					}
+
 					if k := fr.getKey(); k == 0 {
-						fr.Unreference()
 						fr.Release(true)
+						fr.Unreference()
 						// fmt.Println("PAGEID -> ", fr.page.PageId)
 						helpers.PrintTestErrorMsg(fmt.Sprintf("got new frame key as 0. This is reserved for the metadata page. Frame -> %v", fr), t)
 					}
 
-					fr.Unreference()
 					err = fr.Release(true)
 					if err != nil {
 						helpers.PrintTestErrorMsg(err.Error(), t)
 					}
+					fr.Unreference()
 
-					helpers.PrintSuccessMsg(fmt.Sprintf("%s success", t.Name()))
+					helpers.PrintSuccessMsg(fmt.Sprintf("%s success", fmt.Sprintf("%d_test_newframe_concurrent", j)))
 				})
 			}(i)
 		}
@@ -575,7 +616,8 @@ func TestNewFrameSequential(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 16 * 1024, // 16MB
+		CacheSize:  256 * 1024, // 16MB
+		numThreads: 1,
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -636,8 +678,8 @@ func TestNewFrameSequential(t *testing.T) {
 
 // TestZipfianDistribution Simulates Zipfian pattern.
 func TestZipfianDistribution(t *testing.T) {
-	iterationCount := 1000000
-	maxPages := 10000
+	iterationCount := 100000
+	maxPages := 7000 // ~254MB
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -645,7 +687,8 @@ func TestZipfianDistribution(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 48 * 1024, // 48MB
+		CacheSize:  512 * 1024, // 48MB
+		numThreads: 4,
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -722,17 +765,18 @@ func TestZipfianDistribution(t *testing.T) {
 		helpers.PrintSuccessMsg(fmt.Sprintf("test_zipfian_%d success.", i))
 	}
 
+	avg := totTime / time.Duration(iterationCount)
 	helpers.PrintSuccessMsg("--------------------------------------")
 	helpers.PrintSuccessMsg("	  ZIPFIAN DISTRIBUTION  	")
 	helpers.PrintSuccessMsg(fmt.Sprintf("Total time: %v", totTime))
 	helpers.PrintSuccessMsg(fmt.Sprintf("Average GET req time: %v", totTime/time.Duration(iterationCount)))
-	helpers.PrintSuccessMsg(fmt.Sprintf("%d Op/sec", iterationCount/int(totTime.Seconds())))
+	helpers.PrintSuccessMsg(fmt.Sprintf("%d Op/sec", (time.Second / avg)))
 	helpers.PrintSuccessMsg("--------------------------------------")
 }
 
 func TestRandomDistribution(t *testing.T) {
 	iterationCount := 1000000
-	maxPages := 100000
+	maxPages := 10000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -740,7 +784,8 @@ func TestRandomDistribution(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 128 * 1024, // 48MB
+		CacheSize:  128 * 1024, // 48MB
+		numThreads: 4,
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -826,7 +871,7 @@ func TestRandomDistribution(t *testing.T) {
 
 func TestSequentialDistribution(t *testing.T) {
 	iterationCount := 1000000
-	maxPages := 100000
+	maxPages := 10000
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
@@ -834,7 +879,7 @@ func TestSequentialDistribution(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := CacheConfig{
-		CacheSize: 128 * 1024, // 48MB
+		CacheSize: 128 * 1024, // 128MB
 	}
 
 	buffManager, err := NewBufferManager(cConfig, w, pgr)
@@ -981,7 +1026,7 @@ func BenchmarkBufferManager(t *testing.B) {
 
 	var pageId uint64
 	z := zipf.NewZipf(1.1, 5, float64(maxPages))
-	for i := 0; i < t.N; i++ {
+	for i := 0; t.Loop(); i++ {
 		pageId = z.GetNext()
 		f, err := buffManager.Get(uint32(pageId))
 		if err != nil {

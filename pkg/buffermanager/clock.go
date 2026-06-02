@@ -2,6 +2,7 @@ package buffermanager
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,7 +20,7 @@ const (
 )
 
 type clockentry struct {
-	entry Frame
+	entry Frame // 8264 bytes
 	// reference bit. Set when an item is accessed and unset by clock hand when
 	// looking for an item to evict
 	ref bool
@@ -69,7 +70,7 @@ type clock struct {
 // goroutine.
 func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 	for j := range MAX_RETRIES {
-		// start := time.Now()
+		start := time.Now()
 		clk.mu.Lock()
 		clkCap := clk.capacity
 
@@ -86,7 +87,7 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 				continue
 			}
 
-			if clk.bPool[clk.Head].segtype != seg {
+			if s := clk.bPool[clk.Head].segtype; s != seg {
 				clk.Head = (clk.Head + 1) % int(clkCap)
 				continue
 			}
@@ -109,14 +110,15 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 				clk.mu.Unlock()
 				// end := time.Since(start)
 				// slog.Info(fmt.Sprintf("(%v) Evicted in %v in %d cycle(s).", seg, end, (i/int(clkCap))+1))
+				// fmt.Printf("Evicted %d\n", e.entry.getKey())
 				return e
 			}
 		}
 
 		clk.mu.Unlock()
-		// end := time.Since(start)
+		end := time.Since(start)
 		sleepDur := time.Millisecond * time.Duration((j+1)*10)
-		// slog.Info(fmt.Sprintf("Evict failed in %v, retrying in %v..", end, sleepDur))
+		slog.Info(fmt.Sprintf("(%v) Evict failed in %v, retrying in %v..", seg, end, sleepDur))
 		time.Sleep(sleepDur)
 	}
 	// unable to find suitable entry. All entries referenced
@@ -182,7 +184,9 @@ func (clk *clock) close() error {
 }
 
 func (cEntry *clockentry) markOccupied() {
+	cEntry.mu.Lock()
 	cEntry.isOccupied = true
+	cEntry.mu.Unlock()
 }
 
 func (cEntry *clockentry) markVacant() {
@@ -190,7 +194,9 @@ func (cEntry *clockentry) markVacant() {
 }
 
 func (cEntry *clockentry) updateSegment(seg SegmentType) {
+	cEntry.mu.Lock()
 	cEntry.segtype = seg
+	cEntry.mu.Unlock()
 }
 
 func (cEntry *clockentry) reference() {
@@ -213,7 +219,9 @@ func (cEntry *clockentry) unref() {
 	cEntry.unpinCount.Add(1)
 
 	if pinCount-unpinCount == 1 {
+		cEntry.mu.Lock()
 		cEntry.acc = false
+		cEntry.mu.Unlock()
 	}
 }
 
@@ -233,7 +241,8 @@ func (cEntry *clockentry) getSegType() SegmentType {
 // Creates a clock buffer of size 'size`KB and
 // returns a pointer to the new circular buffer.
 // `itemCount` parameter represents number of entries/frames
-func NewClock(itemCount uint64) (*clock, error) {
+// `reserve` - when set to true, an entry for metadata page is reserved
+func NewClock(itemCount uint64, reserve bool) (*clock, error) {
 	minItems := 3
 	// Initialize entries, add to bPool and create the circular buffer
 	if itemCount < uint64(minItems) {
@@ -254,12 +263,15 @@ func NewClock(itemCount uint64) (*clock, error) {
 	clk.Head = 0
 
 	// reserve one entry
-	e := clk.EvictWithoutClearing(unassigned)
-	if e == nil {
-		return nil, BufferManagerError{"Could not reserve metadata page frame"}
+	if reserve {
+		e := clk.EvictWithoutClearing(unassigned)
+		if e == nil {
+			return nil, BufferManagerError{"Could not reserve metadata page frame"}
+		}
+		clk.Reserved = e
+		e.reserved = true
+		e.entry.parentEntry = e
 	}
-	clk.Reserved = e
-	e.reserved = true
 
 	return clk, nil
 }

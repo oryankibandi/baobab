@@ -298,7 +298,7 @@ func TestReadAndWritePage(t *testing.T) {
 
 		// write page
 		rootByteSlice := testRootPage.pgeData[:]
-		err = pgr.WritePage(testRootPage.PageId, &rootByteSlice)
+		err = pgr.WritePage(testRootPage.PageId, &rootByteSlice, false)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write test root page: %s", err.Error()), t)
 		}
@@ -387,7 +387,7 @@ func TestReadAndWritePage(t *testing.T) {
 
 		// write page
 		pageByteSlice := testPage.pgeData[:]
-		err = pgr.WritePage(testPage.PageId, &pageByteSlice)
+		err = pgr.WritePage(testPage.PageId, &pageByteSlice, false)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write test root page:: %s", err.Error()), t)
 		}
@@ -558,7 +558,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 			defer wg.Done()
 			t.Run(fmt.Sprintf("%d_test_readwriteconcurr_writereadset", j), func(t *testing.T) {
 				pgeSlice := readSet[j].pgeData[:]
-				err := pgr.WritePage(readSet[j].PageId, &pgeSlice)
+				err := pgr.WritePage(readSet[j].PageId, &pgeSlice, false)
 				if err != nil {
 					helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write readset page; %s", err.Error()), t)
 				}
@@ -599,7 +599,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 			<-start
 			t.Run(fmt.Sprintf("%d_test_readwriteconcurr_write_writeset", j), func(t *testing.T) {
 				writeSlice := writeSet[j].pgeData[:]
-				err := pgr.WritePage(writeSet[j].PageId, &writeSlice)
+				err := pgr.WritePage(writeSet[j].PageId, &writeSlice, false)
 				if err != nil {
 					helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write page: %s", err.Error()), t)
 				}
@@ -672,13 +672,13 @@ func TestFreeList(t *testing.T) {
 
 		// write page1 and page2
 		page1Buff := page1.pgeData[:]
-		err = pgr.WritePage(pageId1, &page1Buff)
+		err = pgr.WritePage(pageId1, &page1Buff, false)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write page1: %s", err.Error()), t)
 		}
 
 		page2Buff := page2.pgeData[:]
-		err = pgr.WritePage(pageId2, &page2Buff)
+		err = pgr.WritePage(pageId2, &page2Buff, false)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write page2: %s", err.Error()), t)
 		}
@@ -687,7 +687,7 @@ func TestFreeList(t *testing.T) {
 		helpers.SetFlag(&(page1.pgeData[0]), Dead)
 
 		// flush page1 to ensure it is persisted
-		err = pgr.WritePage(pageId1, &page1Buff)
+		err = pgr.WritePage(pageId1, &page1Buff, false)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to write page1: %s", err.Error()), t)
 		}

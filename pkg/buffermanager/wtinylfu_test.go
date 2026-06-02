@@ -26,7 +26,7 @@ func TestNewWTinyLFU(t *testing.T) {
 		t.Run(fmt.Sprintf("%d_test_newWtinylfu", i), func(t *testing.T) {
 			probCap := uint64(math.Round(float64(test.mainSize) * MAIN_CACHE_RATIO))
 			protCap := uint64(math.Round(float64(test.mainSize)*(1.0-MAIN_CACHE_RATIO))) - 1
-			w, err := NewWTinylfu(test.windowSize, test.mainSize)
+			w, err := NewWTinylfu(test.windowSize, test.mainSize, true)
 
 			if !test.valid {
 				if err == nil {
@@ -72,7 +72,7 @@ func TestEvictWindow(t *testing.T) {
 	pgr := InitPager(t)
 	defer pgr.Close()
 
-	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity))
+	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity), true)
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
@@ -87,9 +87,7 @@ func TestEvictWindow(t *testing.T) {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 			}
 			f := &en.entry
-			f.Reference = en.reference
-			f.Unreference = en.unref
-			f.getSegType = en.getSegType
+			f.parentEntry = en
 
 			if seg := en.getSegType(); seg != windowSegment {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be in window segment, got %v", seg), t)
@@ -128,8 +126,7 @@ func TestEvictWindow(t *testing.T) {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 		}
 		fr := &en.entry
-		fr.Reference = en.reference
-		fr.Unreference = en.unref
+		fr.parentEntry = en
 
 		if seg := en.getSegType(); seg != windowSegment {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be in window segment, got %v", seg), t)
@@ -154,7 +151,7 @@ func TestPromoteToProtected(t *testing.T) {
 	pgr := InitPager(t)
 	defer pgr.Close()
 
-	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity))
+	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity), true)
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
@@ -240,7 +237,7 @@ func TestProtectedEviction(t *testing.T) {
 	var pageCounter int32 = 1
 	// var windowCacheSize uint64 = 48
 	// var mainCacheSize uint64 = 2376
-	var totCacheSize uint64 = 100000
+	var totCacheSize uint64 = 10000
 
 	windowFrameCount := uint64(math.Round(float64(totCacheSize) * WINDOW_CACHE_RATIO))
 	mainItemCount := uint64(math.Round(float64(totCacheSize) * (1.0 - WINDOW_CACHE_RATIO)))
@@ -254,7 +251,7 @@ func TestProtectedEviction(t *testing.T) {
 	pgr := InitPager(t)
 	defer pgr.Close()
 
-	w, err := NewWTinylfu(windowFrameCount, mainItemCount)
+	w, err := NewWTinylfu(windowFrameCount, mainItemCount, true)
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}

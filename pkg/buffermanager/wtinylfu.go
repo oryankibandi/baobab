@@ -22,7 +22,7 @@ const (
 	protectedSegment
 )
 
-type SegmentType uint64
+type SegmentType uint32
 
 type WTinyLfu struct {
 	// circular buffer
@@ -224,14 +224,14 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 
 		// create a slice around the buff
 		frSlice := buff[:]
-		err = pgr.WritePage(mainKey, &frSlice)
+		err = pgr.WritePage(mainKey, &frSlice, false)
 		if err != nil {
 			//unref
 			windVictim.en = nil
 			probationVictim.en = nil
 			return nil, err
 		}
-		helpers.PrintInfoMsg(fmt.Sprintf("Flushed page %d to be evicted from probation.", mainKey))
+		// helpers.PrintInfoMsg(fmt.Sprintf("Flushed page %d to be evicted from probation.", mainKey))
 
 		// Add window victim to probation and readd main cache victim to pool
 		err = w.cBuffer.clearEntry(probationVictim.en)
@@ -252,15 +252,14 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager) ([]uint32, error) {
 
 		// create a slice around the buff
 		frSlice := buff[:]
-		err = pgr.WritePage(windKey, &frSlice)
+		err = pgr.WritePage(windKey, &frSlice, false)
 		if err != nil {
 			//unref
 			windVictim.en = nil
 			probationVictim.en = nil
 			return nil, err
 		}
-		helpers.PrintInfoMsg("Flushed page to be evicted.")
-
+		// helpers.PrintInfoMsg(fmt.Sprintf("Flushed page %d which is to be evicted.", windKey))
 		err = w.cBuffer.clearEntry(windVictim.en)
 		if err != nil {
 			panic(err)
@@ -296,7 +295,7 @@ func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *clockentry, evicted []uin
 	}
 
 	if w.windowCount == w.windowCapacity {
-		fmt.Println("WINDOW  CACHE FULL...")
+		// fmt.Println("WINDOW CACHE FULL...")
 		keysToEvict, err = w.evictWindow(pgr)
 		if err != nil {
 			return nil, nil, err
@@ -310,6 +309,7 @@ func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager) (fr *clockentry, evicted []uin
 	}
 
 	en.updateSegment(windowSegment)
+
 	w.windowCount++
 	en.reference()
 
@@ -380,7 +380,7 @@ func (w *WTinyLfu) close() {
 
 // Creates new instance  of W-TinyLFU.
 // windowSize and mainCacheSize represents the number of frames for each segment
-func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
+func NewWTinylfu(windowSize uint64, mainCacheSize uint64, reserveMetadata bool) (*WTinyLfu, error) {
 	if windowSize <= 0 {
 		return nil, WTinyLFUError{Message: "Window size must be greater than 0"}
 	}
@@ -397,7 +397,7 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64) (*WTinyLfu, error) {
 	// do not include reserved frame for metadata page
 	protectedCap := uint64(math.Round(float64(mainCacheSize)*float64(1.0-MAIN_CACHE_RATIO))) - 1
 
-	cBuff, err := NewClock(windowSize + mainCacheSize)
+	cBuff, err := NewClock(windowSize+mainCacheSize, reserveMetadata)
 	if err != nil {
 		panic(err)
 	}

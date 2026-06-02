@@ -25,7 +25,7 @@ const (
 type BgWriter struct {
 	writtenPages uint32
 	writtenBytes uint32
-	cache        *BufferManager
+	cache        *shard
 	wal          *wal.WAL
 	pgr          *pager.Pager
 
@@ -46,9 +46,9 @@ func (bw *BgWriter) Start(wg *sync.WaitGroup) {
 
 	var currFrame *Frame
 	var currEntry *clockentry
-	var nextFrame *Frame
 	var currFrameBuff *[]byte
 
+	// time.Sleep(time.Second * 10)
 BgWriterLoop:
 	for {
 		for i := range bw.clockCapacity {
@@ -65,6 +65,7 @@ BgWriterLoop:
 				currFrame = &currEntry.entry
 
 				if !currFrame.isDirty() {
+					currEntry.unref()
 					continue
 				}
 
@@ -75,15 +76,19 @@ BgWriterLoop:
 					continue
 				}
 				k := currFrame.getKey()
-				helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) acquired latch for frame id: %d", k))
+				// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) acquired latch for frame id: %d", k))
 
 				currFrameBuff, _, err = currFrame.RawBufferSlice()
 				if err != nil {
 					panic("Unable to get frame buffer")
 				}
 
-				err = bw.pgr.WritePage(currFrame.getKey(), currFrameBuff)
+				// helpers.PrintInfoMsg("(bgwriter) flushing page...")
+				shouldFlush := bw.writtenPages+1 == MAX_PAGES
+
+				err = bw.pgr.WritePage(k, currFrameBuff, shouldFlush)
 				if err != nil {
+					// panic(fmt.Sprintf("(bgwriter) Error writing to page: %s\n", err.Error()))
 					helpers.PrintErrorMsg(fmt.Sprintf("(bgwriter) Error writing to page: %s\n", err.Error()))
 					err = currFrame.Release(false)
 					if err != nil {
@@ -94,20 +99,22 @@ BgWriterLoop:
 				}
 
 				currFrame.MarkClean()
+				// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) Curr frame dirty -> %t", currFrame.isDirty()))
 
 				err = currFrame.Release(false)
 				if err != nil {
 					panic(err)
 				}
-				helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) Released latch on frame %d", k))
+				// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) Released latch on frame %d", k))
 				currEntry.unref()
 				bw.writtenPages++
 
-				if bw.writtenPages >= MAX_PAGES {
-					break
-				}
+			}
 
-				currFrame = nextFrame
+			if bw.writtenPages >= MAX_PAGES {
+				bw.writtenPages = 0
+				// bw.pgr.Flush()
+				break
 			}
 		}
 		time.Sleep(time.Millisecond * BGWRITER_DELAY)
@@ -137,7 +144,7 @@ func (bw *BgWriter) watchFreeList(exitChn *chan struct{}, wg *sync.WaitGroup) {
 	}
 }
 
-func NewBgWriter(cache *BufferManager, wal *wal.WAL, clockBuffHead *clock, pgr *pager.Pager) *BgWriter {
+func NewBgWriter(cache *shard, wal *wal.WAL, clockBuffHead *clock, pgr *pager.Pager) *BgWriter {
 	return &BgWriter{
 		cache:         cache,
 		wal:           wal,

@@ -57,8 +57,9 @@ const (
 )
 
 const (
-	MAX_REQ_JOBS = 100 // max number of io requests to send to disk manager
-	MAX_WORKERS  = 500 // default no. of workers.
+	MAX_REQ_JOBS                = 1500 // max number of io requests to send to disk manager
+	MAX_WORKERS                 = 5000 // default no. of workers.
+	MAX_PAGE_WRITE_BEFORE_FLUSH = 1000
 )
 
 type IOJob struct {
@@ -92,8 +93,9 @@ type Pager struct {
 	// max no of pageId issued. pageId increases monotonically. This is
 	// used to issue new page Ids.
 	maxPageId uint32
-	workers   *workerpool
-	mu        sync.RWMutex
+
+	workers *workerpool
+	mu      sync.RWMutex
 }
 
 type PagerConfig struct {
@@ -125,6 +127,7 @@ func (j *IOJob) executeJob(pgr *Pager) {
 			return
 		}
 	} else {
+		// read req
 		errChan := make(chan error)
 		err := pgr.dManager.ReadReq(j.buff, j.pageId*PAGE_SIZE_BYTES, errChan)
 		if err != nil {
@@ -142,42 +145,62 @@ func (j *IOJob) executeJob(pgr *Pager) {
 	j.errCh <- nil
 }
 
-// NewPage - initializes a blank page by assigning a pageId and setting a flag
-// returns new page Id, and error if any
-func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page) (uint32, error) {
-	if pge == nil {
-		return 0, PagerError{Message: "No page entry provided."}
-	}
-	fmt.Println("acquiring lock for pager...")
+// NewPageId assignes a new monotonically increasing pageId
+func (pgr *Pager) NewPageId() uint32 {
 	pgr.mu.Lock()
 	defer pgr.mu.Unlock()
-	fmt.Println("acquired lock for pager...")
+	// fmt.Println("acquired lock for pager...")
 
 	var newPgeId uint32
-	fmt.Println("poping pageid from freelist...")
+	// fmt.Println("poping pageid from freelist...")
 	if n := pgr.freeList.pop(); n < 0 {
-		fmt.Println("got pageId < 0...")
+		// fmt.Println("got pageId < 0...")
 		newPgeId = pgr.maxPageId + 1
 		pgr.maxPageId++
 	} else {
-		fmt.Println("got a valid pageId...")
+		// fmt.Println("got a valid pageId...")
 		newPgeId = uint32(n)
 	}
 
-	fmt.Println("calling initializePage...")
-	err := pge.initializePage(newPgeId, isInternal)
+	return newPgeId
+}
+
+// NewPage - initializes a blank page by setting a flag
+// returns new page Id, and error if any
+func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page, pid uint32) (uint32, error) {
+	if pge == nil {
+		return 0, PagerError{Message: "No page entry provided."}
+	}
+	// fmt.Println("acquiring lock for pager...")
+	pgr.mu.Lock()
+	defer pgr.mu.Unlock()
+	// fmt.Println("acquired lock for pager...")
+
+	// var newPgeId uint32
+	// // fmt.Println("poping pageid from freelist...")
+	// if n := pgr.freeList.pop(); n < 0 {
+	// 	// fmt.Println("got pageId < 0...")
+	// 	newPgeId = pgr.maxPageId + 1
+	// 	pgr.maxPageId++
+	// } else {
+	// 	// fmt.Println("got a valid pageId...")
+	// 	newPgeId = uint32(n)
+	// }
+
+	// fmt.Println("calling initializePage...")
+	err := pge.initializePage(pid, isInternal)
 	if err != nil {
 		return 0, err
 	}
 
-	fmt.Println("checking if should set as root...")
+	// fmt.Println("checking if should set as root...")
 	if setAsRoot {
-		pgr.rootPageId = newPgeId
+		pgr.rootPageId = pid
 	}
 
 	// increment page count
 	pgr.pageCount++
-	return newPgeId, nil
+	return pid, nil
 }
 
 // UpdatePageMeta updates page metadata(pageId and Isinternal flag).
@@ -249,13 +272,14 @@ func (pgr *Pager) ReadPage(pageId uint32, buff *[]byte) error {
 	// blocks if channel is full
 	pgr.workers.jobQ <- &ioJob
 
-	// blocks until we a response
+	// blocks until we receive a response
 	err := <-workerErrChan
 	if err != nil {
 		return err
 	}
 
-	// dereference job struct
+	// fmt.Printf("Read page %d, result -> %v\n", pageId, *buff)
+	// dereference
 	workerErrChan = nil
 	ioJob.errCh = nil
 	ioJob.buff = nil
@@ -269,7 +293,7 @@ func (pgr *Pager) ReadPage(pageId uint32, buff *[]byte) error {
 //
 //	pageId id of page to flush
 //	buff buffer containing page content to write
-func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
+func (pgr *Pager) WritePage(pageId uint32, buff *[]byte, flush bool) error {
 	if pgr.workers.jobQ == nil {
 		return PagerError{Message: "job queue not initialized."}
 	}
@@ -284,6 +308,10 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte) error {
 	flag = 1 << 7
 	if isDead {
 		flag |= 1 << 6
+	}
+
+	if flush {
+		flag |= 1 << 5
 	}
 
 	workerErrChan := make(chan error)

@@ -1,11 +1,13 @@
 package diskmanager
 
 import (
+	//"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	//"runtime"
 	"sync"
 
 	"github.com/oryankibandi/baobab/pkg/helpers"
@@ -70,6 +72,11 @@ type JobQueue struct {
 	dManager *DiskManager
 }
 
+func currentFileSize(fd *os.File) int64 {
+	info, _ := fd.Stat()
+	return info.Size()
+}
+
 // Reads a page from disk at offset off into buff
 //
 // Parameters:
@@ -85,11 +92,23 @@ func (d *DiskManager) loadPage(off uint32, buff *[]byte) error {
 		return DiskManagerError{Message: "Invalid buffer provided"}
 	}
 
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	// read into buffer
 	_, err := d.fd.ReadAt(*buff, int64(off))
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
+
+	//bif binary.LittleEndian.Uint32((*buff)[1:5]) == 0 && off != 0 {
+	//b	// read file hole
+	//b	panic(fmt.Sprintf(
+	//b		"zero read: pageID=%d n=%d offset=%d fileSize=%d goroutine=%d",
+	//b		off/8192, n, off, currentFileSize(d.fd), runtime.NumGoroutine(),
+	//b	))
+	//b}
+
+	// fmt.Printf("(diskmanager) reading at offset %d(page %d), result -> %v\n", off, off/8192, (*buff))
 
 	return nil
 }
@@ -156,7 +175,6 @@ func (d *DiskManager) ForceFlush() {
 	defer d.mu.Unlock()
 
 	err := d.fd.Sync()
-
 	if err != nil {
 		panic(fmt.Sprintf("Unable to flush to disk: %s", err.Error()))
 	}
@@ -238,6 +256,8 @@ func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDea
 		d.wg.Wait()
 		d.mu.Unlock()
 
+		d.mu.RLock()
+		defer d.mu.RUnlock()
 		// page marked for deletion, overwrite with 0s
 		_, err := d.fd.WriteAt(*pData, int64(offset))
 		if err != nil {
@@ -247,18 +267,24 @@ func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDea
 		return nil
 	}
 
+	d.mu.RLock()
 	_, err := d.fd.WriteAt(*pData, int64(offset))
 
 	if err != nil {
+		d.mu.RUnlock()
 		return err
 	}
+	d.mu.RUnlock()
 
 	if flush {
+		d.mu.Lock()
 		err = d.fd.Sync()
 
 		if err != nil {
+			d.mu.Unlock()
 			return err
 		}
+		d.mu.Unlock()
 	}
 
 	return nil

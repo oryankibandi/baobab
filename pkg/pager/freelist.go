@@ -24,10 +24,10 @@ type FreeList struct {
 }
 
 func (fl *FreeList) pop() int32 {
-	fmt.Println("(pop) GETTING ITEM FROM FREE LIST...")
+	//  fmt.Println("(pop) GETTING ITEM FROM FREE LIST...")
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
-	fmt.Println("(pop) obtained exclusive lock")
+	// fmt.Println("(pop) obtained exclusive lock")
 
 	if fl.count <= 0 {
 		return -1

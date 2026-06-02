@@ -48,7 +48,7 @@ func TestSetData(t *testing.T) {
 	pge.SwapData(&d)
 
 	t.Run("set_data", func(t *testing.T) {
-		err := en.SetData(&testPage)
+		err := en.SetData(&testPage, true)
 		assert.Nilf(t, err, "Expected no error, got  %v", err)
 
 		d2, err := en.ByteData()
@@ -127,7 +127,7 @@ func TestClear(t *testing.T) {
 	pge := pager.Page{}
 	pge.PageId = key
 	pge.SwapData(&d)
-	err := en.SetData(&pge)
+	err := en.SetData(&pge, true)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got %s", err.Error())
@@ -183,10 +183,8 @@ func TestRefAndUnref(t *testing.T) {
 			t.Fatal("Memory not allocated.")
 		}
 
-		en.entry.Reference = en.reference
-		en.entry.Unreference = en.unref
-		en.entry.getSegType = en.getSegType
 		fr = &en.entry
+		fr.parentEntry = en
 	})
 
 	t.Cleanup(func() {
@@ -222,10 +220,8 @@ func TestGetSegmentType(t *testing.T) {
 			t.Fatal("Memory not allocated.")
 		}
 
-		en.entry.Reference = en.reference
-		en.entry.Unreference = en.unref
-		en.entry.getSegType = en.getSegType
 		fr = &en.entry
+		fr.parentEntry = en
 	})
 
 	t.Cleanup(func() {
@@ -236,7 +232,7 @@ func TestGetSegmentType(t *testing.T) {
 	t.Run("test_getsegmenttype", func(t *testing.T) {
 		en.updateSegment(probationSegment)
 
-		if s := fr.getSegType(); s != probationSegment {
+		if s := fr.getEntrySegType(); s != probationSegment {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected probation segment, got %v", s), t)
 		}
 	})
@@ -269,10 +265,8 @@ func TestRefAndUnrefConcurrent(t *testing.T) {
 			t.Fatal("Memory not allocated.")
 		}
 
-		en.entry.Reference = en.reference
-		en.entry.Unreference = en.unref
-		en.entry.getSegType = en.getSegType
 		fr = &en.entry
+		fr.parentEntry = en
 	})
 
 	t.Cleanup(func() {

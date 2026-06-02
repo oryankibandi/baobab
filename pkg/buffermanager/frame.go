@@ -1,16 +1,13 @@
 package buffermanager
 
 import (
+	// "fmt"
 	"fmt"
 	"sync"
 	"sync/atomic"
 
 	"github.com/oryankibandi/baobab/pkg/pager"
 )
-
-type metadata struct {
-	key uint32
-}
 
 // Frame - a slot in the buffer that is used to store cached pages
 type Frame struct {
@@ -26,11 +23,7 @@ type Frame struct {
 
 	key uint32
 
-	// pin and unpinmethods
-	Reference   func()
-	Unreference func()
-	// injected method to retrieve a frame's segment.
-	getSegType func() SegmentType
+	parentEntry *clockentry
 
 	// Mutex field. 24 bytes
 	mu sync.RWMutex
@@ -64,11 +57,7 @@ func (f *Frame) GetPage() *pager.Page {
 }
 
 // sets data on a frame/entry from a page
-func (f *Frame) SetData(p *pager.Page) error {
-	// f.mu.Lock()
-	// defer f.mu.Unlock()
-	fmt.Printf("Setting data on frame...\n")
-
+func (f *Frame) SetData(p *pager.Page, markDirty bool) error {
 	isIntern, err := p.IsInternal()
 	if err != nil {
 		return err
@@ -77,10 +66,13 @@ func (f *Frame) SetData(p *pager.Page) error {
 	// entry metadata
 	f.isInternal.Store(isIntern)
 	f.isDeleted.Store(false)
-	f.dirty.Store(true)
+
+	if markDirty {
+		f.dirty.Store(true)
+	}
 
 	f.key = uint32(p.PageId)
-	fmt.Printf("Key after setting -> %d\nPageId: %d\n", f.key, p.PageId)
+	//fmt.Printf("Key after setting -> %d\nPageId: %d\n", f.key, p.PageId)
 
 	return nil
 }
@@ -161,4 +153,29 @@ func (f *Frame) Release(shared bool) error {
 
 func (f *Frame) TestAddFrameDummyData() {
 	f.page.TestAddDummyData()
+}
+
+func (f *Frame) Reference() {
+	if f.parentEntry == nil {
+		panic("Invalid frame, parent entry pointer not set.")
+	}
+
+	f.parentEntry.reference()
+}
+
+func (f *Frame) Unreference() {
+	if f.parentEntry == nil {
+		panic(fmt.Sprintf("Invalid frame, parent entry pointer for frame %d not set.", f.getKey()))
+	}
+
+	f.parentEntry.unref()
+}
+
+// returns the segment type of the parentEntry. Useful during testing.
+func (f *Frame) getEntrySegType() SegmentType {
+	if f.parentEntry == nil {
+		panic("Invalid frame, parent entry pointer not set.")
+	}
+
+	return f.parentEntry.getSegType()
 }

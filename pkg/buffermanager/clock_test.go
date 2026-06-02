@@ -23,7 +23,7 @@ func TestNewClock(t *testing.T) {
 	helpers.PrintInfoMsg(fmt.Sprintf("Initial RSS: %dKB", initialRss/1024))
 
 	t.Run("NewClock_low_size", func(t *testing.T) {
-		_, err := NewClock(2)
+		_, err := NewClock(2, true)
 
 		if err == nil {
 			helpers.PrintTestErrorMsg("Expected function to throw err, got nil", t)
@@ -33,7 +33,7 @@ func TestNewClock(t *testing.T) {
 	})
 
 	t.Run("NewClock", func(t *testing.T) {
-		c, err := NewClock(expectedCapacity)
+		c, err := NewClock(expectedCapacity, true)
 
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -102,7 +102,7 @@ func TestEvictConcurrent(t *testing.T) {
 
 	expectedFrameCount := size - 1
 
-	c, err := NewClock(size)
+	c, err := NewClock(size, true)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
@@ -162,7 +162,7 @@ func TestEvictWithoutClearingConcurrent(t *testing.T) {
 	var size uint64 = 1000
 	var unreferencedFrames uint64 = 2
 
-	c, err := NewClock(size)
+	c, err := NewClock(size, true)
 
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
