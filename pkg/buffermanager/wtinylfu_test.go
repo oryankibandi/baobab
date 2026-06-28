@@ -82,7 +82,7 @@ func TestEvictWindow(t *testing.T) {
 	for i := range windowCapacity {
 		t.Run(fmt.Sprintf("%d_testevict_additem", i), func(t *testing.T) {
 			// update frame
-			en, _, err := w.getFreeFrame(pgr)
+			en, err := w.getFreeFrame(pgr, nil)
 			if err != nil {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 			}
@@ -95,6 +95,7 @@ func TestEvictWindow(t *testing.T) {
 
 			// pin all frames apart from the most recent.
 			if i+1 >= windowCapacity {
+				en.unMarkForEviction()
 				f.Unreference()
 				frameToBeEvicted = en
 			}
@@ -121,7 +122,7 @@ func TestEvictWindow(t *testing.T) {
 			helpers.PrintTestErrorMsg("Expected frame to be evicted to be unreferenced", t)
 		}
 
-		en, _, err := w.getFreeFrame(pgr)
+		en, err := w.getFreeFrame(pgr, nil)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 		}
@@ -160,7 +161,7 @@ func TestPromoteToProtected(t *testing.T) {
 
 	for i := range windowCapacity {
 		t.Run(fmt.Sprintf("%d_test_promotetoprotected_additem", i), func(t *testing.T) {
-			en, _, err := w.getFreeFrame(pgr)
+			en, err := w.getFreeFrame(pgr, nil)
 			if err != nil {
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 			}
@@ -171,6 +172,7 @@ func TestPromoteToProtected(t *testing.T) {
 
 			// pin all frames apart from the most recent.
 			if i+1 >= windowCapacity {
+				en.unMarkForEviction()
 				en.unref()
 				protectedSegmentCandidate = en
 			}
@@ -188,7 +190,7 @@ func TestPromoteToProtected(t *testing.T) {
 		}
 
 		// evict item from window cache into probation
-		fr, _, err := w.getFreeFrame(pgr)
+		fr, err := w.getFreeFrame(pgr, nil)
 
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -262,11 +264,12 @@ func TestProtectedEviction(t *testing.T) {
 
 	// 1. fill window cache
 	for range windowFrameCount {
-		f, _, err := w.getFreeFrame(pgr)
+		f, err := w.getFreeFrame(pgr, nil)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected not error,got %v", err), t)
 		}
 		// unref to make available for eviction
+		f.unMarkForEviction()
 		f.unref()
 
 		if seg := f.getSegType(); seg != windowSegment {
@@ -282,10 +285,11 @@ func TestProtectedEviction(t *testing.T) {
 			// 2. fill probation
 			for j := range probationFrameCount {
 				t.Run(fmt.Sprintf("%d_protectedeviction_addtoprobation", j), func(t *testing.T) {
-					f, _, err := w.getFreeFrame(pgr)
+					f, err := w.getFreeFrame(pgr, nil)
 					if err != nil {
-						helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error,got %v", err), t)
+						helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error,got %v", err), t) //FIX: Fix this error
 					}
+					f.unMarkForEviction()
 					f.unref()
 
 					if seg := f.getSegType(); seg != windowSegment {
@@ -323,6 +327,11 @@ func TestProtectedEviction(t *testing.T) {
 					helpers.PrintTestErrorMsg("Increment operation failed.", t)
 				}
 
+				if s := currFrame.getSegType(); s != protectedSegment {
+					w.Stat()
+					helpers.PrintTestErrorMsg(fmt.Sprintf("Expected frame to be promoted to protected, but currently in %d", s), t)
+				}
+
 				itemsPromoted++
 				itemsIterated++
 				frIdx++
@@ -337,15 +346,17 @@ func TestProtectedEviction(t *testing.T) {
 	// 4. refill probation by adding items to window
 	for i := range windowFrameCount {
 		t.Run(fmt.Sprintf("protectedeviction_refillprobation_%d", i), func(t *testing.T) {
-			en, _, err := w.getFreeFrame(pgr)
+			en, err := w.getFreeFrame(pgr, nil)
 			if err != nil {
 				t.Fatalf("Expected no error,got %v", err)
 			}
-			en.unref()
 
 			if seg := en.getSegType(); seg != windowSegment {
 				t.Fatalf("Expected new frame to be in window segment, got %v", seg)
 			}
+
+			en.unMarkForEviction()
+			en.unref()
 
 			helpers.PrintSuccessMsg(fmt.Sprintf("protectedeviction_refillprobation_%d success", i))
 		})
@@ -373,6 +384,7 @@ func TestProtectedEviction(t *testing.T) {
 	//    in probation and protected
 	var unreferencedProbationFrame *clockentry
 	var unreferencedProtectedFrame *clockentry
+	var unreferencedWindowFrame *clockentry
 	probationFrames := make([]*clockentry, 0)
 	protectedFrames := make([]*clockentry, 0)
 	currEntry := &w.cBuffer.bPool[0]
@@ -397,7 +409,6 @@ func TestProtectedEviction(t *testing.T) {
 				if unreferencedProtectedFrame == nil {
 					unreferencedProtectedFrame = currEntry
 					protectedFrames = append(protectedFrames, currEntry)
-					fmt.Printf("5. unrefprotectedframe ref count -> %d\n", unreferencedProtectedFrame.pinCount.Load()-unreferencedProtectedFrame.unpinCount.Load())
 				} else {
 					currEntry.reference()
 					protectedFrames = append(protectedFrames, currEntry)
@@ -408,6 +419,7 @@ func TestProtectedEviction(t *testing.T) {
 			case windowSegment:
 				// reference window cache item.
 				if reservedWindowFrames == 0 {
+					unreferencedWindowFrame = currEntry
 					reservedWindowFrames++
 					fmt.Println("Reserving window  frame item(not referencing)")
 				} else {
@@ -456,7 +468,7 @@ func TestProtectedEviction(t *testing.T) {
 
 	// 7. Add item to window to trigger eviction from probation.
 	t.Run("protectedeviction_evict_from_probation", func(t *testing.T) {
-		f, _, err := w.getFreeFrame(pgr)
+		f, err := w.getFreeFrame(pgr, nil)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error,got %v", err), t)
 		}
@@ -485,28 +497,43 @@ func TestProtectedEviction(t *testing.T) {
 		}
 
 		// add item
-		_, _, err := w.getFreeFrame(pgr)
+		_, err := w.getFreeFrame(pgr, nil)
 		if err == nil {
 			helpers.PrintTestErrorMsg("Expected an error,got nil", t)
 		}
 
 		pageCounter++
 
+		unreferencedProtectedFrame.unMarkForEviction()
 		unreferencedProtectedFrame.unref()
 		helpers.PrintSuccessMsg("protectedeviction_add_to_full_cache success")
 	})
 
 	// 9. Test adding to not full cache
 	t.Run("protectedeviction_add_to_full_cache_with_available_frames", func(t *testing.T) {
-		// unreferencedProtectedFrame is now in probation as a result of previous test above
+		// unreferencedProtectedFrame is now in probation as a result of previous test #7 above
+		unreferencedProtectedFrame.unMarkForEviction()
 		unreferencedProtectedFrame.unref()
 		if unreferencedProtectedFrame.acc {
-			t.Fatal("Unable to dereference frame")
+			t.Fatal("Frame not unreferenced")
+		}
+
+		if unreferencedProtectedFrame.markedForEviction {
+			t.Fatal("Frame still marked for eviction")
+		}
+
+		unreferencedWindowFrame.unMarkForEviction()
+		if unreferencedWindowFrame.acc {
+			t.Fatal("Frame not unreferenced")
+		}
+
+		if unreferencedWindowFrame.markedForEviction {
+			t.Fatal("Frame still marked for eviction")
 		}
 
 		// add item
 		w.Stat()
-		f, _, err := w.getFreeFrame(pgr)
+		f, err := w.getFreeFrame(pgr, nil)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 		}

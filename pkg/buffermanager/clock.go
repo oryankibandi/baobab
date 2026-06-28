@@ -16,7 +16,7 @@ const (
 	// This gives us a chance to find slots that were given a second chance
 	// by the clock sweep algorithm
 	MAX_LOOP    = 2
-	MAX_RETRIES = 5
+	MAX_RETRIES = 2
 )
 
 type clockentry struct {
@@ -35,6 +35,9 @@ type clockentry struct {
 
 	// if its allocated
 	isOccupied bool
+
+	// marked for eviction
+	markedForEviction bool
 
 	// counters
 	pinCount   atomic.Uint64
@@ -73,22 +76,35 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 		start := time.Now()
 		clk.mu.Lock()
 		clkCap := clk.capacity
+		var currEntry *clockentry
 
 		for i := 0; i < int(clkCap)*MAX_LOOP; i++ {
+			currEntry = &clk.bPool[clk.Head]
+			currEntry.mu.Lock()
 			// check if reserved
 			if clk.bPool[clk.Head].reserved {
 				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
 				continue
 			}
 
 			if clk.bPool[clk.Head].acc {
 				// access bit set, advance clock hand
 				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
+				continue
+			}
+
+			// skip if marked for eviction
+			if clk.bPool[clk.Head].markedForEviction {
+				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
 				continue
 			}
 
 			if s := clk.bPool[clk.Head].segtype; s != seg {
 				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
 				continue
 			}
 
@@ -97,21 +113,25 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 				clk.bPool[clk.Head].ref = false
 
 				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
 				continue
 			} else {
 				// both access bit and reference bit unset
-				e := &clk.bPool[clk.Head]
+
 				// reference frame so it doesn't get evicted/accese d by other goroutines i.e. bgwriter
-				e.ref = true
+				currEntry.acc = true
+				currEntry.ref = true
+				currEntry.pinCount.Add(1)
+
+				// mark for eviction
+				currEntry.markedForEviction = true
 
 				// advance clock hand
 				clk.Head = (clk.Head + 1) % int(clkCap)
 
+				currEntry.mu.Unlock()
 				clk.mu.Unlock()
-				// end := time.Since(start)
-				// slog.Info(fmt.Sprintf("(%v) Evicted in %v in %d cycle(s).", seg, end, (i/int(clkCap))+1))
-				// fmt.Printf("Evicted %d\n", e.entry.getKey())
-				return e
+				return currEntry
 			}
 		}
 
@@ -122,20 +142,44 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 		time.Sleep(sleepDur)
 	}
 	// unable to find suitable entry. All entries referenced
+	fmt.Printf("(%d) Unable to find suitable entry, all entries referenced...\n", seg)
 	return nil
 }
 
 // resets an entry after is has been evicted so it's ready
 // for the next user.
 func (clk *clock) clearEntry(e *clockentry) error {
+	// fmt.Printf("clearentry()\n")
 	if e == nil {
 		return BufferManagerError{Message: "clearentry: No entry provided"}
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	err := e.entry.Clear()
 	if err != nil {
 		return err
 	}
+
+	e.acc = false
+	e.ref = false
+	e.isOccupied = false
+
+	e.pinCount.Store(0)
+	e.unpinCount.Store(0)
+
+	e.segtype = unassigned
+
+	return nil
+}
+
+// resets all metadata without clearing the frame's content
+func (clk *clock) resetEntry(e *clockentry) error {
+	if e == nil {
+		return BufferManagerError{Message: "resetentry: No entry provided"}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	e.acc = false
 	e.ref = false
@@ -193,10 +237,49 @@ func (cEntry *clockentry) markVacant() {
 	cEntry.isOccupied = false
 }
 
+func (cEntry *clockentry) occupied() bool {
+	cEntry.mu.RLock()
+	defer cEntry.mu.RUnlock()
+	return cEntry.isOccupied
+}
+
+func (cEntry *clockentry) refIfOccupied() bool {
+	cEntry.mu.Lock()
+	defer cEntry.mu.Unlock()
+	if !cEntry.isOccupied {
+		return false
+	}
+
+	// if entry is too be evicted, return false
+	if cEntry.markedForEviction {
+		return false
+	}
+
+	cEntry.acc = true
+	cEntry.ref = true
+
+	cEntry.pinCount.Add(1)
+
+	return true
+}
+
 func (cEntry *clockentry) updateSegment(seg SegmentType) {
 	cEntry.mu.Lock()
 	cEntry.segtype = seg
 	cEntry.mu.Unlock()
+}
+
+// updateSegmentCAS Checks if the entry's segment matches old then uppdates it to new seg.
+// This is a Compare and Swap Operation to handle concurrent attempts to uupdate the entry.
+// If old segment does not match, returns false else updates and retuns true
+func (cEntry *clockentry) updateSegmentCAS(old SegmentType, seg SegmentType) bool {
+	cEntry.mu.Lock()
+	defer cEntry.mu.Unlock()
+	if s := cEntry.segtype; s != old {
+		return false
+	}
+	cEntry.segtype = seg
+	return true
 }
 
 func (cEntry *clockentry) reference() {
@@ -209,20 +292,33 @@ func (cEntry *clockentry) reference() {
 }
 
 func (cEntry *clockentry) unref() {
+	cEntry.mu.Lock()
+	defer cEntry.mu.Unlock()
 	pinCount := cEntry.pinCount.Load()
 	unpinCount := cEntry.unpinCount.Load()
 
-	if pinCount == unpinCount {
-		return
+	if pinCount <= unpinCount {
+		panic(fmt.Sprintf("Called unref with equal no. of pins and unpins. %d pinned and %d unpin count", pinCount, unpinCount))
 	}
 
 	cEntry.unpinCount.Add(1)
 
+	// no other thread referencing this frame
 	if pinCount-unpinCount == 1 {
-		cEntry.mu.Lock()
 		cEntry.acc = false
-		cEntry.mu.Unlock()
 	}
+}
+
+func (cEntry *clockentry) markForEviction() {
+	cEntry.mu.Lock()
+	defer cEntry.mu.Unlock()
+	cEntry.markedForEviction = true
+}
+
+func (cEntry *clockentry) unMarkForEviction() {
+	cEntry.mu.Lock()
+	defer cEntry.mu.Unlock()
+	cEntry.markedForEviction = false
 }
 
 func (cEntry *clockentry) isReferenced() bool {
@@ -230,6 +326,31 @@ func (cEntry *clockentry) isReferenced() bool {
 	defer cEntry.mu.RUnlock()
 
 	return cEntry.acc
+}
+
+// checks if an entry is referenced. If already referenced return false, else
+// reference and return true
+func (cEntry *clockentry) refIfNotReferenced() bool {
+	cEntry.mu.Lock()
+	defer cEntry.mu.Unlock()
+
+	if cEntry.acc {
+		return false
+	}
+
+	if cEntry.markedForEviction {
+		return false
+	}
+
+	if !cEntry.isOccupied {
+		return false
+	}
+
+	cEntry.acc = true
+	cEntry.ref = true
+
+	cEntry.pinCount.Add(1)
+	return true
 }
 
 func (cEntry *clockentry) getSegType() SegmentType {
@@ -261,6 +382,11 @@ func NewClock(itemCount uint64, reserve bool) (*clock, error) {
 
 	// set head at first item
 	clk.Head = 0
+
+	//  populate parent entries
+	for i := 0; i < int(itemCount); i++ {
+		clk.bPool[i].entry.parentEntry = &clk.bPool[i]
+	}
 
 	// reserve one entry
 	if reserve {

@@ -136,7 +136,7 @@ func (d *DiskManager) WriteReq(off uint32, buff *[]byte, size int64, isDead bool
 	var flag byte
 	if isDead {
 		// set dead flag
-		helpers.SetFlag(&flag, 6) // 0100 000
+		helpers.SetFlag(&flag, []int{6}) // 0100 000
 	}
 	writeReq := ioReq{
 		buff:    buff,
@@ -239,25 +239,22 @@ func (d *DiskManager) Close() {
 //	isDead if the page is dead(has logically deleted). If true, overwrite with 0
 func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDead bool, flush bool) error {
 	if isDead {
+		var wg sync.WaitGroup
 		// rewrite with zeros
-		d.mu.Lock()
 		// to prevent false sharing, ensure pData is divided into
 		// 64 byte chunks for processing
 		for i := range size / CACHE_LINE_SIZE {
-			d.wg.Add(1)
+			wg.Add(1)
 			go func(arr []byte) {
 				for j := range arr {
 					arr[j] &= 0
 				}
-				d.wg.Done()
+				wg.Done()
 			}((*pData)[i*CACHE_LINE_SIZE : (i*CACHE_LINE_SIZE)+CACHE_LINE_SIZE])
 		}
 
-		d.wg.Wait()
-		d.mu.Unlock()
+		wg.Wait()
 
-		d.mu.RLock()
-		defer d.mu.RUnlock()
 		// page marked for deletion, overwrite with 0s
 		_, err := d.fd.WriteAt(*pData, int64(offset))
 		if err != nil {
@@ -277,6 +274,7 @@ func (d *DiskManager) flushPage(pData *[]byte, size uint32, offset uint32, isDea
 	d.mu.RUnlock()
 
 	if flush {
+		helpers.PrintInfoMsg("FSYNCING DB FILE...")
 		d.mu.Lock()
 		err = d.fd.Sync()
 

@@ -28,81 +28,52 @@ const (
 type CacheConfig struct {
 	// size of the cache in KB. Minimum and default size is 8192KB(8MB)
 	CacheSize uint64
-	// No. of threads to run. Defaults to all available threads.
-	numThreads uint64
+	// No. of shards to run. Defaults to all available threads.
+	numShards uint64
 }
 
 type BufferManager struct {
-	// CacheMap   map[uint32]*clockentry
-	// wTinyLfu   *WTinyLfu
 	mu         sync.RWMutex
 	frameCount uint32
-	// diryList   *dPages
-	pager *pager.Pager
-	// xxhash hasher
-	hasher tiny.Hasher
-	// // exit channel
-	// exitchan *chan struct{}
+	pager      *pager.Pager
+	hasher     tiny.Hasher
 
-	// // workers
-	// workers *bmWorkerPool
-
-	// // wait group
+	// wait group
 	wg        sync.WaitGroup
 	shards    []*shard
 	numShards uint64
 }
 
-// Delete an item from cache. flush parameter is set to true if it's a direct request from client. If bgwriter, it is false since the page is already flushed.
-// func (c *BufferManager) Delete(key uint32, flush bool) error {
-// 	c.rmu.Lock()
-// 	defer c.rmu.Unlock()
-// 	val, ok := c.CacheMap[key]
-// 	if !ok {
-// 		return BufferManagerError{Message: "No key in cache"}
-// 	}
-//
-// 	if flush && val.isDirty() {
-// 		err := c.prepareForEviction(val)
-// 		fmt.Println("(Delete) prepared for eviction...")
-//
-// 		if err != nil {
-// 			panic(err)
-// 		}
-//
-// 		// delete from dirty page list
-// 		c.diryList.removePage(key)
-// 	}
-//
-// 	delete(c.CacheMap, key)
-// 	c.freeFrames++
-//
-// 	if c.frameCount > 0 {
-// 		c.frameCount++
-// 	}
-//
-// 	fmt.Println("c.Delete() DONE>..")
-// 	return nil
-// }
+// Delete removes the frame with pid provided.
+func (c *BufferManager) Delete(pid uint32) error {
+	idx := c.getShard(pid)
+
+	err := c.shards[idx].delete(pid)
+	return err
+}
 
 func (c *BufferManager) GetRootPageId() uint32 {
 	return c.pager.RootPage()
 }
 
 // Get retrieves frame with the provided pid
-func (c *BufferManager) Get(pid uint32) (f *Frame, e error) {
-	frChan := make(chan *Frame)
-	erChan := make(chan error)
+func (c *BufferManager) Get(pid uint32) (f *Frame, cHit bool, e error) {
 	idx := c.getShard(pid)
 
-	go func(fChan chan *Frame, eChan chan error) {
-		fr, err := c.shards[idx].get(pid)
-		eChan <- err
-		fChan <- fr
-	}(frChan, erChan)
+	fr, hit, err := c.shards[idx].get(pid)
+	if err != nil {
+		return nil, false, err
+	}
 
-	err := <-erChan
-	fr := <-frChan
+	if fr == nil {
+		panic("Could not get frame")
+	}
+
+	return fr, hit, nil
+}
+
+func (c *BufferManager) GetFromShard(pid uint32, shardId uint64) (f *Frame, e error) {
+	fr, _, err := c.shards[shardId].get(pid)
 	if err != nil {
 		return nil, err
 	}
@@ -114,22 +85,22 @@ func (c *BufferManager) Get(pid uint32) (f *Frame, e error) {
 	return fr, nil
 }
 
-// Get retrieves frame with the provided pid
+// Retrieves a new frame from the buffer pool and assigns it a pageId/blockId.
+// A new frame is automatically referenced/pinned to ensure it is not evicted
+// when initializing so the caller has to ensure they unreference it after use
+// by calling f.Unreference().
+//
+//	 parameters:
+//		internal - true if new frame holds an internal node, else false
+//		setAsRoot - if set to true, new pageId is set as the root.
+//
+//	 returns pointer to new frame, and error if any
 func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) {
-	frChan := make(chan *Frame)
-	erChan := make(chan error)
-
 	newPid := c.pager.NewPageId()
 	idx := c.getShard(newPid)
 
-	go func(fChan chan *Frame, eChan chan error) {
-		fr, err := c.shards[idx].newFrame(internal, setAsRoot, newPid)
-		eChan <- err
-		fChan <- fr
-	}(frChan, erChan)
+	fr, err := c.shards[idx].newFrame(internal, setAsRoot, newPid)
 
-	err := <-erChan
-	fr := <-frChan
 	if err != nil {
 		return nil, err
 	}
@@ -178,11 +149,13 @@ func (c *BufferManager) getShard(key uint32) uint64 {
 
 // Safely close down cache
 func (c *BufferManager) Close() error {
-	c.wg.Add(int(c.numShards))
 	for _, sh := range c.shards {
+		c.wg.Add(1)
 		go func() {
+			fmt.Printf("(shard %d/%d) terminating shard...\n", sh.shardId, c.numShards)
 			defer c.wg.Done()
 			sh.close()
+			fmt.Printf("(shard %d) shard terminated...\n", sh.shardId)
 		}()
 	}
 	c.wg.Wait()
@@ -202,9 +175,11 @@ func (c *BufferManager) Close() error {
 //	cacheSize - size of the cache in KB. Minimum and default size is 8192KB(8MB)
 //	wal - initialized wal instance
 //	config - disk manager config
+//	testing - if in testmode the provided numShard is used rather than limiting
+//		  to numCPU
 //
 // Returns:
-func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager) (*BufferManager, error) {
+func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager, testing bool) (*BufferManager, error) {
 	if cacheConfig.CacheSize < MIN_CACHE_SIZE_KB {
 		return nil, BufferManagerError{Message: fmt.Sprintf("Minimum cache size is %dKB", MIN_CACHE_SIZE_KB)}
 	}
@@ -219,24 +194,24 @@ func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager) (
 
 	numCPU := runtime.NumCPU()
 
-	if cacheConfig.numThreads < uint64(numCPU) && cacheConfig.numThreads != 0 {
-		numCPU = int(cacheConfig.numThreads)
+	if cacheConfig.numShards < uint64(numCPU) && !testing || cacheConfig.numShards == 0 {
+		cacheConfig.numShards = uint64(numCPU)
 	}
 
-	helpers.PrintInfoMsg(fmt.Sprintf("Starting buffer manager in %d threads", numCPU))
-	perShardCacheSize := cacheConfig.CacheSize / uint64(numCPU)
+	helpers.PrintInfoMsg(fmt.Sprintf("Starting buffer manager in %d threads", cacheConfig.numShards))
+	perShardCacheSize := cacheConfig.CacheSize / cacheConfig.numShards
 
 	bufferMan := BufferManager{
-		numShards: uint64(numCPU),
-		shards:    make([]*shard, numCPU),
+		numShards: cacheConfig.numShards,
+		shards:    make([]*shard, cacheConfig.numShards),
 		hasher:    tiny.NewMapHash(),
 		pager:     pgr,
 	}
 
 	metadataShard := bufferMan.getShard(0)
 
-	for i := range numCPU {
-		sh, err := newShard(uint64(i), wal, pgr, perShardCacheSize, i == int(metadataShard))
+	for i := range cacheConfig.numShards {
+		sh, err := newShard(uint64(i), wal, pgr, perShardCacheSize, i == metadataShard)
 		if err != nil {
 			return nil, err
 		}

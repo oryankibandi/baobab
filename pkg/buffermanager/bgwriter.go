@@ -12,7 +12,7 @@ import (
 
 const (
 	// Max # of pages to flush in one operation
-	MAX_PAGES = 100
+	MAX_PAGES = 5000
 	// delay between BgWriter activity writes (Milliseconds)
 	BGWRITER_DELAY = 200
 	// size after which to force flush to disk(bypass OS cache) size after which to force flush to disk(bypass OS cache (Bytes)
@@ -32,6 +32,7 @@ type BgWriter struct {
 	// Head of the clock buffer
 	clockBuffer   *clock
 	clockCapacity uint64
+	shardId       uint64
 	mu            sync.Mutex
 	wg            sync.WaitGroup
 	// exit channel
@@ -46,7 +47,8 @@ func (bw *BgWriter) Start(wg *sync.WaitGroup) {
 
 	var currFrame *Frame
 	var currEntry *clockentry
-	var currFrameBuff *[]byte
+	// var currFrameBuff *[]byte
+	tmp := make([]byte, 8192)
 
 	// time.Sleep(time.Second * 10)
 BgWriterLoop:
@@ -57,58 +59,41 @@ BgWriterLoop:
 				break BgWriterLoop
 			default:
 				currEntry = &bw.clockBuffer.bPool[i]
-				if currEntry.isReferenced() {
+				if !currEntry.refIfNotReferenced() {
 					continue
 				}
 
-				currEntry.reference()
 				currFrame = &currEntry.entry
-
 				if !currFrame.isDirty() {
 					currEntry.unref()
 					continue
 				}
 
-				err := currFrame.Acquire(false)
-				if err != nil {
-					helpers.PrintErrorMsg(err.Error())
-					currEntry.unref()
-					continue
-				}
-				k := currFrame.getKey()
-				// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) acquired latch for frame id: %d", k))
-
-				currFrameBuff, _, err = currFrame.RawBufferSlice()
-				if err != nil {
-					panic("Unable to get frame buffer")
-				}
-
-				// helpers.PrintInfoMsg("(bgwriter) flushing page...")
 				shouldFlush := bw.writtenPages+1 == MAX_PAGES
 
-				err = bw.pgr.WritePage(k, currFrameBuff, shouldFlush)
+				currFrame.Acquire(false)
+				k := currFrame.key
+				currFrameBuff, _, err := currFrame.RawBufferSlice()
 				if err != nil {
-					// panic(fmt.Sprintf("(bgwriter) Error writing to page: %s\n", err.Error()))
+					helpers.PrintErrorMsg(fmt.Sprintf("(bgwriter) Error retrieving raw buffer: %s\n", err))
+					currFrame.Release(false)
+					currEntry.unref()
+					continue
+				}
+				copy(tmp, *currFrameBuff)
+				currFrame.MarkClean()
+				currFrameBuff = nil
+				currFrame.Release(false)
+
+				err = bw.pgr.WritePage(k, &tmp, shouldFlush)
+				if err != nil {
 					helpers.PrintErrorMsg(fmt.Sprintf("(bgwriter) Error writing to page: %s\n", err.Error()))
-					err = currFrame.Release(false)
-					if err != nil {
-						panic(err.Error())
-					}
 					currEntry.unref()
 					continue
 				}
 
-				currFrame.MarkClean()
-				// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) Curr frame dirty -> %t", currFrame.isDirty()))
-
-				err = currFrame.Release(false)
-				if err != nil {
-					panic(err)
-				}
-				// helpers.PrintInfoMsg(fmt.Sprintf("(bgwriter) Released latch on frame %d", k))
 				currEntry.unref()
 				bw.writtenPages++
-
 			}
 
 			if bw.writtenPages >= MAX_PAGES {
@@ -151,6 +136,7 @@ func NewBgWriter(cache *shard, wal *wal.WAL, clockBuffHead *clock, pgr *pager.Pa
 		clockBuffer:   clockBuffHead,
 		clockCapacity: clockBuffHead.capacity,
 		pgr:           pgr,
+		shardId:       cache.shardId,
 		exitchan:      cache.exitchan,
 	}
 }

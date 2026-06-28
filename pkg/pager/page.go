@@ -50,7 +50,7 @@ func (p *Page) UpdateRightPtr(pageId int32) error {
 func (p *Page) MarkAsDead() error {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
-	helpers.SetFlag(&p.pgeData[0], Dead)
+	helpers.SetFlag(&p.pgeData[0], []int{Dead, Dirty})
 
 	return nil
 }
@@ -58,13 +58,13 @@ func (p *Page) MarkAsDead() error {
 func (p *Page) MarkDirty() {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
-	helpers.SetFlag(&p.pgeData[0], Dirty)
+	helpers.SetFlag(&p.pgeData[0], []int{Dirty})
 }
 
 func (p *Page) MarkClean() {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
-	helpers.UnsetFlag(&p.pgeData[0], Dirty)
+	helpers.UnsetFlag(&p.pgeData[0], []int{Dirty})
 }
 
 // Check if page is marked for deletion
@@ -135,7 +135,7 @@ func (p *Page) initializePage(pageId uint32, internal bool) error {
 
 	// set is internal
 	if internal {
-		helpers.SetFlag(&p.pgeData[0], IsInternal)
+		helpers.SetFlag(&p.pgeData[0], []int{IsInternal})
 	}
 
 	return nil

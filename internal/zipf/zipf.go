@@ -3,6 +3,7 @@ package zipf
 import (
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,7 @@ type Zipf struct {
 	hupp    float64
 	totArea float64
 	rnd     *rand.Rand
+	mu      sync.Mutex
 }
 
 // Calculates and returns h(x) using: h(x) = ((v + x) ** (1-s))/(1-s))
@@ -30,6 +32,8 @@ func (z *Zipf) h(x float64) float64 {
 
 // Generate U[0, 1]
 func (z *Zipf) rng() float64 {
+	z.mu.Lock()
+	defer z.mu.Unlock()
 	return z.rnd.Float64()
 }
 

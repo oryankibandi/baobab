@@ -124,8 +124,9 @@ func TestEvictConcurrent(t *testing.T) {
 
 		clkEntry.markOccupied()
 		clkEntry.updateSegment(windowSegment)
-		if i < expectedFrameCount-unreferencedFrames {
-			clkEntry.reference()
+		if i >= expectedFrameCount-unreferencedFrames {
+			clkEntry.unMarkForEviction()
+			clkEntry.unref()
 		}
 	}
 
@@ -143,8 +144,12 @@ func TestEvictConcurrent(t *testing.T) {
 					helpers.PrintTestErrorMsg("Expected evicted entry, got nil", t)
 				}
 
-				if e.acc {
-					helpers.PrintTestErrorMsg("Expected acces bit to be unset.", t)
+				if !e.acc {
+					helpers.PrintTestErrorMsg("Expected acces bit to be set.", t)
+				}
+
+				if !e.markedForEviction {
+					helpers.PrintTestErrorMsg("Expected frame to be marked for eviction.", t)
 				}
 
 				helpers.PrintSuccessMsg(fmt.Sprintf("%d_evict_concurrent success", i))
@@ -161,6 +166,7 @@ func TestEvictWithoutClearingConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	var size uint64 = 1000
 	var unreferencedFrames uint64 = 2
+	expectedFrameCount := size - 1
 
 	c, err := NewClock(size, true)
 
@@ -175,7 +181,7 @@ func TestEvictWithoutClearingConcurrent(t *testing.T) {
 	defer c.close()
 
 	// add data
-	for i := range size - 1 {
+	for i := range expectedFrameCount {
 		clkEntry = c.EvictWithoutClearing(unassigned)
 
 		if clkEntry == nil {
@@ -184,8 +190,9 @@ func TestEvictWithoutClearingConcurrent(t *testing.T) {
 
 		clkEntry.markOccupied()
 		clkEntry.updateSegment(windowSegment)
-		if i < size-unreferencedFrames {
-			clkEntry.reference()
+		if i >= expectedFrameCount-unreferencedFrames {
+			clkEntry.unMarkForEviction()
+			clkEntry.unref()
 		}
 	}
 
@@ -199,11 +206,15 @@ func TestEvictWithoutClearingConcurrent(t *testing.T) {
 			t.Run(fmt.Sprintf("%d_evictwithoutclearing_concurrent", i), func(t *testing.T) {
 				e := c.EvictWithoutClearing(windowSegment)
 				if e == nil {
-					helpers.PrintTestErrorMsg("Expected evicted entry, got nil", t)
+					helpers.PrintTestErrorMsg("Expected evicted entry, got nil", t) // FIX: Fix this error.
 				}
 
-				if e.acc {
-					helpers.PrintTestErrorMsg("Expected acces bit to be unset.", t)
+				if !e.acc {
+					helpers.PrintTestErrorMsg("Expected acces bit to be set.", t)
+				}
+
+				if !e.markedForEviction {
+					helpers.PrintTestErrorMsg("Expected frame to be marked for eviction.", t)
 				}
 
 				if !e.isOccupied {

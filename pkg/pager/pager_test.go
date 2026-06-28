@@ -181,6 +181,7 @@ func TestReadAndWritePage(t *testing.T) {
 	var metaPage Page
 	var testPage Page
 	var testRootPage Page
+	var pid uint32
 
 	testPageCellCount := 50
 
@@ -221,7 +222,8 @@ func TestReadAndWritePage(t *testing.T) {
 
 	// initialize pages
 	t.Run("test_initialize_page", func(t *testing.T) {
-		pgeIdInternal, err := pgr.NewPage(true, true, &testRootPage)
+		pid = pgr.NewPageId()
+		pgeIdInternal, err := pgr.NewPage(true, true, &testRootPage, pid)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize a new page: %s", err.Error()), t)
 		}
@@ -239,7 +241,8 @@ func TestReadAndWritePage(t *testing.T) {
 		}
 		helpers.PrintInfoMsg(fmt.Sprintf("Root page assigned pageId --> %d", pgeIdInternal))
 
-		pgeIdLeaf, err := pgr.NewPage(false, false, &testPage)
+		pid = pgr.NewPageId()
+		pgeIdLeaf, err := pgr.NewPage(false, false, &testPage, pid)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize a new page: %s", err.Error()), t)
 		}
@@ -511,7 +514,8 @@ func TestConcurrentReadWrite(t *testing.T) {
 
 	// initialize & fill read set with 0s
 	for i := range readPageCount {
-		_, err := pgr.NewPage(false, false, &readSet[i])
+		pid := pgr.NewPageId()
+		_, err := pgr.NewPage(false, false, &readSet[i], pid)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize read set page: %s", err.Error()), t)
 		}
@@ -532,7 +536,8 @@ func TestConcurrentReadWrite(t *testing.T) {
 
 	// fill write set with 0s
 	for i := range writePageCount {
-		_, err := pgr.NewPage(false, false, &writeSet[i])
+		pid := pgr.NewPageId()
+		_, err := pgr.NewPage(false, false, &writeSet[i], pid)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize write set page: %s", err.Error()), t)
 		}
@@ -655,12 +660,14 @@ func TestFreeList(t *testing.T) {
 
 	t.Run("test_freelist", func(t *testing.T) {
 		// initialize the first two pages
-		pageId1, err = pgr.NewPage(false, false, &page1)
+		pid := pgr.NewPageId()
+		pageId1, err = pgr.NewPage(false, false, &page1, pid)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize page1: %s", err.Error()), t)
 		}
 
-		pageId2, err = pgr.NewPage(false, false, &page2)
+		pid = pgr.NewPageId()
+		pageId2, err = pgr.NewPage(false, false, &page2, pid)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize page2: %s", err.Error()), t)
 		}
@@ -684,7 +691,7 @@ func TestFreeList(t *testing.T) {
 		}
 
 		// delete page 1
-		helpers.SetFlag(&(page1.pgeData[0]), Dead)
+		helpers.SetFlag(&(page1.pgeData[0]), []int{Dead})
 
 		// flush page1 to ensure it is persisted
 		err = pgr.WritePage(pageId1, &page1Buff, false)
@@ -697,7 +704,8 @@ func TestFreeList(t *testing.T) {
 		}
 
 		// initialize new page
-		pageId3, err = pgr.NewPage(false, false, &page3)
+		pid = pgr.NewPageId()
+		pageId3, err = pgr.NewPage(false, false, &page3, pid)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to initialize page3: %s", err.Error()), t)
 		}

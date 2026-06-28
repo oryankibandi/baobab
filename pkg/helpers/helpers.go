@@ -325,21 +325,27 @@ func BitIsSet(flag *byte, pos int) bool {
 }
 
 // Unsets bit on f at position pos
-func UnsetFlag(f *byte, pos int) {
-	var mask byte
-	mask = 1 << byte(pos)
+func UnsetFlag(f *byte, pos []int) {
+	var mask byte = 0x00
+
+	for _, p := range pos {
+		mask |= 1 << byte(p)
+	}
 
 	// unset flag (^AND)
 	*f = *f & (^mask)
 }
 
-// Unsets bit on f at position pos
-func SetFlag(f *byte, pos int) {
-	var mask byte
-	mask = 1 << byte(pos)
+// Unsets bit on f at positions pos
+func SetFlag(f *byte, pos []int) {
+	var mask byte = 0x00
 
-	// unset flag (^AND)
+	for _, p := range pos {
+		mask |= 1 << byte(p)
+	}
+	// set flag (OR)
 	*f |= mask
+
 }
 
 // Given startOff and endOff of a log record, checks if the data crosses the page boundary

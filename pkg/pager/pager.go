@@ -58,7 +58,7 @@ const (
 
 const (
 	MAX_REQ_JOBS                = 1500 // max number of io requests to send to disk manager
-	MAX_WORKERS                 = 5000 // default no. of workers.
+	MAX_WORKERS                 = 5500 // default no. of workers.
 	MAX_PAGE_WRITE_BEFORE_FLUSH = 1000
 )
 
@@ -298,8 +298,8 @@ func (pgr *Pager) WritePage(pageId uint32, buff *[]byte, flush bool) error {
 		return PagerError{Message: "job queue not initialized."}
 	}
 
-	if len(*buff) != PAGE_SIZE_BYTES {
-		return PagerError{Message: fmt.Sprintf("Invalid buffer size. Expected buffer size of %d bytes", PAGE_SIZE_BYTES)}
+	if l := len(*buff); l != PAGE_SIZE_BYTES {
+		return PagerError{Message: fmt.Sprintf("Invalid buffer size. Expected buffer size of %d bytes, but got %d bytes", PAGE_SIZE_BYTES, l)}
 	}
 
 	isDead := helpers.BitIsSet(&((*buff)[0]), Dead)
@@ -531,7 +531,7 @@ func NewPager(pgrConfig PagerConfig) (pager *Pager, e error) {
 	if err = pgr.workers.startWorkers(pgr, pgrConfig.WorkerSize); err != nil {
 		pgr.freeList.close()
 		pgr.dManager.Close()
-		return nil, PagerError{Message: "Unable to start workers"}
+		return nil, PagerError{Message: fmt.Sprintf("Unable to start workers: %s", err.Error())}
 	}
 
 	return pgr, nil
@@ -539,6 +539,7 @@ func NewPager(pgrConfig PagerConfig) (pager *Pager, e error) {
 
 // Syncs all OS buffer content to disk then calls close on diskmanager and freeList
 func (pgr *Pager) Close() {
+	pgr.Flush()
 	pgr.workers.shutdown()
 	pgr.dManager.ForceFlush()
 	pgr.dManager.Close()
