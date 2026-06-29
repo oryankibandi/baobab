@@ -1,5 +1,9 @@
 # Baobab
 
+## License
+This project is licensed under the Mozilla Public License 2.0. 
+See LICENSE for details.
+
 ![Baobab Logo](logos/baobab.png)
 
 Baobab is a simple B+ Tree based key-value store written in Go.
