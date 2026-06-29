@@ -15,6 +15,7 @@ bin/
 
 # profile files
 *.prof
+*.test
 
 # test bash scripts
 *.sh

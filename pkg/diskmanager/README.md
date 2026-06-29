@@ -19,17 +19,17 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
  +----------------------+  offset 20
  ```
 
- ### Page Layout(Heap Page)
+ ### Page Layout
 ```bash
  +----------------------+  offset 0
  | PageHeaderData       |  (fixed-size metadata)
- +----------------------+  offset 27
+ +----------------------+  offset 51 (lower offset)
  | cell pointer         |  ↓ (one entry per tuple)
  +----------------------+
  | ... free space ...   |
  +----------------------+
  | tuple data ("cells") |  ↑ Data cells
- +----------------------+  offset 8176
+ +----------------------+  offset 8176 (upper offset)
  | special space        |  Padding 16 Bytes (rarely used in heap pages)
  +----------------------+  offset 8192
  ```
@@ -42,25 +42,25 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
 |     Page ID           |
 +-----------------------+   offset 5
 |     LSN               |
-+-----------------------+   offset 13
-|     Item Count        |
 +-----------------------+   offset 17
-|     Free Space        |
+|     Item Count        |
 +-----------------------+   offset 21
-|     Upper Offset      |
+|     Free Space        |
 +-----------------------+   offset 25
-|     Lower Offset      |
+|     Upper Offset      |
 +-----------------------+   offset 29
-|     Magic No.         |
+|     Lower Offset      |
 +-----------------------+   offset 33
+|     Magic No.         |
++-----------------------+   offset 37
 |     Checksum          |
-+-----------------------+   offset 35
-|     Right Child       |
 +-----------------------+   offset 39
-|     Right Sibling     |
+|     Right Child       |
 +-----------------------+   offset 43
-|     Left Sibling      |
+|     Right Sibling     |
 +-----------------------+   offset 47
+|     Left Sibling      |
++-----------------------+   offset 51
 
 ```
 
@@ -71,6 +71,14 @@ Below shows the layout structure for the metadata page, 8K page and data cell la
  | [bytes] Flags | [int] Key Size | [int] value size | []int pageId | [bytes] key | [bytes] value |
  +------------------------------------------------------------------------------------------------+
  ```
+
+### Cell Pointer
+```bash
+0        1         5
++--------+---------+
+| Flags  | Offset  |
++--------+---------+
+```
 
 ## Flags
 

@@ -4,8 +4,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"time"
+
+	"github.com/oryankibandi/baobab/pkg/logger"
 )
 
 // sizes in bytes
@@ -13,9 +16,9 @@ const (
 	WAL_PAGE_SIZE        = 8192
 	WAL_PAGE_HEADER_SIZE = 8
 	WAL_SEG_FILE_SIZE    = 16777216
-	BLOG_HEADER_SIZE     = 21
-	CHECKPOINT_SIZE      = 13
-	LSN_SIZE             = 8
+	BLOG_HEADER_SIZE     = 25
+	CHECKPOINT_SIZE      = 17
+	LSN_SIZE             = 12
 )
 
 // WAL config
@@ -44,7 +47,7 @@ type OperationType int
 
 // Structure of a log, otherwise known as B-LOG
 type BLog struct {
-	header  *BLogHeader   // 22 byte Header
+	header  *BLogHeader   // 25 byte Header
 	opType  OperationType // Type of operation (1 byte)
 	keySize uint32        // Size of key (4 bytes)
 	key     []byte        // Key (keySize)
@@ -56,7 +59,7 @@ type BLog struct {
 // Structure of the B-LOG header
 type BLogHeader struct {
 	flag   byte   // 1 byte header flags
-	lsn    []byte // 8 byte log sequence number
+	lsn    []byte // 12 byte log sequence number
 	pageId uint32 // ID of page where this change affects. This will be used to compare LSN during recovery
 	crc    uint32 // Cyclic Redundacy Check number for integrity checks
 	lSize  uint32 // Size of B-LOG
@@ -80,6 +83,7 @@ type WAL struct {
 	walBuff   *WALBuffer
 	walWriter *WalWriter
 	walReader *WalReader
+	logger    *logger.BaobabLogger
 }
 
 // Returns the raw byte  value of the B-LOG heeader
@@ -89,10 +93,10 @@ func (h *BLogHeader) toBytes() [BLOG_HEADER_SIZE]byte {
 	var hdr [BLOG_HEADER_SIZE]byte
 
 	hdr[0] = h.flag
-	copy(hdr[1:9], h.lsn)
-	binary.LittleEndian.PutUint32(hdr[9:13], h.lSize)
-	binary.LittleEndian.PutUint32(hdr[13:17], h.pageId)
-	binary.LittleEndian.PutUint32(hdr[17:21], h.crc)
+	copy(hdr[1:13], h.lsn)
+	binary.LittleEndian.PutUint32(hdr[13:17], h.lSize)
+	binary.LittleEndian.PutUint32(hdr[17:21], h.pageId)
+	binary.LittleEndian.PutUint32(hdr[21:25], h.crc)
 
 	log.Println("(toBytes) BLOG HEADER ==> ", hdr)
 
@@ -127,15 +131,15 @@ func (b *BLog) toBytes() []byte {
 	}
 
 	// check for overflow
-	bLogData = b.checkLogOverflow(bLogData, pgeId, off)
+	bLogData = checkLogOverflow(bLogData, pgeId, off)
 
 	return bLogData
 }
 
-// checks if a B-LOG data has crossed page boundaries and inserts
+// checks if a B-LOG data has crossed page boundary and inserts
 // WAL page header in the appropriate position, and returns the
 // new formatted log data
-func (b *BLog) checkLogOverflow(data []byte, page uint32, offset uint32) []byte {
+func checkLogOverflow(data []byte, page uint32, offset uint32) []byte {
 	endOff := int(offset) + len(data)
 
 	if endOff < WAL_PAGE_SIZE {
@@ -156,7 +160,8 @@ func (b *BLog) checkLogOverflow(data []byte, page uint32, offset uint32) []byte 
 	}
 
 	// get index of overflow
-	idx := endOff - WAL_PAGE_SIZE
+	factor := uint32(math.Floor(float64(offset/WAL_PAGE_SIZE))) + 1
+	idx := (WAL_PAGE_SIZE * factor) - offset
 
 	// Create WAL page size
 	walPgeHdr := WALPageHeader{
@@ -178,6 +183,12 @@ func (c *CheckPoint) toBytes() []byte {
 	chckpnt[0] = c.flag
 	binary.LittleEndian.PutUint32(chckpnt[1:5], c.redoPoint)
 	chckpnt = append(chckpnt[:5], c.checkpointLSN...)
+
+	page := binary.LittleEndian.Uint32(c.checkpointLSN[:4])
+	off := binary.LittleEndian.Uint32(c.checkpointLSN[4:])
+
+	// check if log crosses page boundary.
+	chckpnt = checkLogOverflow(chckpnt, page, off)
 
 	return chckpnt
 }
@@ -205,13 +216,14 @@ func (w *WAL) AddPutLog(pageId uint32, key []byte, val []byte) ([]byte, error) {
 	}
 
 	// calculate size of log
+	// HEADER_SIZE + Operation(1 byte) + key size (4 bytes) + val size (4 bytes) + kLen + vLen
 	lSize := BLOG_HEADER_SIZE + 9 + kLen + vLen
 
 	lsn := w.walWriter.assignLSN(uint32(lSize))
 
 	hdr := BLogHeader{
 		flag:   0x0, // Initialized with first bit flag unset for logs
-		lsn:    lsn,
+		lsn:    lsn, // 12-byte LSN
 		pageId: pageId,
 		crc:    0, // TBC when adding CRC
 		lSize:  uint32(lSize),
@@ -239,12 +251,14 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 		return WalError{Message: "Invalid LSN size"}
 	}
 
-	// get log size
-	s, err := w.walReader.getLogSize(latestLSN)
+	// get log size from LSN
+	// s, err := w.walReader.getLogSize(latestLSN)
 
-	if err != nil {
-		panic(fmt.Errorf("(wal) Unalblt to get size of log at LSN: %v", latestLSN))
-	}
+	// if err != nil {
+	// 	w.logger.Write("logger", "AddCheckpoint", logger.LevelError, fmt.Sprintf("(wal) Unable to get size of log at LSN: %v\r ERR: %s", latestLSN, err.Error()), nil)
+	// 	panic(fmt.Errorf("(wal) Unable to get size of log at LSN: %v", latestLSN))
+	// }
+	s := binary.LittleEndian.Uint32(latestLSN[8:12])
 
 	// calculate offset(REDO point). This should be after the latest applied log
 	page := binary.LittleEndian.Uint32(latestLSN[:4])
@@ -255,7 +269,7 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 	// get LSN
 	lsn := w.walWriter.assignLSN(CHECKPOINT_SIZE)
 
-	// construct checkpoint
+	// construct checkpoint and add to linked list
 	cp := CheckPoint{
 		flag:          0x80, // 1000 0000
 		redoPoint:     redoPoint,
@@ -264,8 +278,8 @@ func (w *WAL) AddCheckpoint(latestLSN []byte) error {
 
 	w.walBuff.Add(&cp)
 
-	log.Println("ADDED CHECKPOINT, writing config file ")
-	err = w.walWriter.saveCheckpoint(lsn)
+	w.logger.Write("logger", "AddCheckpoint", logger.LevelInfo, "ADDED CHECKPOINT, writing config file ", nil)
+	err := w.walWriter.saveCheckpoint(lsn)
 
 	if err != nil {
 		panic(err)
@@ -279,9 +293,12 @@ func (w *WAL) AddDelLog(pageId uint32, key []byte) ([]byte, error) {
 	kLen := len(key)
 
 	if kLen <= 0 {
+		w.logger.Write("logger", "AddDelLog", logger.LevelError, "Cannot add empty key in WAL", nil)
+
 		return nil, WalError{Message: "Cannot add empty key in WAL"}
 	}
 
+	// HEADER_SIZE + operation(1 byte) + key size(4 bytes) + kLen
 	lSize := BLOG_HEADER_SIZE + 5 + kLen
 
 	lsn := w.walWriter.assignLSN(uint32(lSize))
@@ -316,7 +333,7 @@ func (w *WAL) BLogWrite() {
 	data, err := w.walBuff.flushWal()
 
 	if err != nil {
-		log.Println("(BLogWrite) Unable to flush: ", err.Error())
+		w.logger.Write("logger", "AddDelLog", logger.LevelError, fmt.Sprintf("(BLogWrite) Unable to flush: %v", err.Error()), nil)
 		return
 	}
 
@@ -326,7 +343,8 @@ func (w *WAL) BLogWrite() {
 	}
 
 	// create write req
-	log.Println("Flushing WAL data.....................")
+	w.logger.Write("logger", "BLogWrite", logger.LevelInfo, "Flushing WAL data.....................", nil)
+
 	c := make(chan int)
 
 	w.walWriter.AddJob(data, &c)
@@ -334,6 +352,7 @@ func (w *WAL) BLogWrite() {
 	n := <-c
 
 	log.Printf("Written %d bytes in wal\n", n)
+	w.logger.Write("logger", "AddDelLog", logger.LevelInfo, fmt.Sprintf("Written %d bytes in wal\n", n), nil)
 
 	return
 }
@@ -349,11 +368,12 @@ func (w *WAL) walBgWriter() {
 }
 
 // Create new WAL
-func NewWal() *WAL {
+func NewWal(l *logger.BaobabLogger) *WAL {
 	wal := WAL{
-		walBuff:   NewWalBuff(),
-		walWriter: NewWalWriter(WAL_PATH),
-		walReader: NewWalReader(WAL_PATH),
+		walBuff:   NewWalBuff(l),
+		walWriter: NewWalWriter(WAL_PATH, l),
+		walReader: NewWalReader(WAL_PATH, l),
+		logger:    l,
 	}
 
 	go wal.walBgWriter()

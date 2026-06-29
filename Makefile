@@ -4,6 +4,9 @@ DATA_FILE="data"
 FREE_LIST="data_fl"
 WAL_PATH="bb.wal"
 CONFIG_PATH="bb_config"
+LOG_PATH="baobab.log"
+TEST_PATH="./..."
+NOCACHE=false
 
 run:
 	@[ -e $(BIN_PATH) ] && rm $(BIN_PATH) || echo ""
@@ -15,6 +18,7 @@ run-clean:
 	@[ -e $(FREE_LIST) ] && rm $(FREE_LIST) || echo ""
 	@[ -e $(WAL_PATH) ] && rm $(WAL_PATH) || echo ""
 	@[ -e $(CONFIG_PATH) ] && rm $(CONFIG_PATH) || echo ""
+	@[ -e $(LOG_PATH) ] && rm $(LOG_PATH) || echo ""
 	$(MAKE) build
 	@$(BIN_PATH)
 build:
@@ -22,6 +26,14 @@ build:
 	@go build -race -o $(BIN_PATH)
 	@echo "✅ built binary at $(BIN_PATH)"
 test:
-	@go test ./...
+	@go test -race $(TEST_PATH)
+test-v:
+ifeq ($(NOCACHE),true)
+	@go test -race -v -count=1 $(TEST_PATH)
+else
+	@go test -race -v $(TEST_PATH)
+endif
+test-asan:
+	@go test -asan -v $(TEST_PATH)
 inspect-page:
 	@go run cmd/pager/main.go $(PAGE)

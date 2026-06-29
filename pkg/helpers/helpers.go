@@ -5,11 +5,18 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"math"
+	"math/rand"
+	"strings"
 	"time"
 )
 
 const (
 	DEGREE = 2
+)
+
+const (
+	charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
 
 // sorting
@@ -271,7 +278,7 @@ func MaxLSN(lsnA []byte, lsnB []byte) ([]byte, error) {
 	}
 }
 
-// Compares to Log Sequence Numbers and returns true if lsnA is greater than lsnB,
+// Compares two Log Sequence Numbers and returns true if lsnA is greater than lsnB,
 // else false, and error if unsuccessful
 func GreaterLSN(lsnA []byte, lsnB []byte) (bool, error) {
 	if len(lsnA) < 8 {
@@ -306,15 +313,54 @@ func GreaterLSN(lsnA []byte, lsnB []byte) (bool, error) {
 }
 
 // Checks if a bit at the provided position(pos) is set.
-func BitIsSet(flag byte, pos int) bool {
+func BitIsSet(flag *byte, pos int) bool {
 	var mask byte
 	mask = 1 << byte(pos)
 
 	// Check if set
-	r := flag & mask
+	r := *flag & mask
 
 	return r > 0
 
+}
+
+// Unsets bit on f at position pos
+func UnsetFlag(f *byte, pos []int) {
+	var mask byte = 0x00
+
+	for _, p := range pos {
+		mask |= 1 << byte(p)
+	}
+
+	// unset flag (^AND)
+	*f = *f & (^mask)
+}
+
+// Unsets bit on f at positions pos
+func SetFlag(f *byte, pos []int) {
+	var mask byte = 0x00
+
+	for _, p := range pos {
+		mask |= 1 << byte(p)
+	}
+	// set flag (OR)
+	*f |= mask
+
+}
+
+// Given startOff and endOff of a log record, checks if the data crosses the page boundary
+// for a page of size pageSize
+func IsMultipage(startOff uint32, endOff uint32, pageSize uint32) (bool, error) {
+	if startOff > endOff {
+		return false, HelperError{Message: "Start offset is greater that end offset."}
+	}
+
+	startOffPage := math.Floor(float64(startOff / pageSize))
+	endOffPage := math.Floor(float64(endOff / pageSize))
+
+	fmt.Printf("Start off: %d\tStart off page: %f\nEnd Off: %d\tEnd Off Page: %f\n", startOff, startOffPage, endOff, endOffPage)
+
+	return startOffPage != endOffPage, nil
 }
 
 // Prints a loading spinner to std output until a stop message is sent
@@ -335,4 +381,26 @@ func StartSpinner(stop chan struct{}, message string) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// Generates and returns a random string of length n
+func RandomString(n int) string {
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	var sb strings.Builder
+	sb.Grow(n)
+
+	for i := 0; i < n; i++ {
+		sb.WriteByte(charset[r.Intn(len(charset))])
+	}
+
+	return sb.String()
+}
+
+func RandomNumber(max uint32) uint32 {
+	if max == 0 {
+		return 0
+	}
+
+	return uint32(rand.Int31n(int32(max) + 1))
 }

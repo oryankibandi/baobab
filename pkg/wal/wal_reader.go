@@ -9,12 +9,14 @@ import (
 	"sync"
 
 	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/logger"
 )
 
 // WalReader reads sections of the wal file and extracts details like log header
 type WalReader struct {
-	fd *os.File // wal file decritor in Read Only mode
-	mu sync.Mutex
+	fd     *os.File // wal file decritor in Read Only mode
+	mu     sync.Mutex
+	logger *logger.BaobabLogger
 }
 
 // Calculates the log offset from the lsn and reads the log size info
@@ -81,7 +83,7 @@ func (wReader *WalReader) readLogHeader(off uint32) (uint32, error) {
 	}
 
 	// check if is a checkpoint entry
-	if helpers.BitIsSet(hdr[0], LOGTYPE_FLAG_POS) {
+	if helpers.BitIsSet(&hdr[0], LOGTYPE_FLAG_POS) {
 		return 0, WalError{Message: "Log is a checkpoint"}
 	}
 
@@ -91,15 +93,19 @@ func (wReader *WalReader) readLogHeader(off uint32) (uint32, error) {
 		hdr = append(hdr[:idx], hdr[idx+WAL_PAGE_HEADER_SIZE:]...)
 	}
 
-	lSize := binary.LittleEndian.Uint32(hdr[9:13])
+	lSize := binary.LittleEndian.Uint32(hdr[13:17])
 
 	return lSize, nil
 }
 
 // Creates a new wal reader
-func NewWalReader(walpath string) *WalReader {
+func NewWalReader(walpath string, l *logger.BaobabLogger) *WalReader {
 	if len(walpath) <= 0 {
 		panic("Invalid path to wal file provided")
+	}
+
+	if l == nil {
+		panic("Provided logger is nil")
 	}
 
 	fd, err := os.OpenFile(walpath, os.O_CREATE|os.O_RDONLY, 0644)
@@ -109,6 +115,7 @@ func NewWalReader(walpath string) *WalReader {
 	}
 
 	return &WalReader{
-		fd: fd,
+		fd:     fd,
+		logger: l,
 	}
 }

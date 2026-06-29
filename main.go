@@ -26,6 +26,7 @@ import (
 
 	"github.com/oryankibandi/baobab/pkg/bp_tree"
 	buffermanager "github.com/oryankibandi/baobab/pkg/buffer_manager"
+	"github.com/oryankibandi/baobab/pkg/logger"
 	"github.com/oryankibandi/baobab/pkg/recovery"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
@@ -407,7 +408,15 @@ func main() {
 	defer trace.Stop()
 	start := time.Now()
 	// slog.Info("Hello world")
-	wal := wal.NewWal()
+
+	// initialize logger
+	l := logger.NewLogger("", logger.PRODUCTION, 1)
+
+	if l == nil {
+		panic("Unable to initialize logger")
+	}
+
+	wal := wal.NewWal(l)
 
 	if wal == nil {
 		panic(fmt.Errorf("Could not initialize WAL"))
@@ -419,8 +428,8 @@ func main() {
 		panic(fmt.Errorf("Could not initialize cache: %v", err))
 	}
 
-	slog.Info("(main)", "NEW WAL", wal)
-	btree, err := bp_tree.Initialize[int32](wal, cache)
+	l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("NEW WAL: %v", wal), nil)
+	btree, err := bp_tree.NewIndex(wal, cache, l)
 
 	if err != nil {
 		panic(err.Error())
@@ -428,12 +437,14 @@ func main() {
 
 	if btree.Root != 0 {
 		log.Println("BTree Root => ", btree.Root)
+		l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("BTree Root: %v", btree.Root), nil)
 	}
 
 	// start recovery
 	rMngr, err := recovery.NewRecoveryMngr(cache, btree)
 
 	if err != nil {
+		l.Write("main", "main()", logger.LevelError, "Could not initialize recovery", nil)
 		panic("could not initialize recovery")
 	}
 
@@ -448,7 +459,8 @@ func main() {
 	}
 
 	duration := time.Since(start)
-	slog.Info("Done in ", "duration", duration.String())
+	// slog.Info("Done in ", "duration", duration.String())
+	l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("Done in: %s", duration.String()), nil)
 
 	go runProfiler()
 	runServer(btree)

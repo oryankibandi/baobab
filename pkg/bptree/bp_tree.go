@@ -2,22 +2,24 @@ package bp_tree
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	bf "github.com/oryankibandi/baobab/pkg/buffer_manager"
 	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/logger"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
 type BTree struct {
-	Root  uint32 // Root Page ID
-	mu    sync.RWMutex
-	wal   *wal.WAL
-	cache *bf.Cache
+	Root   uint32 // Root Page ID
+	mu     sync.RWMutex
+	wal    *wal.WAL
+	cache  *bf.Cache
+	logger *logger.BaobabLogger
 }
 
 type Node struct {
@@ -76,7 +78,7 @@ const (
 // var bTree *BTree
 
 // Initialize a new instance if B+ Tree index
-func Initialize[K cmp.Ordered](w *wal.WAL, c *bf.Cache) (*BTree, error) {
+func NewIndex(w *wal.WAL, c *bf.Cache, l *logger.BaobabLogger) (*BTree, error) {
 
 	if w == nil {
 		panic("WAL is required")
@@ -89,9 +91,10 @@ func Initialize[K cmp.Ordered](w *wal.WAL, c *bf.Cache) (*BTree, error) {
 	rootPageId := c.GetRootPageId()
 
 	bTree := &BTree{
-		Root:  rootPageId,
-		wal:   w,
-		cache: c,
+		Root:   rootPageId,
+		wal:    w,
+		cache:  c,
+		logger: l,
 	}
 
 	return bTree, nil
@@ -152,6 +155,7 @@ func (n *Node) assignFrame(lsn []byte, isRoot bool, cache *bf.Cache) (*bf.Frame,
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	fmt.Println("assignFrame()")
 	if n.Leaf {
 		fr, err := cache.CreateNewEntry(lsn, n.Keys, &n.Values, nil, isRoot)
 
@@ -198,9 +202,9 @@ func (bt *BTree) insert(lsn []byte, n *Node, fr *bf.Frame, key []byte, val []byt
 		n.Values = append(n.Values, val)
 		n.lsn = lsn
 		// Sync to page
-		fmt.Println("(line 197) lsn --> ", lsn)
+		bt.logger.Write("btree", "insert()", logger.LevelDebug, fmt.Sprintf("(line 197) lsn --> %v", lsn), nil)
 		err := bt.cache.SyncFrame(fr, lsn, n.Keys, n.Values, n.Children, uint32(n.RightSibling), uint32(n.LeftSibling))
-		fmt.Println("/////// KEYS AFTER INSERT => ", n.Keys)
+		bt.logger.Write("btree", "insert()", logger.LevelDebug, fmt.Sprintf("/////// KEYS AFTER INSERT => %v", n.Keys), nil)
 
 		if err != nil {
 			return 0, err
@@ -232,11 +236,14 @@ func (bt *BTree) insert(lsn []byte, n *Node, fr *bf.Frame, key []byte, val []byt
 
 		if bytes.Compare(key, kAtIdx) == -1 {
 			// insert at index `idx`
-
+			fmt.Println("1. Inserting at idx -> ", idx)
+			fmt.Printf("NODE WITH ID: %d, ISLEAF: %t\n", n.PageId, n.Leaf)
 			helpers.InsertToList(&n.Keys, idx, key)
-			fmt.Println("*////////////// KEYS AFTER INSERT: ", n.Keys)
+			// fmt.Println("*////////////// KEYS AFTER INSERT: ", n.Keys)
+			bt.logger.Write("btree", "insert()", logger.LevelDebug, fmt.Sprintf("/////// KEYS AFTER INSERT => %v", n.Keys), nil)
 			helpers.InsertToList[[]byte](&n.Values, idx, val)
-			fmt.Println("*////////////// VALS AFTER INSERT: ", n.Values)
+			// fmt.Println("*////////////// VALS AFTER INSERT: ", n.Values)
+			bt.logger.Write("btree", "insert()", logger.LevelDebug, fmt.Sprintf("*////////////// VALS AFTER INSERT: %v", n.Values), nil)
 
 		} else if bytes.Compare(key, kAtIdx) == 0 {
 			// replace key
@@ -249,9 +256,12 @@ func (bt *BTree) insert(lsn []byte, n *Node, fr *bf.Frame, key []byte, val []byt
 			fmt.Println("$$$$$ VAL AFTER INSERT: ", n.Values[idx])
 		} else {
 			// insert at index `idx+1`
-			helpers.InsertToList[[]byte](&n.Keys, idx+1, key)
+			fmt.Println("2. Inserting at idx -> ", idx+1)
+
+			fmt.Printf("NODE WITH ID: %d, ISLEAF: %t\n", n.PageId, n.Leaf)
+			helpers.InsertToList(&n.Keys, idx+1, key)
 			fmt.Println("*////////////// KEYS AFTER INSERT: ", n.Keys)
-			helpers.InsertToList[[]byte](&n.Values, idx+1, val)
+			helpers.InsertToList(&n.Values, idx+1, val)
 			fmt.Println("*////////////// VALS AFTER INSERT: ", n.Values)
 		}
 
@@ -344,11 +354,11 @@ func (bt *BTree) insert(lsn []byte, n *Node, fr *bf.Frame, key []byte, val []byt
 					panic(err)
 				}
 				// oldRightFr.MarkDirty()
-				err = bt.cache.MarkFrameDirty(oldRightFr)
+				//	err = bt.cache.MarkFrameDirty(oldRightFr)
 
-				if err != nil {
-					log.Panic(err)
-				}
+				//	if err != nil {
+				//		log.Panic(err)
+				//	}
 
 				oldRightSibling.mu.Unlock()
 			}
@@ -1141,12 +1151,13 @@ func (bt *BTree) handleInternalUnderflow(n *Node, fr *bf.Frame, mr *MergeMetadat
 }
 
 func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte, lsn []byte) (bool, error) {
+	start := time.Now()
 	for i, _ := range keys {
 		if len(keys[i]) >= 4 {
 			log.Printf("%d Inserting {%v:%v} .................................................................\n", i, binary.LittleEndian.Uint32(keys[i]), string(vals[i]))
 			fmt.Println("RECEIVED LSN ==> ", lsn)
 		} else {
-			log.Printf("%d Inserting {%v:%v} .................................................................\n", i, keys[i], string(vals[i]))
+			log.Printf("%d Inserting {%s:%v} .................................................................\n", i, keys[i], string(vals[i]))
 			fmt.Println("RECEIVED LSN ==> ", lsn)
 
 		}
@@ -1193,7 +1204,7 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte, lsn []byte) (bool, er
 			fmt.Println("ROOT NODE ID: => ", bt.Root)
 
 			// Create WAL entry
-			if lsn == nil || len(lsn) <= 0 {
+			if len(lsn) <= 0 {
 				lsn, err = bt.wal.AddPutLog(uint32(bt.Root), keys[i], vals[i])
 
 				if err != nil {
@@ -1275,14 +1286,14 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte, lsn []byte) (bool, er
 
 				// if the right node was located,  nodePageId is 0
 				// mark frame as dirty
-				if nodePageId == 0 {
-					// frame.MarkDirty()
-					err = bt.cache.MarkFrameDirty(frame)
+				// if nodePageId == 0 {
+				// 	// frame.MarkDirty()
+				// 	err = bt.cache.MarkFrameDirty(frame)
 
-					if err != nil {
-						log.Panic(err)
-					}
-				}
+				// 	if err != nil {
+				// 		log.Panic(err)
+				// 	}
+				// }
 
 				oldFrame = frame
 			}
@@ -1368,11 +1379,11 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte, lsn []byte) (bool, er
 
 							// mark frame as dirty
 							// oldRightFr.MarkDirty()
-							err = bt.cache.MarkFrameDirty(oldRightFr)
+							// err = bt.cache.MarkFrameDirty(oldRightFr)
 
-							if err != nil {
-								log.Panic(err)
-							}
+							// if err != nil {
+							// 	log.Panic(err)
+							// }
 							oldRightSibling.mu.Unlock()
 						}
 
@@ -1469,6 +1480,10 @@ func (bt *BTree) InsertValue(keys [][]byte, vals [][]byte, lsn []byte) (bool, er
 			}
 		}
 	}
+
+	duration := time.Since(start)
+	// slog.Info("Done in ", "duration", duration.String())
+	bt.logger.Write("bptree", "insert", logger.LevelInfo, fmt.Sprintf("GET execution_time=%s", duration.String()), nil)
 
 	return true, nil
 }
@@ -1772,12 +1787,16 @@ func (bt *BTree) buildPage(pageId uint32) (*bf.Frame, *Node, error) {
 
 // Retrieves value with key
 func (bt *BTree) Get(key []byte) ([]byte, error) {
+	start := time.Now()
 	var nodePageId int32
 	var val []byte
 
 	bt.mu.RLock()
 	if bt.Root == 0 {
 		bt.mu.RUnlock()
+		duration := time.Since(start)
+		bt.logger.Write("bptree", "get", logger.LevelInfo, fmt.Sprintf("GET execution_time=%s", duration.String()), nil)
+
 		return nil, BTreeError{"Key Value store not initialized"}
 	}
 
@@ -1839,6 +1858,8 @@ func (bt *BTree) Get(key []byte) ([]byte, error) {
 		}
 	}
 
+	duration := time.Since(start)
+	bt.logger.Write("bptree", "get", logger.LevelInfo, fmt.Sprintf("GET execution_time=%s", duration.String()), nil)
 	return val, nil
 }
 

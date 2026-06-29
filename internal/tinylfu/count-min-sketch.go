@@ -1,53 +1,70 @@
 package tinylfu
 
 import (
-	"fmt"
+	"math"
 	"sync"
 )
 
 // Count-Min Sketch(Approximation sketch) is the main structure of the TinyLFU and
 // is used to store the frequency of the items accessed. It has a sample size (W),
-// which if the counters reach they are divided by 2. This is called a `reset` operation. The DoorKeeper is also cleared.
-// Error count = 2N/w where N is number of unique entries
-// Probability = 1 - 0.5^d
-
+// which if the counters reach they are divided by 2. This is called a `reset` operation where the doorKeeper is also cleared.
 type CMS struct {
 	k          uint64     // hash func count
-	m          uint64     // width of the 2D Array
-	arr        [][]uint64 // 2D Array
+	width      uint64     // width of the 2D Array
+	arr        [][]uint64 // 2D Array with 64 bit counters
 	hasher     Hasher
 	mu         sync.RWMutex
 	wg         *sync.WaitGroup
-	w          uint64 // sample size(W). When this val is reached, reset op is triggered
 	op_counter uint64
 }
 
-// Create new Count-min sketch
-// k - no of  hash funcs
-// w - Sample size(W)
-// m - width of the 2D array
-// d - Depth of the 2D array
-// hasher - hasher
-func NewCMS(k uint64, w uint64, m uint64, d uint64, hasher Hasher) *CMS {
+// Create new Count-min sketch and calculates the sketch's width(w) and depth(d) using
+// error rate(ε) and probability(δ) using the formulas from the CM Sketch paper.
+//
+//	w=2/ε
+//	d=ln(δ)/ln(1/2)
+//
+//	errorRate - error rate in percentage
+//	probability - probability rate as a percentage
+//	hasher - hasher
+func NewCMS(errorRate float64, probability float64, hasher Hasher) (*CMS, error) {
+	if errorRate <= 0 {
+		return nil, CountMinSketchError{Message: "Error rate cannot be zero."}
+	}
+
+	if probability <= 0 {
+		return nil, CountMinSketchError{Message: "Error rate cannot be zero."}
+	}
+
+	if hasher == nil {
+		return nil, CountMinSketchError{Message: "hasher is required"}
+	}
+
+	// calculate width(m) and depth(d)
+	// w=2/ε
+	w := uint64(math.Ceil(2 / (errorRate / 100)))
+
+	// calculate depth
+	//  d=ln(δ)/ln(1/2)
+	d := uint64(math.Ceil(math.Log((probability / 100)) / math.Log(0.5)))
 	c := &CMS{
-		k:      k,
-		m:      m,
+		k:      d,
 		hasher: hasher,
 		arr:    make([][]uint64, d),
-		w:      w,
+		width:  uint64(w),
 		wg:     &sync.WaitGroup{},
 	}
 
 	for i, _ := range c.arr {
-		c.arr[i] = make([]uint64, m)
+		c.arr[i] = make([]uint64, w)
 	}
 
-	return c
+	return c, nil
 }
 
-// Increments data and returns an error if any and a boolean indicating whether a reset has happened, in which case the doorkeeper needs to be cleared.
-func (c *CMS) Increment(key []byte) (bool, error) {
-	indices := DoubleHashIndices(c.hasher, key, int(c.k), c.m)
+// Increments data and returns the number of operations handled so far, and an error if any.
+func (c *CMS) Increment(key []byte) (uint64, error) {
+	indices := DoubleHashIndices(c.hasher, key, int(c.k), c.width)
 
 	// fmt.Println("INDICES: ", indices)
 	// increment
@@ -59,21 +76,15 @@ func (c *CMS) Increment(key []byte) (bool, error) {
 
 	c.op_counter += 1
 
-	if c.op_counter >= c.w {
-		fmt.Println("RESET AT ==> ", c.op_counter)
-		c.reset()
-
-		return true, nil
-	}
-
-	return false, nil
+	indices = nil
+	return c.op_counter, nil
 }
 
 // Passes the key through k hash functions which produce k number of indices.
 // With theses indices, we check the count at each row of the array in the 2D
 // array and return the smallest count.
 func (c *CMS) GetCount(key []byte) (int64, error) {
-	indices := DoubleHashIndices(c.hasher, key, int(c.k), c.m)
+	indices := DoubleHashIndices(c.hasher, key, int(c.k), c.width)
 
 	var count *uint64
 
@@ -91,21 +102,28 @@ func (c *CMS) GetCount(key []byte) (int64, error) {
 		}
 	}
 
+	indices = nil
 	return int64(*count), nil
 }
 
 // Halves all the counters  in the CMS, reset op_counter and clear doorkeeper
 func (c *CMS) reset() {
-	// halve all  counters
+	// halves all counters
 	c.mu.Lock()
-	for i, v := range c.arr {
-		for j, k := range v {
-			if k > 0 {
-				c.arr[i][j] = k / 2
+	defer c.mu.Unlock()
+	for i, _ := range c.arr {
+		c.wg.Add(1)
+		go func(idx int) {
+			defer c.wg.Done()
+			for j, k := range c.arr[idx] {
+				if k > 0 {
+					// modify array item in place
+					c.arr[i][j] = k / 2
+				}
 			}
-		}
+		}(i)
 	}
 
+	c.wg.Wait()
 	c.op_counter = 0
-	c.mu.Unlock()
 }
