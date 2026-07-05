@@ -1,4 +1,4 @@
-package bp_tree
+package bptree
 
 import (
 	"log"
@@ -11,7 +11,7 @@ import (
 // This is also implemented by PostgreQSL -> https://github.com/postgres/postgres/blob/REL_12_STABLE/src/include/access/nbtree.h#L405-L425
 
 type TraversePath struct {
-	n   *Node
+	pid uint32
 	idx uint32 // index followed to get to child node
 }
 

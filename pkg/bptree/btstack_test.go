@@ -1,4 +1,4 @@
-package bp_tree
+package bptree
 
 import (
 	"fmt"

@@ -1,15 +1,13 @@
 package tinylfu
 
-import (
-	"sync"
-)
+import ()
 
 // "fmt"
 
 type TinyLFU struct {
 	Doorkeeper *Bloom
 	MainStruct *CMS
-	mu         sync.RWMutex
+	// mu         sync.RWMutex
 }
 
 // Bloom Filter constants
@@ -22,7 +20,7 @@ const (
 const (
 	// Sample Size (W). The closer the value of W is to number of operations (N) the higher the accuracy
 	SAMPLE_SIZE     = 800000
-	CMS_ERROR_RATE  = 0.1  // 0.1%
+	CMS_ERROR_RATE  = 0.1  // 0.001%
 	CMS_PROBABILITY = 0.01 // 0.01%
 )
 
@@ -48,7 +46,7 @@ func (t *TinyLFU) IncrementItem(data []byte) error {
 		return err
 	}
 
-	t.mu.Lock()
+	// t.mu.Lock()
 
 	if opCount >= SAMPLE_SIZE {
 		// Clear Doorkeeper
@@ -56,7 +54,7 @@ func (t *TinyLFU) IncrementItem(data []byte) error {
 		t.Doorkeeper.Clear()
 	}
 
-	t.mu.Unlock()
+	// t.mu.Unlock()
 	return nil
 }
 

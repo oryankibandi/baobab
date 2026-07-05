@@ -158,6 +158,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager, hashtable *sync.Map) error {
 		probationVictim.en = w.cBuffer.EvictWithoutClearing(probationSegment)
 	} else {
 		// item can be moved to probation segment without evicting probation
+		fmt.Printf("probation not full....\n")
 		windVictim.en = w.cBuffer.EvictWithoutClearing(windowSegment)
 		if windVictim.en == nil {
 			return BufferManagerError{Message: "Unable to find window victim(all frames in use)."}
@@ -259,6 +260,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager, hashtable *sync.Map) error {
 		w.windowCount--
 	} else {
 		// flush window cache victim
+		fmt.Printf("evicting window cache item...\n")
 		if windVictim.en.entry.isDirty() {
 			buff, err := windVictim.en.entry.ByteData()
 			if err != nil {

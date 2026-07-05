@@ -56,7 +56,7 @@ func (c *BufferManager) GetRootPageId() uint32 {
 	return c.pager.RootPage()
 }
 
-// Get retrieves frame with the provided pid
+// Get retrieves frame with the provided pid. Frame is automatically referenced.
 func (c *BufferManager) Get(pid uint32) (f *Frame, cHit bool, e error) {
 	idx := c.getShard(pid)
 
@@ -70,6 +70,13 @@ func (c *BufferManager) Get(pid uint32) (f *Frame, cHit bool, e error) {
 	}
 
 	return fr, hit, nil
+}
+
+// GetRootPage returns the current root page
+func (c *BufferManager) GetRootPage() (f *Frame, e error) {
+	pid := c.GetRootPageId()
+	fr, _, err := c.Get(pid)
+	return fr, err
 }
 
 func (c *BufferManager) GetFromShard(pid uint32, shardId uint64) (f *Frame, e error) {
