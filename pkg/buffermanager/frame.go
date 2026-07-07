@@ -20,10 +20,8 @@ type Frame struct {
 	isInternal atomic.Bool
 	isDeleted  atomic.Bool
 
-	dirty atomic.Bool
-
-	key uint32
-
+	dirty       atomic.Bool
+	key         uint32
 	parentEntry *clockentry
 
 	// Mutex field. 24 bytes

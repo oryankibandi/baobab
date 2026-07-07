@@ -28,8 +28,7 @@ import (
 )
 
 const (
-	DEGREE                   = 2
-	ORDER                    = DEGREE * 2
+	ORDER                    = 2
 	PAGE_SIZE_BYTES          = 8192
 	HEADER_SIZE_BYTES        = 51
 	METADATA_PAGE_SIZE_BYTES = 8192 //20
