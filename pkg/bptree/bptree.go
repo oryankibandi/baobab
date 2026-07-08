@@ -24,11 +24,6 @@ type BpTree struct {
 }
 
 func (bp *BpTree) updateRootPage(pid uint32) error {
-	// 1. update metadata page with current root page
-	// 2. mark metadata page as dirty
-	// 3. Get curr root page
-	// 4. unref curr root page
-
 	bp.meta.Acquire(false)
 	defer bp.meta.Release(false)
 	buff, _, e := bp.meta.RawBufferSlice()
@@ -81,6 +76,7 @@ func (bp *BpTree) split(fr *[]byte, isInternal bool) (sepKey []byte, newFramePid
 
 	// move items from left node to right(new) node and update upper and lower offsets
 	var seperatorKey []byte
+	var rightNodeRightPtr uint32
 	var cellPtr [pgr.CELL_POINTER_SIZE_BYTE]byte
 	var cellOff uint32
 	var cellEndOff uint32
@@ -89,7 +85,6 @@ func (bp *BpTree) split(fr *[]byte, isInternal bool) (sepKey []byte, newFramePid
 	var cellSize uint32
 	var newFrCellOffset uint32 = pgr.LOWER_PADDING_BYTES
 	for i := bp.order; i < itemCount; i++ {
-
 		copy(cellPtr[:], (*fr)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE):pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE])
 		cellOff = binary.LittleEndian.Uint32(cellPtr[1:])
 
@@ -103,6 +98,9 @@ func (bp *BpTree) split(fr *[]byte, isInternal bool) (sepKey []byte, newFramePid
 			// first sep key promoted to parent
 			copy(seperatorKey, (*fr)[13:13+cellKeySize])
 			if isInternal {
+				// store old right child metadata and update to new right child(curr cell page pointer)
+				rightNodeRightPtr = binary.LittleEndian.Uint32((*fr)[39:43])
+				copy((*fr)[39:43], (*fr)[cellOff+9:cellOff+13])
 				continue
 			}
 		}
@@ -121,6 +119,9 @@ func (bp *BpTree) split(fr *[]byte, isInternal bool) (sepKey []byte, newFramePid
 		clear((*fr)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE) : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE])
 		clear((*fr)[cellEndOff:cellOff])
 	}
+
+	// update new node's right child
+	binary.LittleEndian.PutUint32((*newFrBuff)[39:43], rightNodeRightPtr)
 
 	// update numItems in each node/frame
 	binary.LittleEndian.PutUint32((*fr)[17:21], pgr.ORDER)
@@ -155,4 +156,22 @@ func (bp *BpTree) split(fr *[]byte, isInternal bool) (sepKey []byte, newFramePid
 	copy((*fr)[43:47], (*newFrBuff)[1:4])
 
 	return seperatorKey, binary.LittleEndian.Uint32((*newFrBuff)[1:4]), nil
+}
+
+// merge merges left node and right node.
+// in the case that the keys can be redistributed, the nodes
+// rebalanced and the new seperator key will be returned.
+// latches for both nodes should be acquired before calling merge()
+func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte) (sepKey []byte, e error) {
+	if leftNode == nil {
+		return nil, BTreeError{Message: "no left node provided"}
+	}
+
+	if rightNode == nil {
+		return nil, BTreeError{Message: "no right node provided"}
+	}
+
+	if helpers.BitIsSet(&(*leftNode)[0], pgr.IsInternal) != helpers.BitIsSet(&(*rightNode)[0], pgr.IsInternal) {
+		return nil, BTreeError{Message: "different node types provided"}
+	}
 }
