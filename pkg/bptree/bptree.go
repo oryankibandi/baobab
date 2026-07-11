@@ -2,7 +2,9 @@
 package bptree
 
 import (
+	"bytes"
 	"encoding/binary"
+	"math"
 	"sync/atomic"
 
 	bm "github.com/oryankibandi/baobab/pkg/buffermanager"
@@ -162,7 +164,7 @@ func (bp *BpTree) split(fr *[]byte, isInternal bool) (sepKey []byte, newFramePid
 // in the case that the keys can be redistributed, the nodes
 // rebalanced and the new seperator key will be returned.
 // latches for both nodes should be acquired before calling merge()
-func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte) (sepKey []byte, e error) {
+func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte) (newSepKey []byte, e error) {
 	if leftNode == nil {
 		return nil, BTreeError{Message: "no left node provided"}
 	}
@@ -174,4 +176,146 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte) (sepKey []byte, e e
 	if helpers.BitIsSet(&(*leftNode)[0], pgr.IsInternal) != helpers.BitIsSet(&(*rightNode)[0], pgr.IsInternal) {
 		return nil, BTreeError{Message: "different node types provided"}
 	}
+
+	// 0. pull down seperator key
+	// 1. check if nodes can be mergedi - if a node can hold N+1 pointers and
+	//    total number of child pointers in both nodes is <= N+1
+	// 2. if can rebalance, more n items from more populated node to the less populated node and
+	//    return the left  most key of the right node as the seperator key & merge-false
+	// 3. if cannot rebalance:
+	//	- move keys from right node to left leftNode
+	//	- move pointers from right node to left node
+	//	- demote parent seperator key and add it to the keys
+	//	- return deleted node pid and merge=true
+
+	leftNodeItemCount := binary.LittleEndian.Uint32((*leftNode)[17:21])
+	rightNodeItemCount := binary.LittleEndian.Uint32((*rightNode)[17:21])
+
+	if leftNodeItemCount+1 >= pgr.ORDER+1 && rightNodeItemCount+1 >= pgr.ORDER+1 {
+		// both nodes already above the threshold. No merge or rebalancing required
+		return nil, nil
+	}
+
+	if leftNodeItemCount+1+rightNodeItemCount+1 > (pgr.ORDER*2)+1 {
+		// rebalance
+		if leftNodeItemCount == rightNodeItemCount {
+			// nodes balanced
+			return nil, nil
+		}
+
+		var donor *[]byte
+		var receiver *[]byte
+		var donorDirection bool // true if moving  keys from right to left node, else false
+		if leftNodeItemCount > rightNodeItemCount {
+			donor = leftNode
+			receiver = rightNode
+			donorDirection = false
+		} else {
+			donor = rightNode
+			receiver = leftNode
+			donorDirection = true
+		}
+
+		deficit := math.Abs(float64(leftNodeItemCount - rightNodeItemCount))
+
+		// demote separator key
+
+		if !donorDirection {
+
+		}
+	} else {
+		// merge
+	}
+}
+
+// insertToFrame inserts key and value/childPtr to a frame and shifts
+// cellpointers if necessary.
+func insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []byte) error {
+	if fr == nil {
+		return BTreeError{Message: "No frame provided"}
+	}
+
+	if key == nil {
+		return BTreeError{Message: "No frame provided"}
+	}
+
+	internal := helpers.BitIsSet(&(*fr)[0], pgr.IsInternal)
+
+	if !internal && val == nil {
+		return BTreeError{Message: "No value provided"}
+	}
+
+	keyLen := len(key)
+	valLen := len(val)
+	cellSize := 13 + keyLen + valLen
+	upperOffset := binary.LittleEndian.Uint32((*fr)[25:29])
+	cellStartOff := upperOffset - uint32(cellSize)
+	// set new upper offset
+	binary.LittleEndian.PutUint32((*fr)[25:29], cellStartOff)
+
+	// find appropriate index to add key and shit keys if need be.
+	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
+
+	var cOff uint32
+	var ptrOff uint32
+	var cKSize uint32
+	var insertIdx uint32 = itemCount
+	for i := range itemCount {
+		ptrOff = i*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
+		cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
+		cKSize = binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5])
+		cKey := (*fr)[cOff+13 : cOff+13+cKSize]
+
+		if s := bytes.Compare(cKey, key); s > 0 {
+			insertIdx = i
+			break
+		}
+	}
+
+	// write cell contents
+	binary.LittleEndian.PutUint32((*fr)[cellStartOff+1:cellStartOff+5], uint32(keyLen))
+	binary.LittleEndian.PutUint32((*fr)[cellStartOff+5:cellStartOff+9], uint32(valLen))
+	if insertIdx == itemCount {
+		// set key as right child pointer in header and set the previous
+		// right child pointer in the same cell
+		// +------+------+------+------+
+		// |  K1  |  K2  |  K3  |      |
+		// +------+------+------+  P4  + <- right child ptr(in header)
+		// |  P1  |  P2  |  P3  |      |
+		// +------+------+------+------+
+
+		copy((*fr)[cellStartOff+9:cellStartOff+13], (*fr)[39:43])
+		binary.LittleEndian.PutUint32((*fr)[39:43], childPtr)
+	} else {
+		binary.LittleEndian.PutUint32((*fr)[cellStartOff+9:cellStartOff+13], childPtr)
+	}
+	copy((*fr)[cellStartOff+13:cellStartOff+13+uint32(keyLen)], key)
+
+	if !internal {
+		copy((*fr)[cellStartOff+13+uint32(keyLen):cellStartOff+13+uint32(keyLen)+uint32(valLen)], val)
+	}
+
+	// insert cell pointer
+	lowOff := binary.LittleEndian.Uint32((*fr)[29:33])
+	if insertIdx == itemCount {
+		// add item to end of ptr list
+
+		if internal && childPtr != 0 {
+			helpers.SetFlag(&(*fr)[lowOff], []int{pgr.HasChildPtr})
+		}
+		binary.LittleEndian.PutUint32((*fr)[lowOff+1:lowOff+5], cellStartOff)
+	} else {
+		// shift items to the right to create space for new cell pointer
+		copy((*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE:lowOff+pgr.CELL_POINTER_SIZE_BYTE], (*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE):lowOff])
+
+		if internal && childPtr != 0 {
+			helpers.SetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
+		}
+
+		binary.LittleEndian.PutUint32((*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)+1:pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE], cellStartOff)
+	}
+
+	binary.LittleEndian.PutUint32((*fr)[17:21], itemCount+1)
+
+	return nil
 }

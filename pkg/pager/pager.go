@@ -48,6 +48,11 @@ const (
 	IsInternal
 )
 
+// cell ptr flags
+const (
+	HasChildPtr = 7
+)
+
 // I/O Operation timeouts
 const (
 	READ_PAGE_TIMEOUT_MILL     = 200
