@@ -520,3 +520,63 @@ func (bp *BpTree) getLastKey(fr *[]byte) (k []byte, err error) {
 	kLen := binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
 	return (*fr)[cellOff+13 : cellOff+13+kLen], nil
 }
+
+// findInsertionIdx searches the frame cell pointers using binary search to
+// find the index for 'searchKey'. It returns the index where the searchKey
+// can be inserted.
+// returns idx and error if any
+func findInsertionIdx(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint32) (idx int32, e error) {
+	if fr == nil {
+		return -1, BTreeError{Message: "frame not provided"}
+	}
+
+	if searchKey == nil {
+		return -1, BTreeError{Message: "No search key provided"}
+	}
+
+	if startIdx >= endIdx {
+		return -1, BTreeError{Message: fmt.Sprintf("Invalid start: %d and end: %d index", startIdx, endIdx)}
+	}
+
+	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
+	if endIdx > itemCount-1 {
+		return -1, BTreeError{Message: "Invalid end index"}
+	}
+
+	arrLen := (endIdx - startIdx) + 1
+	midPoint := uint32(math.Round(float64(arrLen / 2)))
+
+	// get key at index
+	cellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+5])
+	keyLen := binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
+	key := (*fr)[cellOff+13 : cellOff+13+keyLen]
+
+	// compare
+	s := bytes.Compare(key, searchKey)
+
+	if s == 1 {
+		// found exact key
+		return int32(midPoint), nil
+	} else if s > 1 {
+		// compare with item at previous index
+		prevCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+((midPoint-1)*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+((midPoint-1)*pgr.CELL_POINTER_SIZE_BYTE)+5])
+		prevKeyLen := binary.LittleEndian.Uint32((*fr)[prevCellOff+1 : prevCellOff+5])
+		prevKey := (*fr)[prevCellOff+13 : prevCellOff+13+prevKeyLen]
+		if n := bytes.Compare(key, prevKey); n < 0 {
+			return int32(midPoint), nil
+		} else {
+			return findInsertionIdx(fr, searchKey, startIdx, midPoint)
+		}
+	} else {
+		// check item at next index
+		nextCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+5])
+		nextKeyLen := binary.LittleEndian.Uint32((*fr)[nextCellOff+1 : nextCellOff+5])
+		nextKey := (*fr)[nextCellOff+13 : nextCellOff+13+nextKeyLen]
+
+		if n := bytes.Compare(key, nextKey); n < 0 {
+			return int32(midPoint + 1), nil
+		} else {
+			return findInsertionIdx(fr, searchKey, midPoint, endIdx)
+		}
+	}
+}
