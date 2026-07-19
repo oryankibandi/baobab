@@ -167,6 +167,8 @@ func (bp *BpTree) split(fr *[]byte, isInternal bool) (sepKey []byte, newFramePid
 // latches for both nodes should be acquired before calling merge()
 // Merge always merges the right node to the left node unless the
 // underflowed node has no immediate left sibling.
+// leftMerge is true if the underflown node is the left node(has no immediate left sibling).
+// reurns newSepKey if rebalanced or error if any
 func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, leftMerge bool) (newSepKey []byte, e error) {
 	if leftNode == nil {
 		return nil, BTreeError{Message: "no left node provided"}
@@ -199,6 +201,7 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 		return nil, nil
 	}
 
+	var deficit uint32
 	if leftNodeItemCount+1+rightNodeItemCount+1 > (pgr.ORDER*2)+1 {
 		// rebalance
 		if leftNodeItemCount == rightNodeItemCount {
@@ -206,7 +209,6 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			return nil, nil
 		}
 
-		var deficit uint32
 		var donorDirection bool // true if moving items from right to left node, else false
 		if leftNodeItemCount > rightNodeItemCount {
 			donorDirection = false
@@ -282,6 +284,65 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 		return newSeperatorKey, nil
 	} else {
 		// merge
+		if leftMerge {
+			// moving items from the left node to the right node
+			deficit = (pgr.ORDER * 2) - leftNodeItemCount
+			// 1. demote separator key
+			err := bp.insertToFrame(rightNode, sepKey, 0, nil)
+			if err != nil {
+				return nil, err
+			}
+
+			// move keys from left node to right node
+			for deficit > 0 {
+				lastKey, err := bp.getLastKey(leftNode)
+				if err != nil {
+					return nil, err
+				}
+
+				ptr, err := bp.deleteFromNode(leftNode, lastKey, false)
+				if err != nil {
+					return nil, err
+				}
+
+				err = bp.insertToFrame(rightNode, lastKey, ptr, nil)
+				if err != nil {
+					return nil, err
+				}
+
+				deficit--
+			}
+		} else {
+			// moving items from right node to left node
+			deficit = (pgr.ORDER * 2) - rightNodeItemCount
+			// 1. demote separator key
+			err := bp.insertToFrame(rightNode, sepKey, 0, nil)
+			if err != nil {
+				return nil, err
+			}
+
+			// move keys from left node to right node
+			for deficit > 0 {
+				firstKey, err := bp.getFirstKey(rightNode)
+				if err != nil {
+					return nil, err
+				}
+
+				ptr, err := bp.deleteFromNode(rightNode, firstKey, false)
+				if err != nil {
+					return nil, err
+				}
+
+				err = bp.insertToFrame(leftNode, firstKey, ptr, nil)
+				if err != nil {
+					return nil, err
+				}
+
+				deficit--
+			}
+		}
+
+		return nil, nil
 	}
 }
 
@@ -315,20 +376,33 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 
 	var cOff uint32
 	var ptrOff uint32
-	var cKSize uint32
+	// var cKSize uint32
 	var insertIdx uint32 = itemCount
 	// var currCellOccupantOff uint32// Offset of current cell occupying the insertion index
-	for i := range itemCount {
-		ptrOff = i*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
-		cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
-		cKSize = binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5])
-		cKey := (*fr)[cOff+13 : cOff+13+cKSize]
+	// for i := range itemCount {
+	// 	ptrOff = i*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
+	// 	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
+	// 	// cKSize = binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5])
+	// 	// cKey := (*fr)[cOff+13 : cOff+13+cKSize]
 
-		if s := bytes.Compare(cKey, key); s > 0 {
-			insertIdx = i
-			break
-		}
+	// 	// if s := bytes.Compare(cKey, key); s > 0 {
+	// 	// 	insertIdx = i
+	// 	// 	break
+	// 	// }
+	// }
+
+	idx, e := findInsertionIdx(fr, key, 0, itemCount-1)
+	if e != nil {
+		return e
 	}
+
+	if idx < 0 {
+		return BTreeError{Message: "Unable to insert index"}
+	}
+
+	insertIdx = uint32(idx)
+	ptrOff = insertIdx*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
+	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
 
 	// write cell contents
 	binary.LittleEndian.PutUint32((*fr)[cellStartOff+1:cellStartOff+5], uint32(keyLen))
@@ -406,23 +480,30 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 	var delIdx int32 = -1
 	var cOff uint32
 	var ptrOff uint32
-	var cKSize uint32
-	for i := range itemCount {
-		ptrOff = i*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
-		cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
-		cKSize = binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5])
-		cKey := (*fr)[cOff+13 : cOff+13+cKSize]
+	// var cKSize uint32
+	// for i := range itemCount {
+	// 	ptrOff = i*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
+	// 	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
+	// 	cKSize = binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5])
+	// 	cKey := (*fr)[cOff+13 : cOff+13+cKSize]
 
-		if s := bytes.Compare(cKey, key); s == 0 {
-			delIdx = int32(i)
-			break
-		}
+	// 	if s := bytes.Compare(cKey, key); s == 0 {
+	// 		delIdx = int32(i)
+	// 		break
+	// 	}
+	// }
+
+	idx, e := findKeyIndex(fr, key, 0, itemCount-1)
+	if e != nil {
+		return 0, e
+	}
+	if idx < 0 {
+		return 0, BTreeError{Message: "Could find key to delete"}
 	}
 
-	if delIdx < 0 {
-		// no item found
-		return 0, nil
-	}
+	delIdx = idx
+	ptrOff = uint32(delIdx)*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
+	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
 
 	if !internal {
 		// remove cell ptr
@@ -578,5 +659,47 @@ func findInsertionIdx(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint
 		} else {
 			return findInsertionIdx(fr, searchKey, midPoint, endIdx)
 		}
+	}
+}
+
+// findKeyIndex searches the frame cell pointers using binary search to
+// find the index for 'searchKey'. It returns the exact index of the searchKey.
+// if item does not exist, returns -1 else idx, and error if any.
+func findKeyIndex(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint32) (idx int32, e error) {
+	if fr == nil {
+		return -1, BTreeError{Message: "frame not provided"}
+	}
+
+	if searchKey == nil {
+		return -1, BTreeError{Message: "No search key provided"}
+	}
+
+	if startIdx >= endIdx {
+		return -1, BTreeError{Message: fmt.Sprintf("Invalid start: %d and end: %d index", startIdx, endIdx)}
+	}
+
+	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
+	if endIdx > itemCount-1 {
+		return -1, BTreeError{Message: "Invalid end index"}
+	}
+
+	arrLen := (endIdx - startIdx) + 1
+	midPoint := uint32(math.Round(float64(arrLen / 2)))
+
+	// get key at index
+	cellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+5])
+	keyLen := binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
+	key := (*fr)[cellOff+13 : cellOff+13+keyLen]
+
+	// compare
+	s := bytes.Compare(key, searchKey)
+
+	if s == 1 {
+		// found exact key
+		return int32(midPoint), nil
+	} else if s > 1 {
+		return findInsertionIdx(fr, searchKey, startIdx, midPoint)
+	} else {
+		return findInsertionIdx(fr, searchKey, midPoint, endIdx)
 	}
 }
