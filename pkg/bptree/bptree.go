@@ -112,7 +112,8 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 		// update cell offset in new frame cell pointer
 		newFrCellOffset -= cellSize
 		// binary.LittleEndian.PutUint32(cellPtr[1:], uint32(newFrCellOffset))
-		binary.LittleEndian.PutUint32((*newFrBuff)[(pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE))+1:pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5], newFrCellOffset)
+		newFrCellPtrIdx := i - pgr.ORDER - 1
+		binary.LittleEndian.PutUint32((*newFrBuff)[(pgr.HEADER_SIZE_BYTES+(newFrCellPtrIdx*pgr.CELL_POINTER_SIZE_BYTE))+1:pgr.HEADER_SIZE_BYTES+(newFrCellPtrIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5], newFrCellOffset)
 
 		// copy cell to new frame
 		copy((*newFrBuff)[newFrCellOffset:newFrCellOffset+cellSize], (*fr)[cellOff:cellEndOff])
@@ -130,7 +131,8 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 
 	// update numItems in each node/frame
 	binary.LittleEndian.PutUint32((*fr)[17:21], pgr.ORDER)
-	binary.LittleEndian.PutUint32((*newFrBuff)[17:21], itemCount-pgr.ORDER)
+	// new node will have itemcount-order-1 due to promoted key
+	binary.LittleEndian.PutUint32((*newFrBuff)[17:21], itemCount-pgr.ORDER-1)
 
 	// update sibling pointers
 	rightSiblingPid := binary.LittleEndian.Uint32((*fr)[43:47])
@@ -159,6 +161,10 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 	copy((*newFrBuff)[47:51], (*fr)[1:5])
 	// update left frame's  right sibling pointer
 	copy((*fr)[43:47], (*newFrBuff)[1:5])
+
+	// mark nodes dirty
+	helpers.SetFlag(&(*fr)[0], []int{pgr.Dirty})
+	helpers.SetFlag(&(*newFrBuff)[0], []int{pgr.Dirty})
 
 	return seperatorKey, binary.LittleEndian.Uint32((*newFrBuff)[1:5]), nil
 }

@@ -722,7 +722,7 @@ func TestSplitInternalNode(t *testing.T) {
 
 	// initialize buffer manager
 	cConfig := buffermanager.CacheConfig{
-		CacheSize: 128 * 1024, // 128MB
+		CacheSize: 16 * 1024, // 16MB
 	}
 
 	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
@@ -755,100 +755,238 @@ func TestSplitInternalNode(t *testing.T) {
 		t.Fatalf("expected B+ index got nil")
 	}
 
-	// overflown internal node with order 2
+	tests := []struct {
+		name string
+		keys [][]byte
+		ptrs []uint32
+	}{
+		{
+			name: "personal_info",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("marital status"),
+				[]byte("name"),
+			},
+			ptrs: []uint32{25, 66, 88, 99, 150, 250},
+		},
+		{
+			name: "geography",
+			keys: [][]byte{
+				[]byte("city"),
+				[]byte("continent"),
+				[]byte("country"),
+				[]byte("district"),
+				[]byte("region"),
+			},
+			ptrs: []uint32{10, 30, 55, 90, 150, 210},
+		},
+		{
+			name: "technology",
+			keys: [][]byte{
+				[]byte("algorithm"),
+				[]byte("compiler"),
+				[]byte("database"),
+				[]byte("kernel"),
+				[]byte("network"),
+			},
+			ptrs: []uint32{5, 20, 40, 80, 160, 320},
+		},
+		{
+			name: "animals",
+			keys: [][]byte{
+				[]byte("ant"),
+				[]byte("cat"),
+				[]byte("dog"),
+				[]byte("elephant"),
+				[]byte("zebra"),
+			},
+			ptrs: []uint32{1, 15, 45, 70, 110, 180},
+		},
+		{
+			name: "fruits",
+			keys: [][]byte{
+				[]byte("apple"),
+				[]byte("banana"),
+				[]byte("grape"),
+				[]byte("mango"),
+				[]byte("orange"),
+			},
+			ptrs: []uint32{11, 22, 44, 88, 176, 352},
+		},
+		{
+			name: "books",
+			keys: [][]byte{
+				[]byte("author"),
+				[]byte("chapter"),
+				[]byte("edition"),
+				[]byte("publisher"),
+				[]byte("title"),
+			},
+			ptrs: []uint32{12, 24, 36, 72, 144, 288},
+		},
+		{
+			name: "vehicles",
+			keys: [][]byte{
+				[]byte("bike"),
+				[]byte("bus"),
+				[]byte("car"),
+				[]byte("truck"),
+				[]byte("van"),
+			},
+			ptrs: []uint32{7, 21, 49, 98, 196, 392},
+		},
+		{
+			name: "filesystem",
+			keys: [][]byte{
+				[]byte("bin"),
+				[]byte("etc"),
+				[]byte("home"),
+				[]byte("tmp"),
+				[]byte("usr"),
+			},
+			ptrs: []uint32{3, 9, 27, 81, 243, 729},
+		},
+		{
+			name: "programming_languages",
+			keys: [][]byte{
+				[]byte("c"),
+				[]byte("go"),
+				[]byte("java"),
+				[]byte("python"),
+				[]byte("rust"),
+			},
+			ptrs: []uint32{13, 26, 52, 104, 208, 416},
+		},
+		{
+			name: "months_subset",
+			keys: [][]byte{
+				[]byte("april"),
+				[]byte("august"),
+				[]byte("january"),
+				[]byte("june"),
+				[]byte("march"),
+			},
+			ptrs: []uint32{8, 16, 32, 64, 128, 256},
+		},
+	}
+
+	// example overflown internal node with order 2
 	// +--------+-------+---------+--------------------+--------+------+
 	// |  age   | code  | country |   marital status   |  name  |      |
 	// +--------+-------+---------+--------------------+--------+ 250  +
 	// |  25    |  66   |    88   |         99         |  150   |      |
 	// +--------+-------+---------+--------------------+--------+------+
-	keys := [][]byte{[]byte("age"), []byte("code"), []byte("country"), []byte("marital status"), []byte("name")}
-	ptrs := []uint32{25, 66, 88, 99, 150, 250}
+	for _, test := range tests {
+		t.Logf("----------------------------------\n")
+		t.Logf("Running test: %s\n", test.name)
+		t.Logf("----------------------------------\n")
+		node := createTestInternalNode(test.keys, test.ptrs)
 
-	node := createTestInternalNode(keys, ptrs)
-	t.Logf("Overflown Internal node -> %v\n", node)
-
-	newSepKey, newFramePid, err := bp.split(&node)
-	if err != nil {
-		t.Fatalf("Expected no error, got %s", err.Error())
-	}
-
-	// expected nodes after split
-	//			 +---------+
-	//			 | country |
-	//			 +---------+
-	//			/           \
-	//                     /	     \
-	//                    /               \
-	// +--------+-------+------+    +------------------+--------+-----------+
-	// |  age   | code  |      |    |  marital status  |  name  |           |
-	// +--------+-------+  88  +    +------------------+--------+   250     +
-	// |  25    |  66   |	   |    |       99         |  150   |           |
-	// +--------+-------+------+    +------------------+--------+------------
-	t.Logf("New Sep Key -> %v\n", newSepKey)
-	t.Logf("New Frame Pid -> %d\n", newFramePid)
-	t.Logf("Frame after split -> %v\n", node)
-
-	if newFramePid != 1 {
-		t.Fatalf("Invalid frame pid: %d", newFramePid)
-	}
-
-	// verify seperator key
-	if !bytes.Equal(newSepKey, keys[pgr.ORDER]) {
-		t.Fatalf("Expected separator key to be %v, but got %v", keys[pgr.ORDER], newSepKey)
-	}
-
-	// verify keys on the left node
-	leftNodeItemCount := binary.LittleEndian.Uint32(node[17:21])
-	if leftNodeItemCount != pgr.ORDER {
-		t.Fatalf("Expected itemcount in left node to be %d, but got %d", pgr.ORDER, leftNodeItemCount)
-	}
-
-	for i := range leftNodeItemCount {
-		cellOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
-		cellKeySize := binary.LittleEndian.Uint32(node[cellOff+1 : cellOff+5])
-		key := node[cellOff+13 : cellOff+13+cellKeySize]
-		ptr := binary.LittleEndian.Uint32(node[cellOff+9 : cellOff+13])
-
-		if !bytes.Equal(key, keys[i]) {
-			t.Fatalf("Expected key at index %d to be %v, but got %v", i, keys[i], key)
+		newSepKey, newFramePid, err := bp.split(&node)
+		if err != nil {
+			t.Fatalf("Expected no error, got %s", err.Error())
 		}
 
-		if ptr != ptrs[i] {
-			t.Fatalf("Expected pointer at index %d to be %d, but got %d", i, ptrs[i], ptr)
+		// example expected nodes after split
+		//			 +---------+
+		//			 | country |
+		//			 +---------+
+		//			/           \
+		//                     /	     \
+		//                    /               \
+		// +--------+-------+------+    +------------------+--------+-----------+
+		// |  age   | code  |      |    |  marital status  |  name  |           |
+		// +--------+-------+  88  +    +------------------+--------+   250     +
+		// |  25    |  66   |	   |    |       99         |  150   |           |
+		// +--------+-------+------+    +------------------+--------+------------
+
+		if newFramePid == 0 {
+			t.Fatalf("Invalid frame pid: %d", newFramePid)
+		}
+
+		if !helpers.BitIsSet(&node[0], pgr.Dirty) {
+			t.Fatalf("Expected left node to be marked as dirty.")
+		}
+
+		// verify seperator key
+		if !bytes.Equal(newSepKey, test.keys[pgr.ORDER]) {
+			t.Fatalf("Expected separator key to be %v, but got %v", test.keys[pgr.ORDER], newSepKey)
+		}
+
+		// verify keys on the left node
+		leftNodeItemCount := binary.LittleEndian.Uint32(node[17:21])
+		if leftNodeItemCount != pgr.ORDER {
+			t.Fatalf("Expected itemcount in left node to be %d, but got %d", pgr.ORDER, leftNodeItemCount)
+		}
+
+		for i := range leftNodeItemCount {
+			cellOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
+			cellKeySize := binary.LittleEndian.Uint32(node[cellOff+1 : cellOff+5])
+			key := node[cellOff+13 : cellOff+13+cellKeySize]
+			ptr := binary.LittleEndian.Uint32(node[cellOff+9 : cellOff+13])
+
+			if !bytes.Equal(key, test.keys[i]) {
+				t.Fatalf("Expected key at index %d to be %v, but got %v", i, test.keys[i], key)
+			}
+
+			if ptr != test.ptrs[i] {
+				t.Fatalf("Expected pointer at index %d to be %d, but got %d", i, test.ptrs[i], ptr)
+			}
+		}
+
+		// check right most child
+		leftNodeRightChild := binary.LittleEndian.Uint32(node[39:43])
+		if leftNodeRightChild != test.ptrs[leftNodeItemCount] {
+			t.Fatalf("Expected left node's right child to be %d, but got %d", test.ptrs[leftNodeItemCount], leftNodeRightChild)
+		}
+
+		// verify right node
+		rightNode, _, err := buffManager.Get(newFramePid)
+		if err != nil {
+			t.Fatalf("Expected no error, but got %s", err.Error())
+		}
+
+		if rightNode == nil {
+			t.Fatalf("No right node available")
+		}
+		rightNodeBuff, _, err := rightNode.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Expected no error, but got %s", err.Error())
+		}
+
+		// ensure node was marked as dirty
+		if !helpers.BitIsSet(&(*rightNodeBuff)[0], pgr.Dirty) {
+			t.Fatalf("Expected new node to be marked as dirty.")
+		}
+
+		rightNodeRightChild := binary.LittleEndian.Uint32((*rightNodeBuff)[39:43])
+		if rightNodeRightChild != test.ptrs[len(test.ptrs)-1] {
+			t.Fatalf("Expected right node's right child to be %d, but got %d", test.ptrs[len(test.ptrs)-1], rightNodeRightChild)
+		}
+
+		rightNodeItemCount := binary.LittleEndian.Uint32(node[17:21])
+		expectedRightNodeItemCount := len(test.keys) - pgr.ORDER - 1
+		if rightNodeItemCount != uint32(expectedRightNodeItemCount) {
+			t.Fatalf("Expected itemcount in right node to be %d, but got %d", expectedRightNodeItemCount, rightNodeItemCount)
+		}
+
+		for i := range rightNodeItemCount {
+			cellOff := binary.LittleEndian.Uint32((*rightNodeBuff)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
+			cellKeySize := binary.LittleEndian.Uint32((*rightNodeBuff)[cellOff+1 : cellOff+5])
+			key := (*rightNodeBuff)[cellOff+13 : cellOff+13+cellKeySize]
+			ptr := binary.LittleEndian.Uint32((*rightNodeBuff)[cellOff+9 : cellOff+13])
+
+			if !bytes.Equal(key, test.keys[i+1+pgr.ORDER]) {
+				t.Fatalf("Expected key at index %d to be %v, but got %v", i, test.keys[i+1+pgr.ORDER], key)
+			}
+
+			if ptr != test.ptrs[i+pgr.ORDER+1] {
+				t.Fatalf("Expected pointer at index %d to be %d, but got %d", i, test.ptrs[i+pgr.ORDER+i], ptr)
+			}
 		}
 	}
-
-	// check right most child
-	leftNodeRightChild := binary.LittleEndian.Uint32(node[39:43])
-	if leftNodeRightChild != ptrs[leftNodeItemCount] {
-		t.Fatalf("Expected left node's right child to be %d, but got %d", ptrs[leftNodeItemCount], leftNodeRightChild)
-	}
-
-	// verify right node
-	rightNode, _, err := buffManager.Get(newFramePid)
-	if err != nil {
-		t.Fatalf("Expected no error, but got %s", err.Error())
-	}
-
-	if rightNode == nil {
-		t.Fatalf("No right node available")
-	}
-	rightNodeBuff, _, err := rightNode.RawBufferSlice()
-	if err != nil {
-		t.Fatalf("Expected no error, but got %s", err.Error())
-	}
-
-	rightNodeRightChild := binary.LittleEndian.Uint32((*rightNodeBuff)[39:43])
-	if rightNodeRightChild != ptrs[len(ptrs)-1] {
-		t.Fatalf("Expected right node's right child to be %d, but got %d", ptrs[len(ptrs)-1], rightNodeRightChild)
-	}
-
-	rightNodeItemCount := binary.LittleEndian.Uint32(node[17:21])
-	expectedRightNodeItemCount := len(keys) - pgr.ORDER - 1
-	if rightNodeItemCount != uint32(expectedRightNodeItemCount) {
-		t.Fatalf("Expected itemcount in right node to be %d, but got %d", expectedRightNodeItemCount, rightNodeItemCount)
-	}
-
 }
 
 func createTestInternalNode(keys [][]byte, ptrs []uint32) []byte {
