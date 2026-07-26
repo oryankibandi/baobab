@@ -966,7 +966,7 @@ func TestSplitInternalNode(t *testing.T) {
 			t.Fatalf("Expected right node's right child to be %d, but got %d", test.ptrs[len(test.ptrs)-1], rightNodeRightChild)
 		}
 
-		rightNodeItemCount := binary.LittleEndian.Uint32(node[17:21])
+		rightNodeItemCount := binary.LittleEndian.Uint32((*rightNodeBuff)[17:21])
 		expectedRightNodeItemCount := len(test.keys) - pgr.ORDER - 1
 		if rightNodeItemCount != uint32(expectedRightNodeItemCount) {
 			t.Fatalf("Expected itemcount in right node to be %d, but got %d", expectedRightNodeItemCount, rightNodeItemCount)
@@ -984,6 +984,332 @@ func TestSplitInternalNode(t *testing.T) {
 
 			if ptr != test.ptrs[i+pgr.ORDER+1] {
 				t.Fatalf("Expected pointer at index %d to be %d, but got %d", i, test.ptrs[i+pgr.ORDER+i], ptr)
+			}
+		}
+	}
+}
+
+func TestSplitLeafNode(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	tests := []struct {
+		name string
+		keys [][]byte
+		vals [][]byte
+	}{
+		{
+			name: "personal_info",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("marital status"),
+				[]byte("name"),
+			},
+			vals: [][]byte{
+				[]byte("25"),
+				[]byte("66"),
+				[]byte("Kenya"),
+				[]byte("Single"),
+				[]byte("Ian"),
+			},
+		},
+		{
+			name: "geography",
+			keys: [][]byte{
+				[]byte("city"),
+				[]byte("continent"),
+				[]byte("country"),
+				[]byte("district"),
+				[]byte("region"),
+			},
+			vals: [][]byte{
+				[]byte("Nairobi"),
+				[]byte("Africa"),
+				[]byte("Kenya"),
+				[]byte("Westlands"),
+				[]byte("East Africa"),
+			},
+		},
+		{
+			name: "technology",
+			keys: [][]byte{
+				[]byte("algorithm"),
+				[]byte("compiler"),
+				[]byte("database"),
+				[]byte("kernel"),
+				[]byte("network"),
+			},
+			vals: [][]byte{
+				[]byte("B+ Tree"),
+				[]byte("Go Compiler"),
+				[]byte("PostgreSQL"),
+				[]byte("Linux"),
+				[]byte("TCP/IP"),
+			},
+		},
+		{
+			name: "animals",
+			keys: [][]byte{
+				[]byte("ant"),
+				[]byte("cat"),
+				[]byte("dog"),
+				[]byte("elephant"),
+				[]byte("zebra"),
+			},
+			vals: [][]byte{
+				[]byte("insect"),
+				[]byte("mammal"),
+				[]byte("mammal"),
+				[]byte("largest land animal"),
+				[]byte("striped mammal"),
+			},
+		},
+		{
+			name: "fruits",
+			keys: [][]byte{
+				[]byte("apple"),
+				[]byte("banana"),
+				[]byte("grape"),
+				[]byte("mango"),
+				[]byte("orange"),
+			},
+			vals: [][]byte{
+				[]byte("red"),
+				[]byte("yellow"),
+				[]byte("purple"),
+				[]byte("sweet"),
+				[]byte("citrus"),
+			},
+		},
+		{
+			name: "books",
+			keys: [][]byte{
+				[]byte("author"),
+				[]byte("chapter"),
+				[]byte("edition"),
+				[]byte("publisher"),
+				[]byte("title"),
+			},
+			vals: [][]byte{
+				[]byte("Alex Petrov"),
+				[]byte("8"),
+				[]byte("2"),
+				[]byte("O'Reilly"),
+				[]byte("Database Internals"),
+			},
+		},
+		{
+			name: "vehicles",
+			keys: [][]byte{
+				[]byte("bike"),
+				[]byte("bus"),
+				[]byte("car"),
+				[]byte("truck"),
+				[]byte("van"),
+			},
+			vals: [][]byte{
+				[]byte("2 wheels"),
+				[]byte("public transport"),
+				[]byte("sedan"),
+				[]byte("cargo"),
+				[]byte("minivan"),
+			},
+		},
+		{
+			name: "filesystem",
+			keys: [][]byte{
+				[]byte("bin"),
+				[]byte("etc"),
+				[]byte("home"),
+				[]byte("tmp"),
+				[]byte("usr"),
+			},
+			vals: [][]byte{
+				[]byte("/bin"),
+				[]byte("/etc"),
+				[]byte("/home"),
+				[]byte("/tmp"),
+				[]byte("/usr"),
+			},
+		},
+		{
+			name: "programming_languages",
+			keys: [][]byte{
+				[]byte("c"),
+				[]byte("go"),
+				[]byte("java"),
+				[]byte("python"),
+				[]byte("rust"),
+			},
+			vals: [][]byte{
+				[]byte("1972"),
+				[]byte("2009"),
+				[]byte("1995"),
+				[]byte("1991"),
+				[]byte("2015"),
+			},
+		},
+		{
+			name: "months_subset",
+			keys: [][]byte{
+				[]byte("april"),
+				[]byte("august"),
+				[]byte("january"),
+				[]byte("june"),
+				[]byte("march"),
+			},
+			vals: [][]byte{
+				[]byte("4"),
+				[]byte("8"),
+				[]byte("1"),
+				[]byte("6"),
+				[]byte("3"),
+			},
+		},
+	}
+
+	// example overflown internal node with order 2
+	// +------------+-------+--------------------+--------------------+--------+
+	// |  age	| code  |      country       |   marital status   |  name  |
+	// +------------+-------+-----+--------------+-----------------------------+
+	// |  thirty    |  US   |    united states   |        single      |  Bob   |
+	// +------------+-------+--------------------+--------------------+--------+
+	for p, test := range tests {
+		t.Logf("----------------------------------\n")
+		t.Logf("Running test: %s\n", test.name)
+		t.Logf("----------------------------------\n")
+		node := createTestLeafNode(uint32(p*20), test.keys, test.vals)
+
+		newSepKey, newFramePid, err := bp.split(&node)
+		if err != nil {
+			t.Fatalf("Expected no error, got %s", err.Error())
+		}
+
+		// example expected nodes after split
+		//			 +---------+
+		//			 | country |
+		//			 +---------+
+		//			/           \
+		//                     /	     \
+		//                    /               \
+		//  +------------+-------+	  +--------------------+--------------------+--------+
+		//  |  age	| code   |	  |      country       |   marital status   |  name  |
+		//  +-----------+--------+	  +-----+--------------+-----------------------------+
+		//  |  thirty   |  US    |	  |    united states   |        single      |  Bob   |
+		//  +------------+-------+	  +--------------------+--------------------+--------+
+
+		if newFramePid == 0 {
+			t.Fatalf("Invalid frame pid: %d", newFramePid)
+		}
+
+		if !helpers.BitIsSet(&node[0], pgr.Dirty) {
+			t.Fatalf("Expected left node to be marked as dirty.")
+		}
+
+		// verify seperator key
+		if !bytes.Equal(newSepKey, test.keys[pgr.ORDER]) {
+			t.Fatalf("Expected separator key to be %v, but got %v", test.keys[pgr.ORDER], newSepKey)
+		}
+
+		// verify keys on the left node
+		leftNodeItemCount := binary.LittleEndian.Uint32(node[17:21])
+		if leftNodeItemCount != pgr.ORDER {
+			t.Fatalf("Expected itemcount in left node to be %d, but got %d", pgr.ORDER, leftNodeItemCount)
+		}
+
+		for i := range leftNodeItemCount {
+			cellOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
+			cellKeySize := binary.LittleEndian.Uint32(node[cellOff+1 : cellOff+5])
+			key := node[cellOff+13 : cellOff+13+cellKeySize]
+			valLen := binary.LittleEndian.Uint32(node[cellOff+5 : cellOff+9])
+			val := node[cellOff+13+cellKeySize : cellOff+13+cellKeySize+valLen]
+
+			if !bytes.Equal(key, test.keys[i]) {
+				t.Fatalf("Expected key at index %d to be %v, but got %v", i, test.keys[i], key)
+			}
+
+			if !bytes.Equal(val, test.vals[i]) {
+				t.Fatalf("Expected value at index %d to be %v, but got %v", i, test.vals[i], val)
+			}
+		}
+
+		// verify right node
+		rightNode, _, err := buffManager.Get(newFramePid)
+		if err != nil {
+			t.Fatalf("Expected no error, but got %s", err.Error())
+		}
+
+		if rightNode == nil {
+			t.Fatalf("No right node available")
+		}
+		rightNodeBuff, _, err := rightNode.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Expected no error, but got %s", err.Error())
+		}
+
+		// ensure node was marked as dirty
+		if !helpers.BitIsSet(&(*rightNodeBuff)[0], pgr.Dirty) {
+			t.Fatalf("Expected new node to be marked as dirty.")
+		}
+
+		rightNodeItemCount := binary.LittleEndian.Uint32((*rightNodeBuff)[17:21])
+		expectedRightNodeItemCount := len(test.keys) - pgr.ORDER
+		if rightNodeItemCount != uint32(expectedRightNodeItemCount) {
+			t.Fatalf("Expected itemcount in right node to be %d, but got %d", expectedRightNodeItemCount, rightNodeItemCount)
+		}
+
+		for i := range rightNodeItemCount {
+			cellOff := binary.LittleEndian.Uint32((*rightNodeBuff)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
+			cellKeySize := binary.LittleEndian.Uint32((*rightNodeBuff)[cellOff+1 : cellOff+5])
+			key := (*rightNodeBuff)[cellOff+13 : cellOff+13+cellKeySize]
+			valSize := binary.LittleEndian.Uint32((*rightNodeBuff)[cellOff+5 : cellOff+9])
+			val := (*rightNodeBuff)[cellOff+13+cellKeySize : cellOff+13+cellKeySize+valSize]
+
+			if !bytes.Equal(key, test.keys[i+pgr.ORDER]) {
+				t.Fatalf("Expected key at index %d to be %v, but got %v", i, test.keys[i+pgr.ORDER], key)
+			}
+
+			if !bytes.Equal(val, test.vals[i+pgr.ORDER]) {
+				t.Fatalf("Expected val at index %d to be %v, but got %v", i, test.vals[i+pgr.ORDER], val)
 			}
 		}
 	}
@@ -1032,9 +1358,6 @@ func createTestLeafNode(pid uint32, keys [][]byte, vals [][]byte) []byte {
 	}
 
 	leafNode := make([]byte, pgr.PAGE_SIZE_BYTES)
-
-	// set header
-	helpers.SetFlag(&leafNode[0], []int{pgr.IsInternal})
 
 	binary.LittleEndian.PutUint32(leafNode[1:5], pid) // pid=25
 	binary.LittleEndian.PutUint32(leafNode[17:21], uint32(len(keys)))

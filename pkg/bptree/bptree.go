@@ -87,6 +87,7 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 	var cellKeySize uint32
 	var cellValSize uint32
 	var cellSize uint32
+	var newFrCellPtrIdx uint32
 	var newFrCellOffset uint32 = pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES
 	for i := uint32(pgr.ORDER); i < itemCount; i++ {
 		cellOff = binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5])
@@ -112,7 +113,15 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 		// update cell offset in new frame cell pointer
 		newFrCellOffset -= cellSize
 		// binary.LittleEndian.PutUint32(cellPtr[1:], uint32(newFrCellOffset))
-		newFrCellPtrIdx := i - pgr.ORDER - 1
+		if i == pgr.ORDER {
+			newFrCellPtrIdx = 0
+		} else {
+			if isInternal {
+				newFrCellPtrIdx = i - pgr.ORDER - 1
+			} else {
+				newFrCellPtrIdx = i - pgr.ORDER
+			}
+		}
 		binary.LittleEndian.PutUint32((*newFrBuff)[(pgr.HEADER_SIZE_BYTES+(newFrCellPtrIdx*pgr.CELL_POINTER_SIZE_BYTE))+1:pgr.HEADER_SIZE_BYTES+(newFrCellPtrIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5], newFrCellOffset)
 
 		// copy cell to new frame
@@ -131,8 +140,13 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 
 	// update numItems in each node/frame
 	binary.LittleEndian.PutUint32((*fr)[17:21], pgr.ORDER)
-	// new node will have itemcount-order-1 due to promoted key
-	binary.LittleEndian.PutUint32((*newFrBuff)[17:21], itemCount-pgr.ORDER-1)
+
+	if isInternal {
+		// new internal node will have itemcount-order-1 due to promoted key
+		binary.LittleEndian.PutUint32((*newFrBuff)[17:21], itemCount-pgr.ORDER-1)
+	} else {
+		binary.LittleEndian.PutUint32((*newFrBuff)[17:21], itemCount-pgr.ORDER)
+	}
 
 	// update sibling pointers
 	rightSiblingPid := binary.LittleEndian.Uint32((*fr)[43:47])
@@ -386,18 +400,6 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 	var ptrOff uint32
 	// var cKSize uint32
 	var insertIdx uint32 = itemCount
-	// var currCellOccupantOff uint32// Offset of current cell occupying the insertion index
-	// for i := range itemCount {
-	// 	ptrOff = i*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
-	// 	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
-	// 	// cKSize = binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5])
-	// 	// cKey := (*fr)[cOff+13 : cOff+13+cKSize]
-
-	// 	// if s := bytes.Compare(cKey, key); s > 0 {
-	// 	// 	insertIdx = i
-	// 	// 	break
-	// 	// }
-	// }
 
 	idx, e := findInsertionIdx(fr, key, 0, itemCount-1)
 	if e != nil {
@@ -488,18 +490,6 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 	var delIdx int32 = -1
 	var cOff uint32
 	var ptrOff uint32
-	// var cKSize uint32
-	// for i := range itemCount {
-	// 	ptrOff = i*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
-	// 	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
-	// 	cKSize = binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5])
-	// 	cKey := (*fr)[cOff+13 : cOff+13+cKSize]
-
-	// 	if s := bytes.Compare(cKey, key); s == 0 {
-	// 		delIdx = int32(i)
-	// 		break
-	// 	}
-	// }
 
 	idx, e := findKeyIndex(fr, key, 0, itemCount-1)
 	if e != nil {
