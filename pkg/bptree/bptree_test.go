@@ -21,22 +21,203 @@ func TestFindKeyIndexInternalNode(t *testing.T) {
 	// +--------+-------+-----------+  99  +
 	// |  25    |  34   |  89       |      |
 	// +--------+-------+-----------+------+
-	keys := [][]byte{[]byte("age"), []byte("country"), []byte("name")}
-	ptr := []uint32{25, 34, 89, 99}
-	internalFrame := createTestInternalNode(keys, ptr)
-	if internalFrame == nil {
-		t.Fatal("No internal frame created")
+
+	tests := []struct {
+		name        string
+		keys        [][]byte
+		ptr         []uint32
+		expectedIdx int32
+		searchKey   []byte
+	}{
+		{
+			name:        "search key in middle of three-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country"), []byte("name")},
+			ptr:         []uint32{25, 34, 89, 99},
+			searchKey:   []byte("country"),
+			expectedIdx: 1,
+		},
+		{
+			name:        "search key in single-key node",
+			keys:        [][]byte{[]byte("country")},
+			ptr:         []uint32{25, 34},
+			searchKey:   []byte("country"),
+			expectedIdx: 0,
+		},
+		{
+			name:        "search only key in single-key node",
+			keys:        [][]byte{[]byte("code")},
+			ptr:         []uint32{25, 34},
+			searchKey:   []byte("code"),
+			expectedIdx: 0,
+		},
+		{
+			name:        "search last key in two-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country")},
+			ptr:         []uint32{25, 34, 89},
+			searchKey:   []byte("country"),
+			expectedIdx: 1,
+		},
+		{
+			name:        "search first key in two-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country")},
+			ptr:         []uint32{25, 34, 89},
+			searchKey:   []byte("age"),
+			expectedIdx: 0,
+		},
+		{
+			name:        "search second key in two-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country")},
+			ptr:         []uint32{25, 34, 89},
+			searchKey:   []byte("country"),
+			expectedIdx: 1,
+		},
+		{
+			name: "search last key in large node",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("city"),
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("email"),
+				[]byte("gender"),
+				[]byte("name"),
+				[]byte("phone"),
+				[]byte("state"),
+			},
+			ptr: []uint32{
+				25,
+				34,
+				89,
+				99,
+				125,
+				156,
+				178,
+				250,
+				354,
+				456,
+			},
+			searchKey:   []byte("state"),
+			expectedIdx: 8,
+		},
+		{
+			name:        "search last key in three-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			ptr:         []uint32{25, 88, 99, 105},
+			searchKey:   []byte("nationality"),
+			expectedIdx: 2,
+		},
+		{
+			name:        "search middle key exact match",
+			keys:        [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			ptr:         []uint32{25, 88, 99, 105},
+			searchKey:   []byte("country"),
+			expectedIdx: 1,
+		},
+		{
+			name:        "search empty node",
+			keys:        [][]byte{},
+			ptr:         []uint32{},
+			searchKey:   []byte("country"),
+			expectedIdx: -1,
+		},
+		{
+			name:        "search shared prefix key",
+			keys:        [][]byte{[]byte("car"), []byte("cat"), []byte("code")},
+			ptr:         []uint32{25, 88, 99, 105},
+			searchKey:   []byte("cat"),
+			expectedIdx: 1,
+		},
+		{
+			name: "search non-ASCII key",
+			keys: [][]byte{
+				{0x80},
+				{0x80, 0x01},
+				{0x81},
+				{0xFF},
+			},
+			ptr: []uint32{
+				25,
+				88,
+				99,
+				105,
+				250,
+			},
+			searchKey:   []byte{0x81},
+			expectedIdx: 2,
+		},
+		{
+			name: "search missing key between existing keys",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptr: []uint32{
+				25,
+				34,
+				89,
+				99,
+			},
+			searchKey:   []byte("office"),
+			expectedIdx: -1,
+		},
+		{
+			name: "search missing key before first key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptr: []uint32{
+				25,
+				34,
+				89,
+				99,
+			},
+			searchKey:   []byte("account"),
+			expectedIdx: -1,
+		},
+		{
+			name: "search missing key after last key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptr: []uint32{
+				25,
+				34,
+				89,
+				99,
+			},
+			searchKey:   []byte("zipcode"),
+			expectedIdx: -1,
+		},
+		{
+			name:        "search last item",
+			keys:        [][]byte{[]byte("age"), []byte("code"), []byte("coutry"), []byte("name")},
+			ptr:         []uint32{25, 88, 66, 99, 150},
+			searchKey:   []byte("name"),
+			expectedIdx: 3,
+		},
 	}
 
-	for idx := range len(keys) {
-		retrievedIdx, err := findKeyIndex(&internalFrame, keys[idx], 0, uint32(len(keys)-1))
-		if err != nil {
-			t.Fatalf("Could not find index: %v", err.Error())
+	for _, test := range tests {
+		internalFrame := createTestInternalNode(35, test.keys, test.ptr)
+		if internalFrame == nil {
+			t.Fatalf("(%s) No internal frame created", test.name)
 		}
 
-		if int(retrievedIdx) != idx {
-			t.Fatalf("Expected index %d but got %d", idx, retrievedIdx)
+		retrievedIdx, err := findKeyIndex(&internalFrame, test.searchKey, 0, uint32(len(test.keys)-1))
+		if err != nil {
+			t.Fatalf("(%s) Could not find index: %v", test.name, err.Error())
 		}
+
+		if int(retrievedIdx) != int(test.expectedIdx) {
+			t.Fatalf("(%s) Expected index %d but got %d", test.name, test.expectedIdx, retrievedIdx)
+		}
+
+		fmt.Printf("(%s). Done...\n", test.name)
 	}
 }
 
@@ -46,21 +227,187 @@ func TestFindKeyIndexLeafNode(t *testing.T) {
 	// +--------+-----------------+-----------+--------+
 	// |  Ben   |  thirty four    |  KENYA    |   KE   |
 	// +--------+-----------------+-----------+--------+
-	keys := [][]byte{[]byte("age"), []byte("code"), []byte("country"), []byte("name")}
-	vals := [][]byte{[]byte("thirty four"), []byte("KE"), []byte("KENYA"), []byte("Ben")}
-	leafNode := createTestLeafNode(25, keys, vals)
-	if leafNode == nil {
-		t.Fatal("No leaf node created")
+	tests := []struct {
+		name        string
+		keys        [][]byte
+		vals        [][]byte
+		expectedIdx int32
+		searchKey   []byte
+	}{
+		{
+			name:        "search key in middle of three-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country"), []byte("name")},
+			vals:        [][]byte{[]byte("v1"), []byte("v2"), []byte("v3")},
+			searchKey:   []byte("country"),
+			expectedIdx: 1,
+		},
+		{
+			name:        "search key in single-key node",
+			keys:        [][]byte{[]byte("country")},
+			vals:        [][]byte{[]byte("v1")},
+			searchKey:   []byte("country"),
+			expectedIdx: 0,
+		},
+		{
+			name:        "search only key in single-key node",
+			keys:        [][]byte{[]byte("code")},
+			vals:        [][]byte{[]byte("v1")},
+			searchKey:   []byte("code"),
+			expectedIdx: 0,
+		},
+		{
+			name:        "search last key in two-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country")},
+			vals:        [][]byte{[]byte("v1"), []byte("v2")},
+			searchKey:   []byte("country"),
+			expectedIdx: 1,
+		},
+		{
+			name:        "search first key in two-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country")},
+			vals:        [][]byte{[]byte("v1"), []byte("v2")},
+			searchKey:   []byte("age"),
+			expectedIdx: 0,
+		},
+		{
+			name:        "search second key in two-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country")},
+			vals:        [][]byte{[]byte("v1"), []byte("v2")},
+			searchKey:   []byte("country"),
+			expectedIdx: 1,
+		},
+		{
+			name: "search last key in large node",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("city"),
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("email"),
+				[]byte("gender"),
+				[]byte("name"),
+				[]byte("phone"),
+				[]byte("state"),
+			},
+			vals: [][]byte{
+				[]byte("v1"),
+				[]byte("v2"),
+				[]byte("v3"),
+				[]byte("v4"),
+				[]byte("v5"),
+				[]byte("v6"),
+				[]byte("v7"),
+				[]byte("v8"),
+				[]byte("v9"),
+			},
+			searchKey:   []byte("state"),
+			expectedIdx: 8,
+		},
+		{
+			name:        "search last key in three-key node",
+			keys:        [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			vals:        [][]byte{[]byte("v1"), []byte("v2"), []byte("v3")},
+			searchKey:   []byte("nationality"),
+			expectedIdx: 2,
+		},
+		{
+			name:        "search middle key exact match",
+			keys:        [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			vals:        [][]byte{[]byte("v1"), []byte("v2"), []byte("v3")},
+			searchKey:   []byte("country"),
+			expectedIdx: 1,
+		},
+		{
+			name:        "search empty node",
+			keys:        [][]byte{},
+			vals:        [][]byte{},
+			searchKey:   []byte("country"),
+			expectedIdx: -1,
+		},
+		{
+			name:        "search shared prefix key",
+			keys:        [][]byte{[]byte("car"), []byte("cat"), []byte("code")},
+			vals:        [][]byte{[]byte("v1"), []byte("v2"), []byte("v3")},
+			searchKey:   []byte("cat"),
+			expectedIdx: 1,
+		},
+		{
+			name: "search non-ASCII key",
+			keys: [][]byte{
+				{0x80},
+				{0x80, 0x01},
+				{0x81},
+				{0xFF},
+			},
+			vals: [][]byte{
+				[]byte("v1"),
+				[]byte("v2"),
+				[]byte("v3"),
+				[]byte("v4"),
+			},
+			searchKey:   []byte{0x81},
+			expectedIdx: 2,
+		},
+		{
+			name: "search missing key between existing keys",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			vals: [][]byte{
+				[]byte("v1"),
+				[]byte("v2"),
+				[]byte("v3"),
+			},
+			searchKey:   []byte("office"),
+			expectedIdx: -1,
+		},
+		{
+			name: "search missing key before first key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			vals: [][]byte{
+				[]byte("v1"),
+				[]byte("v2"),
+				[]byte("v3"),
+			},
+			searchKey:   []byte("account"),
+			expectedIdx: -1,
+		},
+		{
+			name: "search missing key after last key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			vals: [][]byte{
+				[]byte("v1"),
+				[]byte("v2"),
+				[]byte("v3"),
+			},
+			searchKey:   []byte("zipcode"),
+			expectedIdx: -1,
+		},
 	}
 
-	for idx := range len(keys) {
-		retrievedIdx, err := findKeyIndex(&leafNode, keys[idx], 0, uint32(len(keys)-1))
-		if err != nil {
-			t.Fatalf("Could not find index: %v", err.Error())
+	for _, test := range tests {
+		leafNode := createTestLeafNode(25, test.keys, test.vals)
+		if leafNode == nil {
+			t.Fatalf("(%s) No leaf node created", test.name)
 		}
 
-		if int(retrievedIdx) != idx {
-			t.Fatalf("Expected index %d but got %d", idx, retrievedIdx)
+		retrievedIdx, err := findKeyIndex(&leafNode, test.searchKey, 0, uint32(len(test.keys)-1))
+		if err != nil {
+			t.Fatalf("(%s) Could not find index: %v", test.name, err.Error())
+		}
+
+		if int(retrievedIdx) != int(test.expectedIdx) {
+			t.Fatalf("(%s) Expected index %d but got %d", test.name, test.expectedIdx, retrievedIdx)
 		}
 	}
 }
@@ -71,33 +418,134 @@ func TestFindInsertionIdxLeafNode(t *testing.T) {
 	// +--------+-----------------+-----------+--------+
 	// |  Ben   |  thirty four    |  KENYA    |   KE   |
 	// +--------+-----------------+-----------+--------+
-	keys := [][]byte{[]byte("age"), []byte("code"), []byte("country"), []byte("name")}
-	vals := [][]byte{[]byte("thirty four"), []byte("KE"), []byte("KENYA"), []byte("Ben")}
-	leafNode := createTestLeafNode(25, keys, vals)
-	if leafNode == nil {
-		t.Fatal("No leaf node created")
+
+	tests := []struct {
+		keys         [][]byte
+		vals         [][]byte
+		expectedIdx  uint32
+		insertionKey []byte
+	}{
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country"), []byte("name")},
+			vals:         [][]byte{[]byte("v1"), []byte("v2"), []byte("v3")},
+			insertionKey: []byte("code"),
+			expectedIdx:  1,
+		},
+		// node with only one item
+		{
+			keys:         [][]byte{[]byte("country")},
+			vals:         [][]byte{[]byte("v1")},
+			insertionKey: []byte("age"),
+			expectedIdx:  0,
+		},
+		{
+			keys:         [][]byte{[]byte("code")},
+			vals:         [][]byte{[]byte("v1")},
+			insertionKey: []byte("continent"),
+			expectedIdx:  1,
+		},
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country")},
+			vals:         [][]byte{[]byte("v1"), []byte("v2")},
+			insertionKey: []byte("code"),
+			expectedIdx:  1,
+		},
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country")},
+			vals:         [][]byte{[]byte("v1"), []byte("v2")},
+			insertionKey: []byte("cousin"),
+			expectedIdx:  2,
+		},
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country")},
+			vals:         [][]byte{[]byte("v1"), []byte("v2")},
+			insertionKey: []byte("account"),
+			expectedIdx:  0,
+		},
+		{
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("city"),
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("email"),
+				[]byte("gender"),
+				[]byte("name"),
+				[]byte("phone"),
+				[]byte("state"),
+			},
+			vals: [][]byte{
+				[]byte("v1"),
+				[]byte("v2"),
+				[]byte("v3"),
+				[]byte("v4"),
+				[]byte("v5"),
+				[]byte("v6"),
+				[]byte("v7"),
+				[]byte("v8"),
+				[]byte("v9"),
+			},
+			insertionKey: []byte("zipcode"),
+			expectedIdx:  9,
+		},
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			vals:         [][]byte{[]byte("v1"), []byte("v2"), []byte("v3")},
+			insertionKey: []byte("office"),
+			expectedIdx:  3,
+		},
+		{ // exact match
+			keys:         [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			vals:         [][]byte{[]byte("v1"), []byte("v2"), []byte("v3")},
+			insertionKey: []byte("country"),
+			expectedIdx:  1,
+		},
+		{ // empty node
+			keys:         [][]byte{},
+			vals:         [][]byte{},
+			insertionKey: []byte("country"),
+			expectedIdx:  0,
+		},
+		{ // shared prefixes
+			keys:         [][]byte{[]byte("car"), []byte("cat"), []byte("code")},
+			vals:         [][]byte{[]byte("v1"), []byte("v2"), []byte("v3")},
+			insertionKey: []byte("can"),
+			expectedIdx:  0,
+		},
+		{ // non-ASCII
+			keys: [][]byte{
+				{0x80},
+				{0x80, 0x01},
+				{0x81},
+				{0xFF},
+			},
+			vals: [][]byte{
+				[]byte("v1"),
+				[]byte("v2"),
+				[]byte("v3"),
+				[]byte("v4"),
+			},
+			insertionKey: []byte{0x80, 0x02},
+			expectedIdx:  2,
+		},
 	}
 
-	insertionKey := []byte("bio") // should be at idx 1
+	for i, test := range tests {
+		leafNode := createTestLeafNode(25, test.keys, test.vals)
+		if leafNode == nil {
+			t.Fatalf("%d. No leaf node created", i)
+		}
 
-	idx, err := findInsertionIdx(&leafNode, insertionKey, 0, uint32(len(keys)-1))
-	if err != nil {
-		t.Fatalf("Expected no error, got %s", err.Error())
-	}
+		idx, err := findInsertionIdx(&leafNode, test.insertionKey, 0, uint32(len(test.keys)-1))
+		if err != nil {
+			t.Fatalf("%d. Expected no error, got %s", i, err.Error())
+		}
 
-	if idx != 1 {
-		t.Fatalf("Expected insertion idx %d, got %d", 1, idx)
-	}
+		if idx != int32(test.expectedIdx) {
+			t.Fatalf("%d. Expected insertion idx %d, got %d", i, test.expectedIdx, idx)
+		}
 
-	// check exact key
-	expectedIdx := 2
-	idx, err = findInsertionIdx(&leafNode, keys[expectedIdx], 0, uint32(len(keys)-1))
-	if err != nil {
-		t.Fatalf("Expected no error, got %s", err.Error())
-	}
-
-	if idx != int32(expectedIdx) {
-		t.Fatalf("Expected insertion idx %d, got %d", expectedIdx, idx)
+		t.Logf("%d. Done.\n", i)
 	}
 }
 
@@ -107,22 +555,117 @@ func TestFindInsertionIdxInternalNode(t *testing.T) {
 	// +--------+-------+-----------+  99  +
 	// |  25    |  34   |  89       |      |
 	// +--------+-------+-----------+------+
-	keys := [][]byte{[]byte("age"), []byte("country"), []byte("name")}
-	ptr := []uint32{25, 34, 89, 99}
-	internalFrame := createTestInternalNode(keys, ptr)
-	if internalFrame == nil {
-		t.Fatal("No internal frame created")
+	tests := []struct {
+		keys         [][]byte
+		ptr          []uint32
+		expectedIdx  uint32
+		insertionKey []byte
+	}{
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country"), []byte("name")},
+			ptr:          []uint32{25, 34, 89, 99},
+			insertionKey: []byte("code"),
+			expectedIdx:  1,
+		},
+		// node with only one item
+		{
+			keys:         [][]byte{[]byte("country")},
+			ptr:          []uint32{25, 34},
+			insertionKey: []byte("age"),
+			expectedIdx:  0,
+		},
+		{
+			keys:         [][]byte{[]byte("code")},
+			ptr:          []uint32{25, 34},
+			insertionKey: []byte("continent"),
+			expectedIdx:  1,
+		},
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country")},
+			ptr:          []uint32{25, 34, 89},
+			insertionKey: []byte("code"),
+			expectedIdx:  1,
+		},
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country")},
+			ptr:          []uint32{25, 34, 89},
+			insertionKey: []byte("cousin"),
+			expectedIdx:  2,
+		},
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country")},
+			ptr:          []uint32{25, 34, 89},
+			insertionKey: []byte("account"),
+			expectedIdx:  0,
+		},
+		{
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("city"),
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("email"),
+				[]byte("gender"),
+				[]byte("name"),
+				[]byte("phone"),
+				[]byte("state"),
+			},
+			ptr:          []uint32{25, 34, 89, 99, 125, 156, 178, 250, 354, 456},
+			insertionKey: []byte("zipcode"),
+			expectedIdx:  9,
+		},
+		{
+			keys:         [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			ptr:          []uint32{25, 88, 99, 0},
+			insertionKey: []byte("office"),
+			expectedIdx:  3,
+		},
+		{ // exact match
+			keys:         [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			ptr:          []uint32{25, 88, 99, 0},
+			insertionKey: []byte("country"),
+			expectedIdx:  1,
+		},
+		{ // empty node
+			keys:         [][]byte{},
+			ptr:          []uint32{},
+			insertionKey: []byte("country"),
+			expectedIdx:  0,
+		},
+		{ // shared prefixes
+			keys:         [][]byte{[]byte("car"), []byte("cat"), []byte("code")},
+			ptr:          []uint32{25, 88, 99, 0},
+			insertionKey: []byte("can"),
+			expectedIdx:  0,
+		},
+		{ // non-ASCII
+			keys: [][]byte{
+				{0x80},
+				{0x80, 0x01},
+				{0x81},
+				{0xFF},
+			},
+			ptr:          []uint32{25, 88, 99, 105, 250},
+			insertionKey: []byte{0x80, 0x02},
+			expectedIdx:  2,
+		},
 	}
 
-	insertionKey := []byte("bio") // should be at idx 1
+	for i, test := range tests {
+		internalFrame := createTestInternalNode(35, test.keys, test.ptr)
+		if internalFrame == nil {
+			t.Fatalf("%d. No internal frame created", i)
+		}
 
-	idx, err := findInsertionIdx(&internalFrame, insertionKey, 0, uint32(len(keys)-1))
-	if err != nil {
-		t.Fatalf("Expected no error, got %s", err.Error())
-	}
+		idx, err := findInsertionIdx(&internalFrame, test.insertionKey, 0, uint32(len(test.keys)-1))
+		if err != nil {
+			t.Fatalf("%d. Expected no error, got %s", i, err.Error())
+		}
 
-	if idx != 1 {
-		t.Fatalf("Expected insertion idx %d, got %d", 1, idx)
+		if idx != int32(test.expectedIdx) {
+			t.Fatalf("Expected insertion idx %d, got %d", test.expectedIdx, idx)
+		}
+		fmt.Printf("%d. Done...\n", i)
 	}
 }
 
@@ -195,21 +738,21 @@ func TestInsertInternalNode(t *testing.T) {
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
-	pgr := InitPager(t)
+	pagr := InitPager(t)
 
 	// initialize buffer manager
 	cConfig := buffermanager.CacheConfig{
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
 	if err != nil {
-		pgr.Close()
+		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
 
 	if buffManager == nil {
-		pgr.Close()
+		pagr.Close()
 		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
 	}
 
@@ -232,10 +775,10 @@ func TestInsertInternalNode(t *testing.T) {
 		t.Fatalf("expected B+ index got nil")
 	}
 
-	// leaf node
-	keys := [][]byte{[]byte("age"), []byte("country"), []byte("name")}
-	ptrs := []uint32{25, 88, 99, 150}
-	node := createTestInternalNode(keys, ptrs)
+	// internal node
+	keys := [][]byte{[]byte("age"), []byte("country")}
+	ptrs := []uint32{25, 88, 99}
+	node := createTestInternalNode(35, keys, ptrs)
 
 	insertKey := []byte("code")
 	insertPtr := 66
@@ -254,9 +797,48 @@ func TestInsertInternalNode(t *testing.T) {
 	if idx != int32(expectedInsertionIdx) {
 		t.Fatalf("Expected key to be inserted at idx %d, got %d", expectedInsertionIdx, idx)
 	}
+
+	// retreive key
+	cellOff := binary.LittleEndian.Uint32(node[(idx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES+1 : (idx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES+5])
+	kLen := binary.LittleEndian.Uint32(node[cellOff+1 : cellOff+5])
+	key := node[cellOff+13 : cellOff+13+kLen]
+	if !bytes.Equal(key, insertKey) {
+		t.Fatalf("Expected inserted key to be %v, but got %v", insertKey, key)
+	}
+
+	// printNode
+	fmt.Println(printNodeContent(&node))
+
+	// insert second key
+	insertKey = []byte("name")
+	insertPtr = 150
+	expectedInsertionIdx = 3
+
+	err = bp.insertToFrame(&node, insertKey, uint32(insertPtr), nil)
+	if err != nil {
+		t.Fatalf("Expected no error, got %s", err.Error())
+	}
+	// printNode
+	fmt.Println(printNodeContent(&node))
+
+	idx, err = findKeyIndex(&node, insertKey, 0, uint32(len(keys)+1))
+	if err != nil {
+		t.Fatalf("Expected no error, got %s", err.Error())
+	}
+
+	if idx != int32(expectedInsertionIdx) {
+		t.Fatalf("Expected key %s to be inserted at idx %d, got %d", insertKey, expectedInsertionIdx, idx)
+	}
+
+	// retreive key
+	cellOff = binary.LittleEndian.Uint32(node[(idx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES+1 : (idx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES+5])
+	kLen = binary.LittleEndian.Uint32(node[cellOff+1 : cellOff+5])
+	key = node[cellOff+13 : cellOff+13+kLen]
+	if !bytes.Equal(key, insertKey) {
+		t.Fatalf("Expected inserted key to be %v, but got %v", insertKey, key)
+	}
 }
 
-// TODO: Test deleteFromNode
 func TestDeleteKeyInternalNode(t *testing.T) {
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
@@ -307,7 +889,7 @@ func TestDeleteKeyInternalNode(t *testing.T) {
 	// +--------+-------+-----------------+ 150  +
 	// |  25    |  66  |     88   |  99   |      |
 	// +--------+------+----------+-------+------+
-	node := createTestInternalNode(keys, ptrs)
+	node := createTestInternalNode(35, keys, ptrs)
 
 	deletedPtr, err := bp.deleteFromNode(&node, keys[len(keys)-1], false)
 	if err != nil {
@@ -527,7 +1109,7 @@ func TestGetFirstAndLastKeyInternalNode(t *testing.T) {
 	// leaf node
 	keys := [][]byte{[]byte("age"), []byte("code"), []byte("country"), []byte("name")}
 	ptrs := []uint32{25, 66, 88, 99, 150}
-	node := createTestInternalNode(keys, ptrs)
+	node := createTestInternalNode(35, keys, ptrs)
 
 	firstKey, err := bp.getFirstKey(&node)
 	if err != nil {
@@ -707,7 +1289,7 @@ func TestSplitInternalNoUnderflow(t *testing.T) {
 	keys := [][]byte{[]byte("age"), []byte("code"), []byte("country"), []byte("name")}
 	ptrs := []uint32{25, 66, 88, 99, 150}
 
-	node := createTestInternalNode(keys, ptrs)
+	node := createTestInternalNode(35, keys, ptrs)
 	_, _, err = bp.split(&node)
 	if err == nil {
 		t.Fatalf("Expected error, but got nil.")
@@ -882,7 +1464,7 @@ func TestSplitInternalNode(t *testing.T) {
 		t.Logf("----------------------------------\n")
 		t.Logf("Running test: %s\n", test.name)
 		t.Logf("----------------------------------\n")
-		node := createTestInternalNode(test.keys, test.ptrs)
+		node := createTestInternalNode(35, test.keys, test.ptrs)
 
 		newSepKey, newFramePid, err := bp.split(&node)
 		if err != nil {
@@ -1315,8 +1897,270 @@ func TestSplitLeafNode(t *testing.T) {
 	}
 }
 
-func createTestInternalNode(keys [][]byte, ptrs []uint32) []byte {
-	if len(keys) != len(ptrs)-1 {
+func TestMergeNoUnderflowInternalNode(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	sepKey := []byte("nationality")
+	leftKeys := [][]byte{[]byte("age"), []byte("country"), []byte("name")}
+	leftPtrs := []uint32{25, 88, 99, 150}
+	leftNode := createTestInternalNode(35, leftKeys, leftPtrs)
+
+	rightKeys := [][]byte{
+		[]byte("office"),
+		[]byte("organization"),
+		[]byte("owner"),
+		[]byte("passport"),
+	}
+	rightPtrs := []uint32{10, 30, 55, 90, 150}
+	rightNode := createTestInternalNode(45, rightKeys, rightPtrs)
+
+	// set sibling pointers
+	binary.LittleEndian.PutUint32(leftNode[43:47], binary.LittleEndian.Uint32(rightNode[1:5]))
+	binary.LittleEndian.PutUint32(rightNode[43:47], binary.LittleEndian.Uint32(leftNode[1:5]))
+
+	_, err = bp.merge(&leftNode, &rightNode, sepKey, false)
+	if err == nil {
+		t.Fatalf("Expected error but got nil.")
+	}
+}
+
+func TestMergeNoUnderflowLeafNode(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	sepKey := []byte("nationality")
+	leftKeys := [][]byte{[]byte("age"), []byte("country"), []byte("name")}
+	leftVals := [][]byte{
+		[]byte("age"),
+		[]byte("code"),
+		[]byte("country"),
+	}
+	leftNode := createTestLeafNode(35, leftKeys, leftVals)
+
+	rightKeys := [][]byte{
+		[]byte("office"),
+		[]byte("organization"),
+		[]byte("owner"),
+		[]byte("passport"),
+	}
+	rightVals := [][]byte{[]byte("Nairobi"),
+		[]byte("Africa"),
+		[]byte("marital status"),
+		[]byte("Kenya")}
+	rightNode := createTestLeafNode(45, rightKeys, rightVals)
+
+	// set sibling pointers
+	binary.LittleEndian.PutUint32(leftNode[43:47], binary.LittleEndian.Uint32(rightNode[1:5]))
+	binary.LittleEndian.PutUint32(rightNode[43:47], binary.LittleEndian.Uint32(leftNode[1:5]))
+
+	_, err = bp.merge(&leftNode, &rightNode, sepKey, false)
+	if err == nil {
+		t.Fatalf("Expected error but got nil.")
+	}
+}
+
+func TestMergeInternalRightToLeft(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	// example nodes before merge (order=2)
+	//		           +-------------+
+	//		           | nationality |
+	//		           +-------------+
+	//	                  /               \
+	//                       /	           \
+	//                      /                   \
+	// +--------+----------+------+         +----------+-------+
+	// |  age   | country  |      |         |  office  |       |
+	// +--------+----------+  99  +<------->+----------+   30  +
+	// |  25    |   88     |      |         |    10    |       |
+	// +--------+----------+------+         +----------+-------+
+	sepKey := []byte("nationality")
+	leftKeys := [][]byte{[]byte("age"), []byte("country")}
+	leftPtrs := []uint32{25, 88, 99}
+	leftNode := createTestInternalNode(35, leftKeys, leftPtrs)
+
+	rightKeys := [][]byte{
+		[]byte("office"),
+	}
+	rightPtrs := []uint32{10, 30}
+	rightNode := createTestInternalNode(45, rightKeys, rightPtrs)
+
+	// set sibling pointers
+	binary.LittleEndian.PutUint32(leftNode[43:47], binary.LittleEndian.Uint32(rightNode[1:5]))
+	binary.LittleEndian.PutUint32(rightNode[43:47], binary.LittleEndian.Uint32(leftNode[1:5]))
+
+	newSepKey, err := bp.merge(&leftNode, &rightNode, sepKey, false)
+	if err != nil {
+		t.Fatalf("Expected no error, got %s", err.Error())
+	}
+
+	if newSepKey != nil {
+		t.Fatalf("Expected no new separator key, got %v", newSepKey)
+	}
+
+	// example expected node after merge; (order=2)
+
+	// +--------+----------+-----------------+------------------+
+	// |  age   | country  |  nationality    |  office  |       |
+	// +--------+----------+-----------------+----------+   30  +
+	// |  25    |   88     |      99         |    10    |       |
+	// +--------+----------+-----------------+----------+-------+
+
+	// check that right node is marked for deletion
+	markedDead := helpers.BitIsSet(&rightNode[0], pgr.Dead)
+	if !markedDead {
+		t.Fatalf("Expected merged node to be marked as dead.")
+	}
+
+	leftNodeDirty := helpers.BitIsSet(&leftNode[0], pgr.Dirty)
+	if !leftNodeDirty {
+		t.Fatalf("Expected left node to be marked dirty")
+	}
+
+	itemCount := binary.LittleEndian.Uint32(leftNode[17:21])
+	expectedItemCount := len(leftKeys) + len(rightKeys) + 1
+	if itemCount != uint32(expectedItemCount) {
+		t.Fatalf("Expected number of items in new node to be %d but got %d", expectedItemCount, itemCount)
+	}
+
+	// check right most child
+	expectedRightChildPtr := rightPtrs[len(rightPtrs)-1]
+	if ch := binary.LittleEndian.Uint32(leftNode[39:43]); ch != expectedRightChildPtr {
+		t.Fatalf("Expected right most child to be %d, but got %d", expectedRightChildPtr, ch)
+	}
+
+	// ensure items in left node are ordered and none is missing
+	var cellOff uint32
+	var prevKey []byte
+	for i := range itemCount {
+		cellOff = binary.LittleEndian.Uint32(leftNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
+		kLen := binary.LittleEndian.Uint32(leftNode[cellOff+1 : cellOff+5])
+		currKey := leftNode[cellOff+13 : cellOff+13+kLen]
+
+		if bytes.Compare(currKey, prevKey) == -1 {
+			t.Fatalf("Expected curr key %v to be greater than previous key %v", currKey, prevKey)
+		}
+
+		prevKey = make([]byte, kLen)
+		copy(prevKey, currKey)
+	}
+}
+
+func createTestInternalNode(pid uint32, keys [][]byte, ptrs []uint32) []byte {
+	if len(keys) != len(ptrs)-1 && len(keys) != 0 {
 		panic("Invalid number of keys and pointers")
 	}
 	internalFr := make([]byte, pgr.PAGE_SIZE_BYTES)
@@ -1324,10 +2168,14 @@ func createTestInternalNode(keys [][]byte, ptrs []uint32) []byte {
 	// set header
 	helpers.SetFlag(&internalFr[0], []int{pgr.IsInternal})
 
-	binary.LittleEndian.PutUint32(internalFr[1:5], 25) // pid=25
+	binary.LittleEndian.PutUint32(internalFr[1:5], pid) // pid=25
 	binary.LittleEndian.PutUint32(internalFr[17:21], uint32(len(keys)))
 	binary.LittleEndian.PutUint32(internalFr[25:29], uint32(pgr.PAGE_SIZE_BYTES-pgr.LOWER_PADDING_BYTES)) // upper offset
 	binary.LittleEndian.PutUint32(internalFr[29:33], uint32(pgr.HEADER_SIZE_BYTES))                       // lower offset
+
+	if len(keys) == 0 {
+		return internalFr
+	}
 
 	// right child
 	binary.LittleEndian.PutUint32(internalFr[39:43], ptrs[len(keys)])
@@ -1353,7 +2201,7 @@ func createTestInternalNode(keys [][]byte, ptrs []uint32) []byte {
 }
 
 func createTestLeafNode(pid uint32, keys [][]byte, vals [][]byte) []byte {
-	if len(keys) != len(vals) {
+	if len(keys) != len(vals) && len(keys) != 0 {
 		panic("Invalid number of keys and values")
 	}
 
