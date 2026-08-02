@@ -204,6 +204,8 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 		return nil, BTreeError{Message: "different node types provided"}
 	}
 
+	internalNodeMerge := helpers.BitIsSet(&(*leftNode)[0], pgr.IsInternal)
+
 	// 0. pull down seperator key
 	// 1. check if nodes can be mergedi - if a node can hold N+1 pointers and
 	//    total number of child pointers in both nodes is <= N+1
@@ -257,12 +259,12 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 					return nil, e
 				}
 
-				childPtr, e := bp.deleteFromNode(leftNode, lastKey, false)
+				childPtr, v, e := bp.deleteFromNode(leftNode, lastKey, false)
 				if e != nil {
 					return nil, e
 				}
 
-				e = bp.insertToFrame(rightNode, lastKey, childPtr, nil)
+				e = bp.insertToFrame(rightNode, lastKey, childPtr, v)
 				if e != nil {
 					return nil, e
 				}
@@ -277,12 +279,12 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 					return nil, e
 				}
 
-				childPtr, e := bp.deleteFromNode(rightNode, firstKey, false)
+				childPtr, v, e := bp.deleteFromNode(rightNode, firstKey, false)
 				if e != nil {
 					return nil, e
 				}
 
-				e = bp.insertToFrame(rightNode, firstKey, childPtr, nil)
+				e = bp.insertToFrame(rightNode, firstKey, childPtr, v)
 				if e != nil {
 					return nil, e
 				}
@@ -295,7 +297,8 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 		if e != nil {
 			return nil, e
 		}
-		ptr, e := bp.deleteFromNode(rightNode, newSeperatorKey, false)
+		// FIX: Customize for leaf node rebalancing
+		ptr, _, e := bp.deleteFromNode(rightNode, newSeperatorKey, false)
 		if e != nil {
 			return nil, e
 		}
@@ -316,9 +319,11 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			// moving items from the left node to the right node
 
 			// 1. demote separator key
-			err := bp.insertToFrame(rightNode, sepKey, 0, nil)
-			if err != nil {
-				return nil, err
+			if internalNodeMerge {
+				err := bp.insertToFrame(rightNode, sepKey, 0, nil)
+				if err != nil {
+					return nil, err
+				}
 			}
 
 			rightNodeItemCount = binary.LittleEndian.Uint32((*rightNode)[17:21])
@@ -331,15 +336,37 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 					return nil, err
 				}
 
-				ptr, err := bp.deleteFromNode(leftNode, lastKey, false)
+				ptr, v, err := bp.deleteFromNode(leftNode, lastKey, false)
 				if err != nil {
 					return nil, err
 				}
 
-				err = bp.insertToFrame(rightNode, lastKey, ptr, nil)
+				err = bp.insertToFrame(rightNode, lastKey, ptr, v)
 				if err != nil {
 					return nil, err
 				}
+			}
+
+			// update sibling pointer
+			copy((*rightNode)[47:51], (*leftNode)[47:51])
+
+			// retrieve leftNode's left sibling and update it's right sibling pointer
+			if lc := binary.LittleEndian.Uint32((*leftNode)[47:51]); lc != 0 {
+				lSib, _, err := bp.buffermanager.Get(lc)
+				if err != nil {
+					panic(fmt.Sprintf("Unable to retrieve left node's left sibling: %s", err.Error()))
+				}
+
+				lSib.Acquire(false)
+				lSibFr, _, err := lSib.RawBufferSlice()
+				if err != nil {
+					lSib.Release(false)
+					panic(fmt.Sprintf("No buffer attached to frame retrieved: %s", err.Error()))
+				}
+
+				copy((*lSibFr)[43:47], (*leftNode)[43:47])
+				lSib.Release(false)
+				lSib.Unreference()
 			}
 
 			// mark left node as dead
@@ -351,9 +378,11 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			// moving items from right node to left node
 			// 1. demote separator key
 			fmt.Println("demoting seperator key...")
-			err := bp.insertToFrame(rightNode, sepKey, 0, nil)
-			if err != nil {
-				return nil, err
+			if internalNodeMerge {
+				err := bp.insertToFrame(rightNode, sepKey, 0, nil)
+				if err != nil {
+					return nil, err
+				}
 			}
 
 			fmt.Printf("Node after demoting seperator key: \n")
@@ -373,12 +402,12 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 				}
 				fmt.Printf("First Key --> %v\n", firstKey)
 
-				ptr, err := bp.deleteFromNode(rightNode, firstKey, false)
+				ptr, v, err := bp.deleteFromNode(rightNode, firstKey, false)
 				if err != nil {
 					return nil, err
 				}
 
-				err = bp.insertToFrame(leftNode, firstKey, ptr, nil)
+				err = bp.insertToFrame(leftNode, firstKey, ptr, v)
 				if err != nil {
 					return nil, err
 				}
@@ -390,7 +419,27 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 				fmt.Println("-------------------------------------")
 			}
 
-			// set right child ptr
+			// update sibling pointers
+			copy((*leftNode)[43:47], (*rightNode)[43:47])
+
+			// retrieve rightNode's right sibling and update it's left sibling pointer
+			if rc := binary.LittleEndian.Uint32((*rightNode)[43:47]); rc != 0 {
+				rSib, _, err := bp.buffermanager.Get(rc)
+				if err != nil {
+					panic(fmt.Sprintf("Unable to retrieve right node's right sibling: %s", err.Error()))
+				}
+
+				rSib.Acquire(false)
+				rSibFr, _, err := rSib.RawBufferSlice()
+				if err != nil {
+					rSib.Release(false)
+					panic(fmt.Sprintf("No buffer attached to frame retrieved: %s", err.Error()))
+				}
+
+				copy((*rSibFr)[47:51], (*rightNode)[47:51])
+				rSib.Release(false)
+				rSib.Unreference()
+			}
 
 			// mark right node as dead
 			helpers.SetFlag(&(*rightNode)[0], []int{pgr.Dead, pgr.Dirty})
@@ -512,20 +561,21 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 	return nil
 }
 
-// deletes a key from a node/frame/page by deleting cell pointers and rearranging them to occupy any holes left
+// deleteFromNode - deletes a key from a node/frame/page by deleting cell pointers and rearranging them to occupy any holes left
 // if the node is a non-leaf node, the child pointer is returned.
-func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr uint32, e error) {
+// returns deleted key's pointer or value or error if any
+func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr uint32, val []byte, e error) {
 	if fr == nil {
-		return 0, BTreeError{Message: "No frame provided"}
+		return 0, nil, BTreeError{Message: "No frame provided"}
 	}
 
 	if key == nil {
-		return 0, BTreeError{Message: "No frame provided"}
+		return 0, nil, BTreeError{Message: "No frame provided"}
 	}
 
 	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
 	if itemCount == 0 {
-		return 0, BTreeError{Message: "Frame has no keys"}
+		return 0, nil, BTreeError{Message: "Frame has no keys"}
 	}
 
 	internal := helpers.BitIsSet(&(*fr)[0], pgr.IsInternal)
@@ -536,10 +586,10 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 
 	idx, e := findKeyIndex(fr, key, 0, itemCount-1)
 	if e != nil {
-		return 0, e
+		return 0, nil, e
 	}
 	if idx < 0 {
-		return 0, BTreeError{Message: "Could not find key to delete"}
+		return 0, nil, BTreeError{Message: "Could not find key to delete"}
 	}
 
 	delIdx = idx
@@ -547,6 +597,10 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1 : ptrOff+5])
 
 	if !internal {
+		vLen := binary.LittleEndian.Uint32((*fr)[cOff+5 : cOff+9])
+		kLen := binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5])
+		val := (*fr)[cOff+13+kLen : cOff+13+kLen+vLen]
+
 		// remove cell ptr
 		lowOff := binary.LittleEndian.Uint32((*fr)[29:33])
 		clear((*fr)[(delIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES : delIdx*pgr.CELL_POINTER_SIZE_BYTE+pgr.HEADER_SIZE_BYTES+pgr.CELL_POINTER_SIZE_BYTE])
@@ -559,7 +613,7 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 		// decrement item count
 		binary.LittleEndian.PutUint32((*fr)[17:21], itemCount-1)
 
-		return 0, nil
+		return 0, val, nil
 	}
 
 	// internal node
@@ -601,7 +655,7 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 	// decrement item count
 	binary.LittleEndian.PutUint32((*fr)[17:21], itemCount-1)
 
-	return deletedChildPtr, nil
+	return deletedChildPtr, nil, nil
 }
 
 // getFirstKey returns the first key of the frame or error if any.
