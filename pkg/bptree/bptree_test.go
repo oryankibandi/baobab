@@ -2102,16 +2102,45 @@ func TestMergeInternalRightToLeft(t *testing.T) {
 	leftPtrs := []uint32{25, 88, 99}
 	leftNode := createTestInternalNode(uint32(leftNodePid), leftKeys, leftPtrs)
 
+	leftNodeLeftSibling, err := bp.buffermanager.NewFrame(true, false)
+	if err != nil {
+		t.Fatalf("Unable to create new frame: %s", err)
+	}
+
 	rightKeys := [][]byte{
 		[]byte("office"),
 	}
 	rightPtrs := []uint32{10, 30}
 	rightNodePid := 45
 	rightNode := createTestInternalNode(uint32(rightNodePid), rightKeys, rightPtrs)
+	rightNodeRightSibling, err := bp.buffermanager.NewFrame(true, false)
+	if err != nil {
+		t.Fatalf("Unable to create new frame: %s", err)
+	}
 
 	// set sibling pointers
 	binary.LittleEndian.PutUint32(leftNode[43:47], uint32(rightNodePid))
 	binary.LittleEndian.PutUint32(rightNode[47:51], uint32(leftNodePid))
+
+	rightNodeRightSibling.Acquire(false)
+	rightNodeRightSibFr, _, err := rightNodeRightSibling.RawBufferSlice()
+	if err != nil {
+		t.Fatalf("Unable to get frame buffer: %s", err)
+	}
+	binary.LittleEndian.PutUint32((*rightNodeRightSibFr)[47:51], uint32(rightNodePid))
+	copy(rightNode[43:47], (*rightNodeRightSibFr)[1:5])
+	rightNodeRightSibling.Release(false)
+	rightNodeRightSibling.Unreference()
+
+	leftNodeLeftSibling.Acquire(false)
+	leftNodeLeftSibFr, _, err := leftNodeLeftSibling.RawBufferSlice()
+	if err != nil {
+		t.Fatalf("Unable to get frame buffer: %s", err)
+	}
+	binary.LittleEndian.PutUint32((*leftNodeLeftSibFr)[43:47], uint32(leftNodePid))
+	copy(leftNode[47:51], (*leftNodeLeftSibFr)[1:5])
+	leftNodeLeftSibling.Release(false)
+	leftNodeLeftSibling.Unreference()
 
 	newSepKey, err := bp.merge(&leftNode, &rightNode, sepKey, false)
 	if err != nil {
@@ -2153,9 +2182,13 @@ func TestMergeInternalRightToLeft(t *testing.T) {
 		t.Fatalf("Expected right most child to be %d, but got %d", expectedRightChildPtr, ch)
 	}
 
-	// ensure sibling pointer is updated on the left node
-	if binary.LittleEndian.Uint32(leftNode[43:47]) == uint32(rightNodePid) {
-		t.Fatalf("Expected left node's right sibling pointer to be updated.")
+	// ensure sibling pointer is updated
+	if binary.LittleEndian.Uint32(leftNode[43:47]) != binary.LittleEndian.Uint32((*rightNodeRightSibFr)[1:5]) {
+		t.Fatalf("Expected left node's right sibling pointer to be %d but got %d.", binary.LittleEndian.Uint32((*rightNodeRightSibFr)[1:5]), binary.LittleEndian.Uint32(leftNode[43:47]))
+	}
+
+	if binary.LittleEndian.Uint32((*rightNodeRightSibFr)[47:51]) != binary.LittleEndian.Uint32(leftNode[1:5]) {
+		t.Fatalf("Expected rightNodeRightSibling's left sibling to be %d, but got %d", binary.LittleEndian.Uint32(leftNode[1:5]), binary.LittleEndian.Uint32((*rightNodeRightSibFr)[47:51]))
 	}
 
 	// ensure items in left node are ordered and none is missing
@@ -2233,15 +2266,44 @@ func TestMergeLeafRightToLeft(t *testing.T) {
 	leftVals := [][]byte{[]byte("twenty"), []byte("U.S.A")}
 	leftNode := createTestLeafNode(35, leftKeys, leftVals)
 
+	leftNodeLeftSibling, err := bp.buffermanager.NewFrame(true, false)
+	if err != nil {
+		t.Fatalf("Unable to create new frame: %s", err)
+	}
+
 	rightKeys := [][]byte{
 		[]byte("office"),
 	}
 	rightVals := [][]byte{[]byte("aws")}
 	rightNode := createTestLeafNode(45, rightKeys, rightVals)
+	rightNodeRightSibling, err := bp.buffermanager.NewFrame(true, false)
+	if err != nil {
+		t.Fatalf("Unable to create new frame: %s", err)
+	}
 
 	// set sibling pointers
 	binary.LittleEndian.PutUint32(leftNode[43:47], binary.LittleEndian.Uint32(rightNode[1:5]))
 	binary.LittleEndian.PutUint32(rightNode[47:51], binary.LittleEndian.Uint32(leftNode[1:5]))
+
+	rightNodeRightSibling.Acquire(false)
+	rightNodeRightSibFr, _, err := rightNodeRightSibling.RawBufferSlice()
+	if err != nil {
+		t.Fatalf("Unable to get frame buffer: %s", err)
+	}
+	binary.LittleEndian.PutUint32((*rightNodeRightSibFr)[47:51], binary.LittleEndian.Uint32(rightNode[1:5]))
+	copy(rightNode[43:47], (*rightNodeRightSibFr)[1:5])
+	rightNodeRightSibling.Release(false)
+	rightNodeRightSibling.Unreference()
+
+	leftNodeLeftSibling.Acquire(false)
+	leftNodeLeftSibFr, _, err := leftNodeLeftSibling.RawBufferSlice()
+	if err != nil {
+		t.Fatalf("Unable to get frame buffer: %s", err)
+	}
+	binary.LittleEndian.PutUint32((*leftNodeLeftSibFr)[43:47], binary.LittleEndian.Uint32(leftNode[1:5]))
+	copy(leftNode[47:51], (*leftNodeLeftSibFr)[1:5])
+	leftNodeLeftSibling.Release(false)
+	leftNodeLeftSibling.Unreference()
 
 	newSepKey, err := bp.merge(&leftNode, &rightNode, sepKey, false)
 	if err != nil {
@@ -2278,8 +2340,12 @@ func TestMergeLeafRightToLeft(t *testing.T) {
 	}
 
 	// ensure sibling pointer is updated on the left node
-	if binary.LittleEndian.Uint32(leftNode[43:47]) == binary.LittleEndian.Uint32(rightNode[1:5]) {
-		t.Fatalf("Expected left node's right sibling pointer to be updated.")
+	if binary.LittleEndian.Uint32(leftNode[43:47]) != binary.LittleEndian.Uint32((*rightNodeRightSibFr)[1:5]) {
+		t.Fatalf("Expected left node's right sibling pointer to be %d but got %d.", binary.LittleEndian.Uint32((*rightNodeRightSibFr)[1:5]), binary.LittleEndian.Uint32(leftNode[43:47]))
+	}
+
+	if binary.LittleEndian.Uint32((*rightNodeRightSibFr)[47:51]) != binary.LittleEndian.Uint32(leftNode[1:5]) {
+		t.Fatalf("Expected rightNodeRightSibling's left sibling to be %d, but got %d", binary.LittleEndian.Uint32(leftNode[1:5]), binary.LittleEndian.Uint32((*rightNodeRightSibFr)[47:51]))
 	}
 
 	// ensure items in left node are ordered and none is missing
