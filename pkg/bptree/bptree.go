@@ -228,7 +228,6 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 	var deficit uint32
 	if leftNodeItemCount+1+rightNodeItemCount+1 > (pgr.ORDER*2)+1 {
 		// rebalance
-		fmt.Println("rebalancing....")
 		if leftNodeItemCount == rightNodeItemCount {
 			// nodes balanced
 			return nil, nil
@@ -237,16 +236,18 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 		var donorDirection bool // true if moving items from right to left node, else false
 		if leftNodeItemCount > rightNodeItemCount {
 			donorDirection = false
-			deficit = uint32((pgr.ORDER * 2) - rightNodeItemCount)
+			deficit = uint32(pgr.ORDER - rightNodeItemCount)
 		} else {
 			donorDirection = true
-			deficit = uint32((pgr.ORDER * 2) - leftNodeItemCount)
+			deficit = uint32(pgr.ORDER - leftNodeItemCount)
 		}
 
 		// 1. demote separator key
-		err := bp.insertToFrame(rightNode, sepKey, 0, nil)
-		if err != nil {
-			return nil, err
+		if internalNodeMerge {
+			err := bp.insertToFrame(rightNode, sepKey, 0, nil)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if !donorDirection {
@@ -279,12 +280,12 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 					return nil, e
 				}
 
-				childPtr, v, e := bp.deleteFromNode(rightNode, firstKey, false)
+				childPtr, v, e := bp.deleteFromNode(rightNode, firstKey, true)
 				if e != nil {
 					return nil, e
 				}
 
-				e = bp.insertToFrame(rightNode, firstKey, childPtr, v)
+				e = bp.insertToFrame(leftNode, firstKey, childPtr, v)
 				if e != nil {
 					return nil, e
 				}
@@ -297,14 +298,25 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 		if e != nil {
 			return nil, e
 		}
-		// FIX: Customize for leaf node rebalancing
-		ptr, _, e := bp.deleteFromNode(rightNode, newSeperatorKey, false)
-		if e != nil {
-			return nil, e
-		}
-		// ptr should be 0, since we demoted the seperator key without any child pointer
-		if ptr != 0 {
-			panic(fmt.Errorf("expected no pointer but got, %d", ptr))
+
+		if internalNodeMerge {
+			// for internal nodes we delete the first key of the right
+			// node and return it as the new seperator key
+			var ptr uint32
+			if !donorDirection {
+				ptr, _, e = bp.deleteFromNode(rightNode, newSeperatorKey, true)
+			} else {
+				ptr, _, e = bp.deleteFromNode(rightNode, newSeperatorKey, false)
+			}
+
+			if e != nil {
+				return nil, e
+			}
+
+			// ptr should be 0, since we demoted the seperator key without any child pointer
+			if ptr != 0 {
+				panic(fmt.Errorf("expected no pointer but got, %d", ptr))
+			}
 		}
 
 		// mark both nodes dirty
@@ -314,7 +326,6 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 		return newSeperatorKey, nil
 	} else {
 		// merge
-		fmt.Println("merging....")
 		if leftMerge {
 			// moving items from the left node to the right node
 
@@ -347,7 +358,7 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 				}
 			}
 
-			// update sibling pointer
+			// update sibling pointers
 			copy((*rightNode)[47:51], (*leftNode)[47:51])
 
 			// retrieve leftNode's left sibling and update it's right sibling pointer
@@ -370,14 +381,13 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			}
 
 			// mark left node as dead
-			helpers.SetFlag(&(*leftNode)[0], []int{pgr.Dead})
+			helpers.SetFlag(&(*leftNode)[0], []int{pgr.Dead, pgr.Dirty})
 
 			// mark right node as dirty
 			helpers.SetFlag(&(*rightNode)[0], []int{pgr.Dirty})
 		} else {
 			// moving items from right node to left node
 			// 1. demote separator key
-			fmt.Println("demoting seperator key...")
 			if internalNodeMerge {
 				err := bp.insertToFrame(rightNode, sepKey, 0, nil)
 				if err != nil {
@@ -385,22 +395,18 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 				}
 			}
 
-			fmt.Printf("Node after demoting seperator key: \n")
 			printNodeContent(rightNode)
 
 			rightNodeItemCount = binary.LittleEndian.Uint32((*rightNode)[17:21])
 
 			deficit = leftNodeItemCount - rightNodeItemCount
-			fmt.Printf("leftNodeItemCount: %d, rightNodeCount: %d, deficit -> %d\n", leftNodeItemCount, rightNodeItemCount, deficit)
-			fmt.Println("demoted seperator key...")
 
 			// move keys from right node to left node
-			for i := range rightNodeItemCount {
+			for range rightNodeItemCount {
 				firstKey, err := bp.getFirstKey(rightNode)
 				if err != nil {
 					return nil, err
 				}
-				fmt.Printf("First Key --> %v\n", firstKey)
 
 				ptr, v, err := bp.deleteFromNode(rightNode, firstKey, false)
 				if err != nil {
@@ -412,11 +418,6 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 					return nil, err
 				}
 
-				fmt.Println("-------------------------------------")
-				fmt.Printf("Nodes after pass: %d\n", i)
-				fmt.Printf("%s\n", printNodeContent(leftNode))
-				fmt.Printf("%s\n", printNodeContent(rightNode))
-				fmt.Println("-------------------------------------")
 			}
 
 			// update sibling pointers
@@ -491,8 +492,6 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 		return e
 	}
 
-	fmt.Printf("Inserting key %s and pointer %d at idx %d in node\n", key, childPtr, idx)
-
 	if idx < 0 {
 		return BTreeError{Message: "Unable to insert index"}
 	}
@@ -507,7 +506,6 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 	copy((*fr)[cellStartOff+13:cellStartOff+13+uint32(keyLen)], key)
 	if internal {
 		if insertIdx == itemCount {
-			fmt.Printf("insertIdx(%d) == itemCount(%d)\n", insertIdx, itemCount)
 			// set childPtr as right child pointer in header and move the previous
 			// right child pointer to the same cell as the new key
 			// +------+------+------+------+
@@ -518,7 +516,6 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 
 			copy((*fr)[cellStartOff+9:cellStartOff+13], (*fr)[39:43])
 			binary.LittleEndian.PutUint32((*fr)[39:43], childPtr)
-			fmt.Printf("New right child Ptr --> %d\n", binary.LittleEndian.Uint32((*fr)[39:43]))
 		} else {
 			// If no child pointer provided, leave the childPtr slot empty
 			// This happens briefly during merging/rebalancing when the separator key is demoted.
@@ -638,9 +635,9 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 			deletedChildPtr = binary.LittleEndian.Uint32((*fr)[cOff+9 : cOff+13])
 		}
 	} else {
-		if !leftMerge && hasChildPtr {
+		if (!leftMerge && hasChildPtr) || (leftMerge && !hasChildPtr) {
 			currCellPtr := binary.LittleEndian.Uint32((*fr)[cOff+9 : cOff+13])
-			nextCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(ptrOff+pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(ptrOff+pgr.CELL_POINTER_SIZE_BYTE)+5])
+			nextCellOff := binary.LittleEndian.Uint32((*fr)[ptrOff+pgr.CELL_POINTER_SIZE_BYTE+1 : ptrOff+pgr.CELL_POINTER_SIZE_BYTE+5])
 			// store cell pointer that will be deleted
 			deletedChildPtr = binary.LittleEndian.Uint32((*fr)[nextCellOff+9 : nextCellOff+13])
 			binary.LittleEndian.PutUint32((*fr)[nextCellOff+9:nextCellOff+13], currCellPtr)
@@ -744,7 +741,6 @@ func findInsertionIdx(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint
 		return int32(midPoint), nil
 	} else if s == 1 {
 		// searchKey < key
-		fmt.Printf("searchKey < key\n")
 		if itemCount == 1 {
 			return 0, nil
 		}
@@ -754,11 +750,9 @@ func findInsertionIdx(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint
 		prevKey := (*fr)[prevCellOff+13 : prevCellOff+13+prevKeyLen]
 		if n := bytes.Compare(prevKey, searchKey); n < 0 {
 			// searchKey > prevKey
-			fmt.Printf("searchKey > prevKey\n")
 			return int32(midPoint), nil
 		} else {
 			// searchKey < prevKey
-			fmt.Printf("searchKey < prevKey\n")
 			if arrLen == 2 {
 				// check key at previous index instead of recursing
 				midPoint--
@@ -772,14 +766,11 @@ func findInsertionIdx(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint
 					return int32(midPoint + uint32(1)), nil
 				}
 			}
-			fmt.Printf("curr Key is greater than searchkey, calling findInsertionIdx(%d, %d)\n", startIdx, midPoint)
 			return findInsertionIdx(fr, searchKey, startIdx, midPoint)
 		}
 	} else {
 		// searchkey > key
-		fmt.Printf("searchKey > key\n")
 		if itemCount == 1 {
-			fmt.Println("returning 1")
 			return 1, nil
 		}
 
@@ -790,25 +781,19 @@ func findInsertionIdx(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint
 			nextKey := (*fr)[nextCellOff+13 : nextCellOff+13+nextKeyLen]
 
 			if n := bytes.Compare(nextKey, searchKey); n < 0 {
-				fmt.Printf("searchKey > nextKey\n")
-				fmt.Printf("arrLen -> %d\n", arrLen)
-				fmt.Printf("midPoint: %d, startIdx: %d, endIdx: %d\n", midPoint, startIdx, endIdx)
 				if midPoint == endIdx {
 					return int32(midPoint + 1), nil
 				} else {
 					return int32(midPoint + 2), nil
 				}
 			} else {
-				fmt.Printf("searchKey < nextKey\n")
 				if arrLen == 2 {
 					panic("No suitable slot could be found")
 				}
-				fmt.Printf("curr Key is less than searchkey, calling findInsertionIdx(%d, %d)\n", midPoint, endIdx)
 				return int32(midPoint + 1), nil
 			}
 		}
 
-		fmt.Printf("midPoint -> %d\tendIdx -> %d, itemCount -> %d, arrLen -> %d\n", midPoint, endIdx, itemCount, arrLen)
 		return findInsertionIdx(fr, searchKey, midPoint, endIdx)
 	}
 }
@@ -872,7 +857,6 @@ func findKeyIndex(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint32) 
 		// searchKey > key
 		if arrLen == 2 {
 			// no item found
-			fmt.Printf("startIdx: %d, endIdx: %d,  midPoint: %d\n", startIdx, endIdx, midPoint)
 			return -1, nil
 		}
 		return findKeyIndex(fr, searchKey, midPoint, endIdx)
@@ -915,10 +899,6 @@ func printNodeContent(fr *[]byte) string {
 	if isInternal {
 		ptrs = append(ptrs, binary.LittleEndian.Uint32((*fr)[39:43]))
 	}
-
-	fmt.Println("Keys:-> ", keys)
-	fmt.Println("Vals:-> ", vals)
-	fmt.Println("Ptrs:-> ", ptrs)
 
 	return helpers.PrintBPTreeNode(keys, vals, ptrs)
 }

@@ -1475,6 +1475,37 @@ func TestSplitInternalNode(t *testing.T) {
 		t.Logf("----------------------------------\n")
 		node := createTestInternalNode(35, test.keys, test.ptrs)
 
+		leftSibling, err := bp.buffermanager.NewFrame(true, false)
+		if err != nil {
+			t.Fatalf("Unable to create new frame: %s", err)
+		}
+
+		rightSibling, err := bp.buffermanager.NewFrame(true, false)
+		if err != nil {
+			t.Fatalf("Unable to create new frame: %s", err)
+		}
+
+		// set sibling pointer
+		leftSibling.Acquire(false)
+		leftSibFr, _, err := leftSibling.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Unable to get frame buffer: %s", err.Error())
+		}
+		copy(node[47:51], (*leftSibFr)[1:5])
+		copy((*leftSibFr)[43:47], node[1:5])
+		leftSibling.Release(false)
+		leftSibling.Unreference()
+
+		rightSibling.Acquire(false)
+		rightSiblingFr, _, err := rightSibling.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Unable to get frame buffer: %s", err.Error())
+		}
+		copy(node[43:47], (*rightSiblingFr)[1:5])
+		copy((*rightSiblingFr)[47:51], node[1:5])
+		rightSibling.Release(false)
+		rightSibling.Unreference()
+
 		newSepKey, newFramePid, err := bp.split(&node)
 		if err != nil {
 			t.Fatalf("Expected no error, got %s", err.Error())
@@ -1489,7 +1520,7 @@ func TestSplitInternalNode(t *testing.T) {
 		//                    /               \
 		// +--------+-------+------+    +------------------+--------+-----------+
 		// |  age   | code  |      |    |  marital status  |  name  |           |
-		// +--------+-------+  88  +    +------------------+--------+   250     +
+		// +--------+-------+  88  +<-->+------------------+--------+   250     +
 		// |  25    |  66   |	   |    |       99         |  150   |           |
 		// +--------+-------+------+    +------------------+--------+------------
 
@@ -1561,6 +1592,23 @@ func TestSplitInternalNode(t *testing.T) {
 		expectedRightNodeItemCount := len(test.keys) - pgr.ORDER - 1
 		if rightNodeItemCount != uint32(expectedRightNodeItemCount) {
 			t.Fatalf("Expected itemcount in right node to be %d, but got %d", expectedRightNodeItemCount, rightNodeItemCount)
+		}
+
+		// verify sibling pointers
+		if !bytes.Equal(node[43:47], (*rightNodeBuff)[1:5]) {
+			t.Fatalf("Expected leftNode's right sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightNodeBuff)[1:5]), binary.LittleEndian.Uint32(node[43:47]))
+		}
+
+		if !bytes.Equal((*rightNodeBuff)[47:51], (node)[1:5]) {
+			t.Fatalf("Expected newNode's left sibling to be %d, but got %d", binary.LittleEndian.Uint32((node)[1:5]), binary.LittleEndian.Uint32((*rightNodeBuff)[47:51]))
+		}
+
+		if !bytes.Equal((*rightNodeBuff)[43:47], (*rightSiblingFr)[1:5]) {
+			t.Fatalf("Expected newNode's right sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightSiblingFr)[1:5]), binary.LittleEndian.Uint32((*rightNodeBuff)[43:47]))
+		}
+
+		if !bytes.Equal((*rightSiblingFr)[47:51], (*rightNodeBuff)[1:5]) {
+			t.Fatalf("Expected rightSibling's left sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightNodeBuff)[1:5]), binary.LittleEndian.Uint32((*rightSiblingFr)[47:51]))
 		}
 
 		for i := range rightNodeItemCount {
@@ -1810,6 +1858,37 @@ func TestSplitLeafNode(t *testing.T) {
 		t.Logf("----------------------------------\n")
 		node := createTestLeafNode(uint32(p*20), test.keys, test.vals)
 
+		leftSibling, err := bp.buffermanager.NewFrame(true, false)
+		if err != nil {
+			t.Fatalf("Unable to create new frame: %s", err)
+		}
+
+		rightSibling, err := bp.buffermanager.NewFrame(true, false)
+		if err != nil {
+			t.Fatalf("Unable to create new frame: %s", err)
+		}
+
+		// set sibling pointer
+		leftSibling.Acquire(false)
+		leftSibFr, _, err := leftSibling.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Unable to get frame buffer: %s", err.Error())
+		}
+		copy(node[47:51], (*leftSibFr)[1:5])
+		copy((*leftSibFr)[43:47], node[1:5])
+		leftSibling.Release(false)
+		leftSibling.Unreference()
+
+		rightSibling.Acquire(false)
+		rightSiblingFr, _, err := rightSibling.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Unable to get frame buffer: %s", err.Error())
+		}
+		copy(node[43:47], (*rightSiblingFr)[1:5])
+		copy((*rightSiblingFr)[47:51], node[1:5])
+		rightSibling.Release(false)
+		rightSibling.Unreference()
+
 		newSepKey, newFramePid, err := bp.split(&node)
 		if err != nil {
 			t.Fatalf("Expected no error, got %s", err.Error())
@@ -1886,6 +1965,23 @@ func TestSplitLeafNode(t *testing.T) {
 		expectedRightNodeItemCount := len(test.keys) - pgr.ORDER
 		if rightNodeItemCount != uint32(expectedRightNodeItemCount) {
 			t.Fatalf("Expected itemcount in right node to be %d, but got %d", expectedRightNodeItemCount, rightNodeItemCount)
+		}
+
+		// verify sibling pointers
+		if !bytes.Equal(node[43:47], (*rightNodeBuff)[1:5]) {
+			t.Fatalf("Expected leftNode's right sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightNodeBuff)[1:5]), binary.LittleEndian.Uint32(node[43:47]))
+		}
+
+		if !bytes.Equal((*rightNodeBuff)[47:51], (node)[1:5]) {
+			t.Fatalf("Expected newNode's left sibling to be %d, but got %d", binary.LittleEndian.Uint32((node)[1:5]), binary.LittleEndian.Uint32((*rightNodeBuff)[47:51]))
+		}
+
+		if !bytes.Equal((*rightNodeBuff)[43:47], (*rightSiblingFr)[1:5]) {
+			t.Fatalf("Expected newNode's right sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightSiblingFr)[1:5]), binary.LittleEndian.Uint32((*rightNodeBuff)[43:47]))
+		}
+
+		if !bytes.Equal((*rightSiblingFr)[47:51], (*rightNodeBuff)[1:5]) {
+			t.Fatalf("Expected rightSibling's left sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightNodeBuff)[1:5]), binary.LittleEndian.Uint32((*rightSiblingFr)[47:51]))
 		}
 
 		for i := range rightNodeItemCount {
@@ -2319,7 +2415,7 @@ func TestMergeLeafRightToLeft(t *testing.T) {
 	// +------------+----------+----------+
 	// |  age       | country  |  office  |
 	// +------------+----------+----------+
-	// |  twenty    |  U.S.A   |    10    |
+	// |  twenty    |  U.S.A   |   aws    |
 	// +------------+----------+----------+
 
 	// check that right node is marked for deletion
@@ -2362,6 +2458,809 @@ func TestMergeLeafRightToLeft(t *testing.T) {
 
 		prevKey = make([]byte, kLen)
 		copy(prevKey, currKey)
+	}
+}
+
+func TestMergeInternalLeftToRight(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	// example nodes before merge (order=2)
+	//		           +-------------+
+	//		           |   country   |
+	//		           +-------------+
+	//	                  /               \
+	//                       /	           \
+	//                      /                   \
+	// +--------+----------+------+         +---------------+--------+------+
+	// |  age   |          |      |         |  nationality  | office |      |
+	// +--------+----------+  99  +<------->+---------------+--------+  30  +
+	// |  25    |          |      |         |    510        |   10   |      |
+	// +--------+----------+------+         +---------------+--------+------+
+	sepKey := []byte("country")
+	leftKeys := [][]byte{[]byte("age")}
+	leftNodePid := 35
+	leftPtrs := []uint32{25, 99}
+	leftNode := createTestInternalNode(uint32(leftNodePid), leftKeys, leftPtrs)
+
+	leftNodeLeftSibling, err := bp.buffermanager.NewFrame(true, false)
+	if err != nil {
+		t.Fatalf("Unable to create new frame: %s", err)
+	}
+
+	rightKeys := [][]byte{
+		[]byte("nationality"),
+		[]byte("office"),
+	}
+	rightPtrs := []uint32{510, 10, 30}
+	rightNodePid := 45
+	rightNode := createTestInternalNode(uint32(rightNodePid), rightKeys, rightPtrs)
+	rightNodeRightSibling, err := bp.buffermanager.NewFrame(true, false)
+	if err != nil {
+		t.Fatalf("Unable to create new frame: %s", err)
+	}
+
+	// set sibling pointers
+	binary.LittleEndian.PutUint32(leftNode[43:47], uint32(rightNodePid))
+	binary.LittleEndian.PutUint32(rightNode[47:51], uint32(leftNodePid))
+
+	rightNodeRightSibling.Acquire(false)
+	rightNodeRightSibFr, _, err := rightNodeRightSibling.RawBufferSlice()
+	if err != nil {
+		t.Fatalf("Unable to get frame buffer: %s", err)
+	}
+	binary.LittleEndian.PutUint32((*rightNodeRightSibFr)[47:51], uint32(rightNodePid))
+	copy(rightNode[43:47], (*rightNodeRightSibFr)[1:5])
+	rightNodeRightSibling.Release(false)
+	rightNodeRightSibling.Unreference()
+
+	leftNodeLeftSibling.Acquire(false)
+	leftNodeLeftSibFr, _, err := leftNodeLeftSibling.RawBufferSlice()
+	if err != nil {
+		t.Fatalf("Unable to get frame buffer: %s", err)
+	}
+	binary.LittleEndian.PutUint32((*leftNodeLeftSibFr)[43:47], uint32(leftNodePid))
+	copy(leftNode[47:51], (*leftNodeLeftSibFr)[1:5])
+	leftNodeLeftSibling.Release(false)
+	leftNodeLeftSibling.Unreference()
+
+	// merge nodes
+	newSepKey, err := bp.merge(&leftNode, &rightNode, sepKey, true)
+	if err != nil {
+		t.Fatalf("Expected no error, got %s", err.Error())
+	}
+
+	if newSepKey != nil {
+		t.Fatalf("Expected no new separator key, got %v", newSepKey)
+	}
+
+	// example expected node after merge; (order=2)
+
+	// +--------+----------+-----------------+------------------+
+	// |  age   | country  |  nationality    |  office  |       |
+	// +--------+----------+-----------------+----------+   30  +
+	// |  25    |   99     |     510         |    10    |       |
+	// +--------+----------+-----------------+----------+-------+
+
+	// check that left node is marked for deletion
+	markedDead := helpers.BitIsSet(&leftNode[0], pgr.Dead)
+	if !markedDead {
+		t.Fatalf("Expected merged node to be marked as dead.")
+	}
+
+	// check that right node is marked dirty
+	rightNodeDirty := helpers.BitIsSet(&rightNode[0], pgr.Dirty)
+	if !rightNodeDirty {
+		t.Fatalf("Expected right node to be marked dirty")
+	}
+
+	// ensure itemcount is correct
+	itemCount := binary.LittleEndian.Uint32(rightNode[17:21])
+	expectedItemCount := len(leftKeys) + len(rightKeys) + 1
+	if itemCount != uint32(expectedItemCount) {
+		t.Fatalf("Expected number of items in right node to be %d but got %d", expectedItemCount, itemCount)
+	}
+
+	// check right most child
+	expectedRightChildPtr := rightPtrs[len(rightPtrs)-1]
+	if ch := binary.LittleEndian.Uint32(rightNode[39:43]); ch != expectedRightChildPtr {
+		t.Fatalf("Expected right most child to be %d, but got %d", expectedRightChildPtr, ch)
+	}
+
+	// ensure sibling pointer is updated
+	if binary.LittleEndian.Uint32(rightNode[47:51]) != binary.LittleEndian.Uint32((*leftNodeLeftSibFr)[1:5]) {
+		t.Fatalf("Expected right node's left sibling pointer to be %d but got %d.", binary.LittleEndian.Uint32((*leftNodeLeftSibFr)[1:5]), binary.LittleEndian.Uint32(rightNode[47:51]))
+	}
+
+	if binary.LittleEndian.Uint32((*leftNodeLeftSibFr)[43:47]) != binary.LittleEndian.Uint32(rightNode[1:5]) {
+		t.Fatalf("Expected leftNodeLeftSibling's right sibling to be %d, but got %d", binary.LittleEndian.Uint32(rightNode[1:5]), binary.LittleEndian.Uint32((*leftNodeLeftSibFr)[47:51]))
+	}
+
+	// ensure items in right node are ordered and none is missing
+	var cellOff uint32
+	var prevKey []byte
+	for i := range itemCount {
+		cellOff = binary.LittleEndian.Uint32(rightNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
+		kLen := binary.LittleEndian.Uint32(rightNode[cellOff+1 : cellOff+5])
+		currKey := rightNode[cellOff+13 : cellOff+13+kLen]
+
+		if bytes.Compare(currKey, prevKey) == -1 {
+			t.Fatalf("Expected curr key %v to be greater than previous key %v", currKey, prevKey)
+		}
+
+		prevKey = make([]byte, kLen)
+		copy(prevKey, currKey)
+	}
+}
+
+func TestMergeLeafLeftToRight(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	// example nodes before merge (order=2)
+	//              +-------------+
+	//              | nationality |
+	//              +-------------+
+	//             /               \
+	//            /                 \
+	//           /                   \
+	// +------------+              +-------------+----------+
+	// |  age       |              | nationality |  office  |
+	// +------------+<------------>+-------------+----------+
+	// |  twenty    |              | american    |    aws   |
+	// +------------+              +-------------+----------+
+	sepKey := []byte("nationality")
+	leftKeys := [][]byte{[]byte("age")}
+	leftVals := [][]byte{[]byte("twenty")}
+	leftNode := createTestLeafNode(35, leftKeys, leftVals)
+
+	leftNodeLeftSibling, err := bp.buffermanager.NewFrame(true, false)
+	if err != nil {
+		t.Fatalf("Unable to create new frame: %s", err)
+	}
+
+	rightKeys := [][]byte{
+		[]byte("nationality"),
+		[]byte("office"),
+	}
+	rightVals := [][]byte{[]byte("american"), []byte("aws")}
+	rightNode := createTestLeafNode(45, rightKeys, rightVals)
+	rightNodeRightSibling, err := bp.buffermanager.NewFrame(true, false)
+	if err != nil {
+		t.Fatalf("Unable to create new frame: %s", err)
+	}
+
+	// set sibling pointers
+	binary.LittleEndian.PutUint32(leftNode[43:47], binary.LittleEndian.Uint32(rightNode[1:5]))
+	binary.LittleEndian.PutUint32(rightNode[47:51], binary.LittleEndian.Uint32(leftNode[1:5]))
+
+	rightNodeRightSibling.Acquire(false)
+	rightNodeRightSibFr, _, err := rightNodeRightSibling.RawBufferSlice()
+	if err != nil {
+		t.Fatalf("Unable to get frame buffer: %s", err)
+	}
+	binary.LittleEndian.PutUint32((*rightNodeRightSibFr)[47:51], binary.LittleEndian.Uint32(rightNode[1:5]))
+	copy(rightNode[43:47], (*rightNodeRightSibFr)[1:5])
+	rightNodeRightSibling.Release(false)
+	rightNodeRightSibling.Unreference()
+
+	leftNodeLeftSibling.Acquire(false)
+	leftNodeLeftSibFr, _, err := leftNodeLeftSibling.RawBufferSlice()
+	if err != nil {
+		t.Fatalf("Unable to get frame buffer: %s", err)
+	}
+	binary.LittleEndian.PutUint32((*leftNodeLeftSibFr)[43:47], binary.LittleEndian.Uint32(leftNode[1:5]))
+	copy(leftNode[47:51], (*leftNodeLeftSibFr)[1:5])
+	leftNodeLeftSibling.Release(false)
+	leftNodeLeftSibling.Unreference()
+
+	newSepKey, err := bp.merge(&leftNode, &rightNode, sepKey, true)
+	if err != nil {
+		t.Fatalf("Expected no error, got %s", err.Error())
+	}
+
+	if newSepKey != nil {
+		t.Fatalf("Expected no new separator key, got %v", newSepKey)
+	}
+
+	// example expected node after merge; (order=2)
+
+	// +------------+-------------+----------+
+	// |  age       | nationality  |  office  |
+	// +------------+-------------+----------+
+	// |  twenty    |  american   |   aws    |
+	// +------------+-------------+----------+
+
+	// check that left node is marked for deletion
+	markedDead := helpers.BitIsSet(&leftNode[0], pgr.Dead)
+	if !markedDead {
+		t.Fatalf("Expected merged node to be marked as dead.")
+	}
+
+	// check that the riht node is marked dirty
+	rightNodeDirty := helpers.BitIsSet(&rightNode[0], pgr.Dirty)
+	if !rightNodeDirty {
+		t.Fatalf("Expected right node to be marked dirty")
+	}
+
+	itemCount := binary.LittleEndian.Uint32(rightNode[17:21])
+	expectedItemCount := len(leftKeys) + len(rightKeys)
+	if itemCount != uint32(expectedItemCount) {
+		t.Fatalf("Expected number of items in right node to be %d but got %d", expectedItemCount, itemCount)
+	}
+
+	// ensure sibling pointers are updated
+	if binary.LittleEndian.Uint32(rightNode[47:51]) != binary.LittleEndian.Uint32((*leftNodeLeftSibFr)[1:5]) {
+		t.Fatalf("Expected right node's left sibling pointer to be %d but got %d.", binary.LittleEndian.Uint32((*leftNodeLeftSibFr)[1:5]), binary.LittleEndian.Uint32(rightNode[47:51]))
+	}
+
+	if binary.LittleEndian.Uint32((*leftNodeLeftSibFr)[43:47]) != binary.LittleEndian.Uint32(rightNode[1:5]) {
+		t.Fatalf("Expected leftNodeLeftSibling's right sibling to be %d, but got %d", binary.LittleEndian.Uint32(rightNode[1:5]), binary.LittleEndian.Uint32((*leftNodeLeftSibFr)[47:51]))
+	}
+
+	// ensure items in right node are ordered and none is missing
+	var cellOff uint32
+	var prevKey []byte
+	for i := range itemCount {
+		cellOff = binary.LittleEndian.Uint32(rightNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
+		kLen := binary.LittleEndian.Uint32(rightNode[cellOff+1 : cellOff+5])
+		currKey := rightNode[cellOff+13 : cellOff+13+kLen]
+
+		if bytes.Compare(currKey, prevKey) == -1 {
+			t.Fatalf("Expected curr key %v to be greater than previous key %v", currKey, prevKey)
+		}
+
+		prevKey = make([]byte, kLen)
+		copy(prevKey, currKey)
+	}
+}
+
+func TestRebalanceInternalNode(t *testing.T) {
+	tests := []struct {
+		name          string
+		leftNodeKeys  [][]byte
+		leftNodePtrs  []uint32
+		rightNodeKeys [][]byte
+		rightNodePtrs []uint32
+		seperatorKey  []byte
+	}{
+		{
+			name: "right_node_underflow",
+			leftNodeKeys: [][]byte{
+				[]byte("age"),
+				[]byte("code"),
+				[]byte("country"),
+			},
+			leftNodePtrs: []uint32{25, 66, 88, 99},
+			rightNodeKeys: [][]byte{
+				[]byte("name"),
+			},
+			rightNodePtrs: []uint32{150, 250},
+			seperatorKey:  []byte("marital status"),
+		},
+		{
+			name: "left_node_underflow",
+			leftNodeKeys: [][]byte{
+				[]byte("age"),
+			},
+			leftNodePtrs: []uint32{25, 66},
+			rightNodeKeys: [][]byte{
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("email"),
+			},
+			rightNodePtrs: []uint32{178, 250, 354, 456},
+			seperatorKey:  []byte("city"),
+		},
+	}
+
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	for _, test := range tests {
+		leftNode := createTestInternalNode(25, test.leftNodeKeys, test.leftNodePtrs)
+		rightNode := createTestInternalNode(45, test.rightNodeKeys, test.rightNodePtrs)
+
+		fmt.Printf("BEFORE REBALANCE----\n")
+		fmt.Printf("LEFT NODE\n")
+		fmt.Println(printNodeContent(&leftNode))
+		fmt.Printf("RIGHT NODE\n")
+		fmt.Println(printNodeContent(&rightNode))
+
+		leftSibling, err := bp.buffermanager.NewFrame(true, false)
+		if err != nil {
+			t.Fatalf("Unable to create new frame: %s", err)
+		}
+
+		rightSibling, err := bp.buffermanager.NewFrame(true, false)
+		if err != nil {
+			t.Fatalf("Unable to create new frame: %s", err)
+		}
+
+		// set sibling pointers
+		copy(leftNode[43:47], rightNode[1:5])
+		copy(rightNode[47:51], leftNode[1:5])
+
+		leftSibling.Acquire(false)
+		leftSibFr, _, err := leftSibling.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Unable to get frame buffer: %s", err.Error())
+		}
+		copy(leftNode[47:51], (*leftSibFr)[1:5])
+		copy((*leftSibFr)[43:47], leftNode[1:5])
+		leftSibling.Release(false)
+		leftSibling.Unreference()
+
+		rightSibling.Acquire(false)
+		rightSiblingFr, _, err := rightSibling.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Unable to get frame buffer: %s", err.Error())
+		}
+		copy(rightNode[43:47], (*rightSiblingFr)[1:5])
+		copy((*rightSiblingFr)[47:51], rightNode[1:5])
+		rightSibling.Release(false)
+		rightSibling.Unreference()
+
+		newSepKey, err := bp.merge(&leftNode, &rightNode, test.seperatorKey, false)
+		if err != nil {
+			t.Fatalf("(%s) merge failed: %s", test.name, err.Error())
+		}
+
+		fmt.Printf("AFTER REBALANCE----\n")
+		fmt.Printf("LEFT NODE\n")
+		fmt.Println(printNodeContent(&leftNode))
+		fmt.Printf("RIGHT NODE\n")
+		fmt.Println(printNodeContent(&rightNode))
+
+		fmt.Printf("NEW SEPERATOR KEY --> %s\n", newSepKey)
+
+		if newSepKey == nil {
+			t.Fatalf("(%s) Expected nodes to be rebalanced, got nil new seperator key", test.name)
+		}
+
+		leftNodeItemCount := binary.LittleEndian.Uint32(leftNode[17:21])
+		rightNodeItemCount := binary.LittleEndian.Uint32(rightNode[17:21])
+
+		if leftNodeItemCount < pgr.ORDER {
+			t.Fatalf("(%s) left node still underflown after rebalancing - %d", test.name, leftNodeItemCount)
+		}
+
+		if rightNodeItemCount < pgr.ORDER {
+			t.Fatalf("(%s) right node still underflown after rebalancing - %d", test.name, rightNodeItemCount)
+		}
+
+		if s := rightNodeItemCount + leftNodeItemCount; s > (pgr.ORDER*2)*2 {
+			t.Fatalf("(%s) Number of items on both nodes is %d exceeding allowable max.", test.name, s)
+		}
+
+		// check separator key
+		if bytes.Equal(newSepKey, test.seperatorKey) {
+			t.Fatalf("(%s) Expected different separator key, got %s", test.name, newSepKey)
+		}
+
+		var cellOff uint32
+		var prevKey []byte
+		// check items in left node
+		for i := range leftNodeItemCount {
+			cellOff = binary.LittleEndian.Uint32(leftNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
+			kLen := binary.LittleEndian.Uint32(leftNode[cellOff+1 : cellOff+5])
+			currKey := leftNode[cellOff+13 : cellOff+13+kLen]
+
+			if bytes.Compare(currKey, prevKey) == -1 {
+				t.Fatalf("(%s) Expected curr key %v to be greater than previous key %v", test.name, currKey, prevKey)
+			}
+
+			if c := bytes.Compare(newSepKey, currKey); c <= 0 {
+				t.Fatalf("(%s) key \"%s\" in left node is greater than or equal to seperator key \"%s\"", test.name, currKey, newSepKey)
+			}
+
+			prevKey = make([]byte, kLen)
+			copy(prevKey, currKey)
+		}
+
+		// check items in right node
+		cellOff = 0
+		clear(prevKey)
+		for i := range rightNodeItemCount {
+			cellOff = binary.LittleEndian.Uint32(rightNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
+			kLen := binary.LittleEndian.Uint32(rightNode[cellOff+1 : cellOff+5])
+			currKey := rightNode[cellOff+13 : cellOff+13+kLen]
+
+			if bytes.Compare(currKey, prevKey) == -1 {
+				t.Fatalf("(%s) Expected curr key %v to be greater than previous key %v", test.name, currKey, prevKey)
+			}
+
+			if c := bytes.Compare(newSepKey, currKey); c == 1 {
+				t.Fatalf("(%s) key \"%s\" in right node is less than the seperator key \"%s\"", test.name, currKey, newSepKey)
+			}
+
+			prevKey = make([]byte, kLen)
+			copy(prevKey, currKey)
+		}
+
+		// ensure sibling pointers remain the same
+		// left node
+		if !bytes.Equal(leftNode[43:47], rightNode[1:5]) {
+			t.Fatalf("(%s) Expected left node's right sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32(rightNode[1:5]), binary.LittleEndian.Uint32(leftNode[43:47]))
+		}
+
+		if !bytes.Equal(leftNode[47:51], (*leftSibFr)[1:5]) {
+			t.Fatalf("(%s) Expected left node's left sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32((*leftSibFr)[1:5]), binary.LittleEndian.Uint32(leftNode[47:51]))
+		}
+
+		// left sibling
+		if !bytes.Equal((*leftSibFr)[43:47], leftNode[1:5]) {
+			t.Fatalf("(%s) Expected leftSibling node's right sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32(leftNode[1:5]), binary.LittleEndian.Uint32((*leftSibFr)[43:47]))
+		}
+
+		// right node
+		if !bytes.Equal(rightNode[47:51], leftNode[1:5]) {
+			t.Fatalf("(%s) Expected right node's left sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32(leftNode[1:5]), binary.LittleEndian.Uint32(rightNode[47:51]))
+		}
+
+		if !bytes.Equal(rightNode[43:47], (*rightSiblingFr)[1:5]) {
+			t.Fatalf("(%s) Expected right node's right sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32((*rightSiblingFr)[1:5]), binary.LittleEndian.Uint32(rightNode[43:47]))
+		}
+
+		//  right sibling
+		if !bytes.Equal((*rightSiblingFr)[47:51], rightNode[1:5]) {
+			t.Fatalf("(%s) Expected rightSibling node's left sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32(rightNode[1:5]), binary.LittleEndian.Uint32((*rightSiblingFr)[47:51]))
+		}
+	}
+}
+
+func TestRebalanceLeafNode(t *testing.T) {
+	tests := []struct {
+		name          string
+		leftNodeKeys  [][]byte
+		leftNodeVals  [][]byte
+		rightNodeKeys [][]byte
+		rightNodeVals [][]byte
+		seperatorKey  []byte
+	}{
+		{
+			name: "right_node_underflow",
+			leftNodeKeys: [][]byte{
+				[]byte("age"),
+				[]byte("code"),
+				[]byte("country"),
+			},
+			leftNodeVals: [][]byte{
+				[]byte("twenty"),
+				[]byte("U.S.A"),
+				[]byte("united states"),
+			},
+			rightNodeKeys: [][]byte{
+				[]byte("name"),
+			},
+			rightNodeVals: [][]byte{
+				[]byte("Ben"),
+			},
+			seperatorKey: []byte("marital status"),
+		},
+		{
+			name: "left_node_underflow",
+			leftNodeKeys: [][]byte{
+				[]byte("age"),
+			},
+			leftNodeVals: [][]byte{
+				[]byte("twenty"),
+			},
+			rightNodeKeys: [][]byte{
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("email"),
+			},
+			rightNodeVals: [][]byte{
+				[]byte("U.S.A"),
+				[]byte("unites states"),
+				[]byte("ian@db.com"),
+			},
+			seperatorKey: []byte("city"),
+		},
+	}
+
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	for _, test := range tests {
+		leftNode := createTestLeafNode(25, test.leftNodeKeys, test.leftNodeVals)
+		rightNode := createTestLeafNode(45, test.rightNodeKeys, test.rightNodeVals)
+
+		fmt.Printf("BEFORE REBALANCE----\n")
+		fmt.Printf("LEFT NODE\n")
+		fmt.Println(printNodeContent(&leftNode))
+		fmt.Printf("RIGHT NODE\n")
+		fmt.Println(printNodeContent(&rightNode))
+
+		leftSibling, err := bp.buffermanager.NewFrame(true, false)
+		if err != nil {
+			t.Fatalf("Unable to create new frame: %s", err)
+		}
+
+		rightSibling, err := bp.buffermanager.NewFrame(true, false)
+		if err != nil {
+			t.Fatalf("Unable to create new frame: %s", err)
+		}
+
+		// set sibling pointers
+		copy(leftNode[43:47], rightNode[1:5])
+		copy(rightNode[47:51], leftNode[1:5])
+
+		leftSibling.Acquire(false)
+		leftSibFr, _, err := leftSibling.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Unable to get frame buffer: %s", err.Error())
+		}
+		copy(leftNode[47:51], (*leftSibFr)[1:5])
+		copy((*leftSibFr)[43:47], leftNode[1:5])
+		leftSibling.Release(false)
+		leftSibling.Unreference()
+
+		rightSibling.Acquire(false)
+		rightSiblingFr, _, err := rightSibling.RawBufferSlice()
+		if err != nil {
+			t.Fatalf("Unable to get frame buffer: %s", err.Error())
+		}
+		copy(rightNode[43:47], (*rightSiblingFr)[1:5])
+		copy((*rightSiblingFr)[47:51], rightNode[1:5])
+		rightSibling.Release(false)
+		rightSibling.Unreference()
+
+		newSepKey, err := bp.merge(&leftNode, &rightNode, test.seperatorKey, false)
+		if err != nil {
+			t.Fatalf("(%s) merge failed: %s", test.name, err.Error())
+		}
+
+		fmt.Printf("AFTER REBALANCE----\n")
+		fmt.Printf("LEFT NODE\n")
+		fmt.Println(printNodeContent(&leftNode))
+		fmt.Printf("RIGHT NODE\n")
+		fmt.Println(printNodeContent(&rightNode))
+
+		fmt.Printf("NEW SEPERATOR KEY --> %s\n", newSepKey)
+
+		if newSepKey == nil {
+			t.Fatalf("(%s) Expected nodes to be rebalanced, got nil new seperator key", test.name)
+		}
+
+		leftNodeItemCount := binary.LittleEndian.Uint32(leftNode[17:21])
+		rightNodeItemCount := binary.LittleEndian.Uint32(rightNode[17:21])
+
+		if leftNodeItemCount < pgr.ORDER {
+			t.Fatalf("(%s) left node still underflown after rebalancing - %d", test.name, leftNodeItemCount)
+		}
+
+		if rightNodeItemCount < pgr.ORDER {
+			t.Fatalf("(%s) right node still underflown after rebalancing - %d", test.name, rightNodeItemCount)
+		}
+
+		if s := rightNodeItemCount + leftNodeItemCount; s > (pgr.ORDER*2)*2 {
+			t.Fatalf("(%s) Number of items on both nodes is %d exceeding allowable max.", test.name, s)
+		}
+
+		// check separator key
+		if bytes.Equal(newSepKey, test.seperatorKey) {
+			t.Fatalf("(%s) Expected different separator key, got %s", test.name, newSepKey)
+		}
+
+		var cellOff uint32
+		var prevKey []byte
+		// check items in left node
+		for i := range leftNodeItemCount {
+			cellOff = binary.LittleEndian.Uint32(leftNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
+			kLen := binary.LittleEndian.Uint32(leftNode[cellOff+1 : cellOff+5])
+			currKey := leftNode[cellOff+13 : cellOff+13+kLen]
+
+			if bytes.Compare(currKey, prevKey) == -1 {
+				t.Fatalf("(%s) Expected curr key %v to be greater than previous key %v", test.name, currKey, prevKey)
+			}
+
+			if c := bytes.Compare(newSepKey, currKey); c <= 0 {
+				t.Fatalf("(%s) key \"%s\" in left node is greater than or equal to seperator key \"%s\"", test.name, currKey, newSepKey)
+			}
+
+			prevKey = make([]byte, kLen)
+			copy(prevKey, currKey)
+		}
+
+		// check items in right node
+		cellOff = 0
+		clear(prevKey)
+		for i := range rightNodeItemCount {
+			cellOff = binary.LittleEndian.Uint32(rightNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
+			kLen := binary.LittleEndian.Uint32(rightNode[cellOff+1 : cellOff+5])
+			currKey := rightNode[cellOff+13 : cellOff+13+kLen]
+
+			if bytes.Compare(currKey, prevKey) == -1 {
+				t.Fatalf("(%s) Expected curr key %v to be greater than previous key %v", test.name, currKey, prevKey)
+			}
+
+			if c := bytes.Compare(newSepKey, currKey); c == 1 {
+				t.Fatalf("(%s) key \"%s\" in right node is less than the seperator key \"%s\"", test.name, currKey, newSepKey)
+			}
+
+			prevKey = make([]byte, kLen)
+			copy(prevKey, currKey)
+		}
+
+		// ensure sibling pointers remain the same
+		// left node
+		if !bytes.Equal(leftNode[43:47], rightNode[1:5]) {
+			t.Fatalf("(%s) Expected left node's right sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32(rightNode[1:5]), binary.LittleEndian.Uint32(leftNode[43:47]))
+		}
+
+		if !bytes.Equal(leftNode[47:51], (*leftSibFr)[1:5]) {
+			t.Fatalf("(%s) Expected left node's left sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32((*leftSibFr)[1:5]), binary.LittleEndian.Uint32(leftNode[47:51]))
+		}
+
+		// left sibling
+		if !bytes.Equal((*leftSibFr)[43:47], leftNode[1:5]) {
+			t.Fatalf("(%s) Expected leftSibling node's right sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32(leftNode[1:5]), binary.LittleEndian.Uint32((*leftSibFr)[43:47]))
+		}
+
+		// right node
+		if !bytes.Equal(rightNode[47:51], leftNode[1:5]) {
+			t.Fatalf("(%s) Expected right node's left sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32(leftNode[1:5]), binary.LittleEndian.Uint32(rightNode[47:51]))
+		}
+
+		if !bytes.Equal(rightNode[43:47], (*rightSiblingFr)[1:5]) {
+			t.Fatalf("(%s) Expected right node's right sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32((*rightSiblingFr)[1:5]), binary.LittleEndian.Uint32(rightNode[43:47]))
+		}
+
+		//  right sibling
+		if !bytes.Equal((*rightSiblingFr)[47:51], rightNode[1:5]) {
+			t.Fatalf("(%s) Expected rightSibling node's left sibling pointer to remain %d, instead got %d", test.name, binary.LittleEndian.Uint32(rightNode[1:5]), binary.LittleEndian.Uint32((*rightSiblingFr)[47:51]))
+		}
+
 	}
 }
 
