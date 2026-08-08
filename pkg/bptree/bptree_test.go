@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -3340,15 +3341,18 @@ func createTestLeafNode(pid uint32, keys [][]byte, vals [][]byte) []byte {
 }
 
 func InitPager(t *testing.T) *pgr.Pager {
+	dir := "baobab"
 	tmpDir := t.TempDir()
-	dbFile := filepath.Join(tmpDir, "baobab.db")
+	dataDir := filepath.Join(tmpDir, dir)
+	os.Mkdir(dataDir, 0750)
+	dbFile := filepath.Join(dataDir, "baobab.db")
 	dman, err := diskmanager.NewDiskManager(diskmanager.DiskManagerConfig{DataFile: dbFile})
 
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Could not initialize disk manager: %s", err.Error()), t)
 	}
 
-	freelistFile := filepath.Join(t.TempDir(), "baobab")
+	freelistFile := filepath.Join(dataDir, "baobab")
 	pgr, err := pgr.NewPager(pgr.PagerConfig{DManager: dman, FreeListFile: freelistFile, WorkerSize: 1500})
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Could not initialize pager: %s", err.Error()), t)

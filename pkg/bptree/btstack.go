@@ -8,11 +8,14 @@ import (
 // and merges that propagate from child nodes the parent can be retrieved
 // from the stack. Without this we would require recursion, which may increase
 // stack memory usage.
-// This is also implemented by PostgreQSL -> https://github.com/postgres/postgres/blob/REL_12_STABLE/src/include/access/nbtree.h#L405-L425
+// This is also implemented by Postgres -> https://github.com/postgres/postgres/blob/REL_12_STABLE/src/include/access/nbtree.h#L405-L425
 
 type TraversePath struct {
 	pid uint32
-	idx uint32 // index followed to get to child node
+	// index followed to get to child node
+	idx uint32
+	// this is the height of the node. root node is 0
+	height uint32
 }
 
 type BTStack struct {
@@ -35,16 +38,16 @@ func (bt *BTStack) Add(n *TraversePath) (bool, error) {
 	return true, nil
 }
 
-func (bt *BTStack) Pop() (*TraversePath, error) {
+func (bt *BTStack) Pop() *TraversePath {
 	if bt.Count <= 0 || bt.maxId == 0 {
-		return nil, BTreeError{Message: "No items in stack"}
+		return nil
 	}
 
 	k := bt.maxId
 	v, ok := bt.stack[k]
 
 	if !ok {
-		return nil, BTreeError{Message: "No items in stack"}
+		return nil
 	}
 
 	delete(bt.stack, k)
@@ -54,7 +57,7 @@ func (bt *BTStack) Pop() (*TraversePath, error) {
 	}
 	bt.maxId--
 
-	return v, nil
+	return v
 }
 
 func (bt *BTStack) Clear() (bool, error) {
