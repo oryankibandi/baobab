@@ -16,6 +16,8 @@ type TraversePath struct {
 	idx uint32
 	// this is the height of the node. root node is 0
 	height uint32
+	// seperator key used to get to this node. Used during merges/rebalances
+	sepKey uint32
 }
 
 type BTStack struct {

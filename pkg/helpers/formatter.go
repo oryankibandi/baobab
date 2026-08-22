@@ -56,6 +56,16 @@ func PrintTestErrorMsg(msg string, t *testing.T) {
 // Exactly one of values/pointers should be provided (non-nil); if both or
 // neither are given, PrintBPTreeNode returns an error message string.
 func PrintBPTreeNode(keys [][]byte, values [][]byte, pointers []uint32) string {
+	// FIX: REMOVE DEBUG PRINT CODE BELOW
+	fmt.Println("KEYS ======== ")
+	for i, k := range keys {
+		fmt.Printf("%d. %s\n", i, k)
+	}
+	fmt.Println("VALUES =======")
+	for i, v := range values {
+		fmt.Printf("%d. %s\n", i, v)
+	}
+	fmt.Println("POINTERS --> ", pointers)
 	haveValues := values != nil
 	havePointers := pointers != nil
 

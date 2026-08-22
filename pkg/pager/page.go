@@ -138,6 +138,10 @@ func (p *Page) initializePage(pageId uint32, internal bool) error {
 		helpers.SetFlag(&p.pgeData[0], []int{IsInternal})
 	}
 
+	// set upperoffset and lower offset
+	binary.LittleEndian.PutUint32(p.pgeData[25:29], (PAGE_SIZE_BYTES - LOWER_PADDING_BYTES))
+	binary.LittleEndian.PutUint32(p.pgeData[29:33], HEADER_SIZE_BYTES)
+
 	return nil
 }
 

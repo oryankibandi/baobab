@@ -178,26 +178,12 @@ func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page, pid uint32
 	// fmt.Println("acquiring lock for pager...")
 	pgr.mu.Lock()
 	defer pgr.mu.Unlock()
-	// fmt.Println("acquired lock for pager...")
 
-	// var newPgeId uint32
-	// // fmt.Println("poping pageid from freelist...")
-	// if n := pgr.freeList.pop(); n < 0 {
-	// 	// fmt.Println("got pageId < 0...")
-	// 	newPgeId = pgr.maxPageId + 1
-	// 	pgr.maxPageId++
-	// } else {
-	// 	// fmt.Println("got a valid pageId...")
-	// 	newPgeId = uint32(n)
-	// }
-
-	// fmt.Println("calling initializePage...")
 	err := pge.initializePage(pid, isInternal)
 	if err != nil {
 		return 0, err
 	}
 
-	// fmt.Println("checking if should set as root...")
 	if setAsRoot {
 		pgr.rootPageId = pid
 	}

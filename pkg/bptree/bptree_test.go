@@ -2,7 +2,9 @@ package bptree
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +17,11 @@ import (
 	pgr "github.com/oryankibandi/baobab/pkg/pager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
+
+type cellEntry struct {
+	key []byte
+	val []byte
+}
 
 func TestFindKeyIndexInternalNode(t *testing.T) {
 	// +------+------+------+--------------+
@@ -201,6 +208,27 @@ func TestFindKeyIndexInternalNode(t *testing.T) {
 			searchKey:   []byte("name"),
 			expectedIdx: 3,
 		},
+		{
+			name:        "search exact key on single key root node",
+			keys:        [][]byte{[]byte("age")},
+			ptr:         []uint32{25, 34},
+			searchKey:   []byte("age"),
+			expectedIdx: 0,
+		},
+		{
+			name:        "search greater key on single key root node",
+			keys:        [][]byte{[]byte("age")},
+			ptr:         []uint32{25, 34},
+			searchKey:   []byte("country"),
+			expectedIdx: -1,
+		},
+		{
+			name:        "search lesser key on single key root node",
+			keys:        [][]byte{[]byte("code")},
+			ptr:         []uint32{25, 34},
+			searchKey:   []byte("age"),
+			expectedIdx: -1,
+		},
 	}
 
 	for _, test := range tests {
@@ -235,6 +263,17 @@ func TestFindKeyIndexLeafNode(t *testing.T) {
 		expectedIdx int32
 		searchKey   []byte
 	}{
+		{
+			name: "search missing key in single key node",
+			keys: [][]byte{
+				[]byte("age"),
+			},
+			vals: [][]byte{
+				[]byte("v1"),
+			},
+			searchKey:   []byte("account"),
+			expectedIdx: -1,
+		},
 		{
 			name:        "search key in middle of three-key node",
 			keys:        [][]byte{[]byte("age"), []byte("country"), []byte("name")},
@@ -413,6 +452,647 @@ func TestFindKeyIndexLeafNode(t *testing.T) {
 	}
 }
 
+func TestFindKeyPath(t *testing.T) {
+	tests := []struct {
+		name           string
+		keys           [][]byte
+		ptr            []uint32
+		expectedPtr    int32
+		expectedSepKey []byte
+		searchKey      []byte
+	}{
+		{
+			name:           "search key in middle of three-key node",
+			keys:           [][]byte{[]byte("age"), []byte("country"), []byte("name")},
+			ptr:            []uint32{25, 34, 89, 99},
+			searchKey:      []byte("country"),
+			expectedPtr:    89,
+			expectedSepKey: []byte("country"),
+		},
+		{
+			name:           "search key in single-key node",
+			keys:           [][]byte{[]byte("country")},
+			ptr:            []uint32{25, 34},
+			searchKey:      []byte("country"),
+			expectedPtr:    34,
+			expectedSepKey: []byte("country"),
+		},
+		{
+			name:           "search key not in node in a single-key node",
+			keys:           [][]byte{[]byte("country")},
+			ptr:            []uint32{25, 34},
+			searchKey:      []byte("relationship_status"),
+			expectedPtr:    34,
+			expectedSepKey: []byte("country"),
+		},
+		{
+			name:           "search only key in single-key node",
+			keys:           [][]byte{[]byte("code")},
+			ptr:            []uint32{25, 34},
+			searchKey:      []byte("code"),
+			expectedPtr:    34,
+			expectedSepKey: []byte("code"),
+		},
+		{
+			name:           "search last key in two-key node",
+			keys:           [][]byte{[]byte("age"), []byte("country")},
+			ptr:            []uint32{25, 34, 89},
+			searchKey:      []byte("country"),
+			expectedPtr:    89,
+			expectedSepKey: []byte("country"),
+		},
+		{
+			name:           "search least key in two-key node",
+			keys:           [][]byte{[]byte("code"), []byte("country")},
+			ptr:            []uint32{25, 34, 89},
+			searchKey:      []byte("age"),
+			expectedPtr:    25,
+			expectedSepKey: []byte("code"),
+		},
+		{
+			name:           "search key greater than any key on node",
+			keys:           [][]byte{[]byte("code"), []byte("country")},
+			ptr:            []uint32{25, 34, 89},
+			searchKey:      []byte("nationality"),
+			expectedPtr:    89,
+			expectedSepKey: []byte("country"),
+		},
+		{
+			name:           "search non-existent key in two-key node",
+			keys:           [][]byte{[]byte("age"), []byte("country")},
+			ptr:            []uint32{25, 34, 89},
+			searchKey:      []byte("code"),
+			expectedPtr:    34,
+			expectedSepKey: []byte("age"),
+		},
+		{
+			name: "search last key in large node",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("city"),
+				[]byte("code"),
+				[]byte("country"),
+				[]byte("email"),
+				[]byte("gender"),
+				[]byte("name"),
+				[]byte("phone"),
+				[]byte("state"),
+			},
+			ptr: []uint32{
+				25,
+				34,
+				89,
+				99,
+				125,
+				156,
+				178,
+				250,
+				354,
+				456,
+			},
+			searchKey:      []byte("state"),
+			expectedPtr:    456,
+			expectedSepKey: []byte("state"),
+		},
+		{
+			name:           "search last key in three-key node",
+			keys:           [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			ptr:            []uint32{25, 88, 99, 105},
+			searchKey:      []byte("nationality"),
+			expectedPtr:    105,
+			expectedSepKey: []byte("nationality"),
+		},
+		{
+			name:           "search middle key exact match",
+			keys:           [][]byte{[]byte("age"), []byte("country"), []byte("nationality")},
+			ptr:            []uint32{25, 88, 99, 105},
+			searchKey:      []byte("country"),
+			expectedPtr:    99,
+			expectedSepKey: []byte("country"),
+		},
+		{
+			name:           "search empty node",
+			keys:           [][]byte{},
+			ptr:            []uint32{},
+			searchKey:      []byte("country"),
+			expectedPtr:    0,
+			expectedSepKey: nil,
+		},
+		{
+			name:           "search shared prefix key",
+			keys:           [][]byte{[]byte("car"), []byte("cat"), []byte("code")},
+			ptr:            []uint32{25, 88, 99, 105},
+			searchKey:      []byte("cat"),
+			expectedPtr:    99,
+			expectedSepKey: []byte("cat"),
+		},
+		{
+			name: "search non-ASCII key",
+			keys: [][]byte{
+				{0x80},
+				{0x80, 0x01},
+				{0x81},
+				{0xFF},
+			},
+			ptr: []uint32{
+				25,
+				88,
+				99,
+				105,
+				250,
+			},
+			searchKey:      []byte{0x82},
+			expectedPtr:    105,
+			expectedSepKey: []byte{0x81},
+		},
+		{
+			name: "search missing key between existing keys",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptr: []uint32{
+				25,
+				34,
+				89,
+				99,
+			},
+			searchKey:      []byte("office"),
+			expectedPtr:    99,
+			expectedSepKey: []byte("name"),
+		},
+		{
+			name: "search missing key before first key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptr: []uint32{
+				25,
+				34,
+				89,
+				99,
+			},
+			searchKey:      []byte("account"),
+			expectedPtr:    25,
+			expectedSepKey: []byte("age"),
+		},
+		{
+			name: "search missing key after last key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptr: []uint32{
+				25,
+				34,
+				89,
+				99,
+			},
+			searchKey:      []byte("zipcode"),
+			expectedPtr:    99,
+			expectedSepKey: []byte("name"),
+		},
+		{
+			name:           "search last item",
+			keys:           [][]byte{[]byte("age"), []byte("code"), []byte("coutry"), []byte("name")},
+			ptr:            []uint32{25, 88, 66, 99, 150},
+			searchKey:      []byte("name"),
+			expectedPtr:    150,
+			expectedSepKey: []byte("name"),
+		},
+		{
+			name:           "search exact key on single key root node",
+			keys:           [][]byte{[]byte("age")},
+			ptr:            []uint32{25, 34},
+			searchKey:      []byte("age"),
+			expectedPtr:    34,
+			expectedSepKey: []byte("age"),
+		},
+		{
+			name:           "search greater key on single key root node",
+			keys:           [][]byte{[]byte("age")},
+			ptr:            []uint32{25, 34},
+			searchKey:      []byte("country"),
+			expectedPtr:    34,
+			expectedSepKey: []byte("age"),
+		},
+		{
+			name:           "search lesser key on single key root node",
+			keys:           [][]byte{[]byte("code")},
+			ptr:            []uint32{25, 34},
+			searchKey:      []byte("age"),
+			expectedPtr:    25,
+			expectedSepKey: []byte("code"),
+		},
+	}
+
+	for i, test := range tests {
+		internalFrame := createTestInternalNode(35, test.keys, test.ptr)
+		if internalFrame == nil {
+			t.Fatalf("(%s) No internal frame created", test.name)
+		}
+		fmt.Println("====================================================")
+
+		sepKey, retrievedChildPtr, err := findKeyPath(&internalFrame, test.searchKey)
+		if err != nil {
+			t.Fatalf("(%s) Could not find index: %v", test.name, err.Error())
+		}
+
+		if int(retrievedChildPtr) != int(test.expectedPtr) {
+			t.Fatalf("(%s) Expected child ptr %d but got %d", test.name, test.expectedPtr, retrievedChildPtr)
+		}
+		fmt.Printf("%d. (%s) Received SepKey --> %s\n", i, test.name, sepKey)
+		if !bytes.Equal(sepKey, test.expectedSepKey) {
+			t.Fatalf("(%s) Expected separatorKey to be %v but got %v", test.name, test.expectedSepKey, sepKey)
+		}
+
+		fmt.Printf("(%s). Done...\n", test.name)
+		fmt.Println("====================================================")
+	}
+}
+
+func TestReplaceSepKey(t *testing.T) {
+	// +------+------------+-----------+------+
+	// |  age   |  country |    name   |      |
+	// +--------+----------+-----------+  99  +
+	// |  25    |     34   |     89    |      |
+	// +--------+----------+-----------+------+
+
+	tests := []struct {
+		name             string
+		keys             [][]byte
+		ptrs             []uint32
+		vals             [][]byte
+		isLeaf           bool
+		oldKey           []byte
+		newKey           []byte
+		expectError      bool
+		expectInvalidIdx bool
+	}{
+		// ------------------------------------------------------------
+		// Basic case
+		// ------------------------------------------------------------
+		{
+			name: "replace middle key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("country"),
+			newKey:           []byte("location"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+
+		// ------------------------------------------------------------
+		// Position of separator key
+		// ------------------------------------------------------------
+		{
+			name: "replace first separator key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("age"),
+			newKey:           []byte("birth_year"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+		{
+			name: "replace last separator key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("name"),
+			newKey:           []byte("username"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+		{
+			name: "replace only separator key",
+			keys: [][]byte{
+				[]byte("country"),
+			},
+			ptrs:             []uint32{25, 34},
+			isLeaf:           false,
+			oldKey:           []byte("country"),
+			newKey:           []byte("location"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+
+		// ------------------------------------------------------------
+		// Missing keys
+		// ------------------------------------------------------------
+		{
+			name: "replace missing key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("email"),
+			newKey:           []byte("phone"),
+			expectError:      false,
+			expectInvalidIdx: true,
+		},
+		{
+			name: "replace missing key before first separator",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("account"),
+			newKey:           []byte("address"),
+			expectError:      false,
+			expectInvalidIdx: true,
+		},
+		{
+			name: "replace missing key after last separator",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("zipcode"),
+			newKey:           []byte("state"),
+			expectError:      false,
+			expectInvalidIdx: true,
+		},
+
+		// ------------------------------------------------------------
+		// Key length
+		// ------------------------------------------------------------
+		{
+			name: "replace separator with shorter key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("country"),
+			newKey:           []byte("ctry"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+		{
+			name: "replace separator with longer key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("country"),
+			newKey:           []byte("nationality"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+		{
+			name: "replace separator with empty key",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+				[]byte("name"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("country"),
+			newKey:           []byte{},
+			expectError:      true,
+			expectInvalidIdx: true,
+		},
+
+		// ------------------------------------------------------------
+		// Exact byte semantics
+		// ------------------------------------------------------------
+		{
+			name: "replace one-byte separator",
+			keys: [][]byte{
+				[]byte("a"),
+				[]byte("b"),
+				[]byte("c"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("b"),
+			newKey:           []byte("x"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+		{
+			name: "replace separator with shared prefix",
+			keys: [][]byte{
+				[]byte("car"),
+				[]byte("cat"),
+				[]byte("code"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("cat"),
+			newKey:           []byte("can"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+		{
+			name: "replace separator with exact prefix",
+			keys: [][]byte{
+				[]byte("car"),
+				[]byte("cart"),
+				[]byte("cat"),
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte("cart"),
+			newKey:           []byte("car"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+
+		// ------------------------------------------------------------
+		// Empty node
+		// ------------------------------------------------------------
+		{
+			name:             "replace key in empty internal node",
+			keys:             [][]byte{},
+			ptrs:             []uint32{},
+			isLeaf:           false,
+			oldKey:           []byte("age"),
+			newKey:           []byte("birth_year"),
+			expectError:      false,
+			expectInvalidIdx: true,
+		},
+
+		// ------------------------------------------------------------
+		// Single-key internal node
+		// ------------------------------------------------------------
+		{
+			name: "replace key in single-key internal node",
+			keys: [][]byte{
+				[]byte("country"),
+			},
+			ptrs:             []uint32{25, 34},
+			isLeaf:           false,
+			oldKey:           []byte("country"),
+			newKey:           []byte("location"),
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+		{
+			name: "missing key in single-key internal node",
+			keys: [][]byte{
+				[]byte("country"),
+			},
+			ptrs:             []uint32{25, 34},
+			isLeaf:           false,
+			oldKey:           []byte("name"),
+			newKey:           []byte("username"),
+			expectError:      false,
+			expectInvalidIdx: true,
+		},
+
+		// ------------------------------------------------------------
+		// Non-ASCII / arbitrary byte keys
+		// ------------------------------------------------------------
+		{
+			name: "replace non-ASCII separator",
+			keys: [][]byte{
+				{0x80},
+				{0x81},
+				{0xFF},
+			},
+			ptrs:             []uint32{25, 34, 89, 99},
+			isLeaf:           false,
+			oldKey:           []byte{0x81},
+			newKey:           []byte{0x82},
+			expectError:      false,
+			expectInvalidIdx: false,
+		},
+
+		// ------------------------------------------------------------
+		// Leaf node rejection
+		// ------------------------------------------------------------
+		{
+			name: "return error when replacing key in leaf node",
+			keys: [][]byte{
+				[]byte("age"),
+				[]byte("country"),
+			},
+			vals: [][]byte{
+				[]byte("25"),
+				[]byte("United States"),
+			},
+			ptrs:             []uint32{25, 34, 89},
+			isLeaf:           true,
+			oldKey:           []byte("country"),
+			newKey:           []byte("location"),
+			expectError:      true,
+			expectInvalidIdx: false,
+		},
+	}
+
+	var node []byte
+	var cellIdx int32
+	var originalCellOffset uint32
+	var err error
+	for i, test := range tests {
+		if test.isLeaf {
+			node = createTestLeafNode(25, test.keys, test.vals)
+		} else {
+			node = createTestInternalNode(25, test.keys, test.ptrs)
+		}
+
+		fmt.Printf("%d. printing node before replacing=========================\n", i)
+		fmt.Println(printNodeContent(&node))
+		fmt.Println("======================================================")
+		originalItemCount := binary.LittleEndian.Uint32(node[17:21])
+		if len(test.newKey) > len(test.oldKey) && !test.expectInvalidIdx {
+			cellIdx, err = findKeyIndex(&node, test.oldKey, 0, originalItemCount-1)
+			if err != nil {
+				t.Fatalf("(%s) %s", test.name, err.Error())
+			}
+			originalCellOffset = binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(cellIdx*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(cellIdx*pgr.CELL_POINTER_SIZE_BYTE)+5])
+		}
+
+		idx, err := replaceSepKey(&node, test.oldKey, test.newKey)
+		if test.expectError {
+			if err == nil {
+				t.Fatalf("(%s) Expected error, got nil", test.name)
+			} else {
+				continue
+			}
+		}
+
+		if test.expectInvalidIdx {
+			if idx != -1 {
+				t.Fatalf("(%s) Expected idx to be -1, got %d", test.name, idx)
+			} else {
+				continue
+			}
+		}
+
+		if err != nil {
+			t.Fatalf("Expected no error but got: %s", err.Error())
+		}
+
+		if idx < 0 {
+			t.Fatalf("Expected valid index, got -1")
+		}
+
+		fmt.Printf("(%d) printing node after replacing=========================\n", i)
+		fmt.Println(printNodeContent(&node))
+		fmt.Println("======================================================")
+
+		finalItemCount := binary.LittleEndian.Uint32(node[17:21])
+		if originalItemCount != finalItemCount {
+			t.Fatalf("(%s) Expected itemcount to remain %d but got %d", test.name, originalItemCount, finalItemCount)
+		}
+
+		// check cell offset. if newKey > oldKey ensure new cell was created
+		cOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(idx*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(idx*pgr.CELL_POINTER_SIZE_BYTE)+5])
+		if len(test.newKey) > len(test.oldKey) && !test.expectInvalidIdx {
+			if cOff == originalCellOffset {
+				t.Fatalf("(%s) Expected cell offset to be updated.", test.name)
+			}
+		}
+
+		// ensure key was updated
+		kLen := binary.LittleEndian.Uint32(node[cOff+1 : cOff+5])
+		if k := node[cOff+13 : cOff+13+kLen]; !bytes.Equal(test.newKey, k) {
+			t.Fatalf("(%s) Expected key to be updated to \"%s\", but got \"%s\"", test.name, test.newKey, k)
+		}
+
+		// check key length
+		if int(kLen) != len(test.newKey) {
+			t.Fatalf("(%s) Expected key length to be %d, got %d", test.name, len(test.newKey), kLen)
+		}
+	}
+}
+
 func TestFindInsertionIdxLeafNode(t *testing.T) {
 	// +--------+-----------------+-----------+--------+
 	// |  name  |       age       |  country  |  code  |
@@ -527,6 +1207,20 @@ func TestFindInsertionIdxLeafNode(t *testing.T) {
 				[]byte("v4"),
 			},
 			insertionKey: []byte{0x80, 0x02},
+			expectedIdx:  2,
+		},
+		{
+			keys: [][]byte{
+				[]byte("user:b39924f92d739a0bff85da7de6c9245c:profile"),
+				[]byte("user:c31b36a64d710f171273b0c4eebf7e66:profile"),
+				[]byte("user:dd9a2c24b87be3ffed948eed84dd1a51:profile"),
+			},
+			vals: [][]byte{
+				[]byte("{'id':'b39924f92d739a0bff85da7de6c9245c','name':'User 0','email':'user0@example.com','active':true}"),
+				[]byte("{'id':'c31b36a64d710f171273b0c4eebf7e66','name':'User 2','email':'user2@example.com','active':true}"),
+				[]byte("{'id':'c31b36a64d710f171273b0c4eebf7e66','name':'User 2','email':'user2@example.com','active':true}"),
+			},
+			insertionKey: []byte("user:c92b36a2b6b5d834d1b8d59da330fcff:profile"),
 			expectedIdx:  2,
 		},
 	}
@@ -674,6 +1368,84 @@ func TestInsertLeafNode(t *testing.T) {
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 128 * 1024, // 128MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	// leaf node
+	keys := [][]byte{[]byte("age"), []byte("country"), []byte("name")}
+	vals := [][]byte{[]byte("thirty four"), []byte("united states"), []byte("leonard")}
+	node := createTestLeafNode(25, keys, vals)
+
+	insertKey := []byte("code")
+	insertVal := []byte("US")
+	expectedInsertionIdx := 1
+	currUpperOffset := binary.LittleEndian.Uint32(node[25:29])
+	currLowerOffset := binary.LittleEndian.Uint32(node[29:33])
+	expectedUpperOff := currUpperOffset - uint32(13+len(insertKey)+len(insertVal))
+	expectedLowOff := currLowerOffset + pgr.CELL_POINTER_SIZE_BYTE
+
+	err = bp.insertToFrame(&node, insertKey, 0, insertVal)
+	if err != nil {
+		t.Fatalf("Expected no error, got %s", err.Error())
+	}
+
+	idx, err := findKeyIndex(&node, insertKey, 0, uint32(len(keys)))
+	if err != nil {
+		t.Fatalf("Expected no error, got %s", err.Error())
+	}
+
+	if idx != int32(expectedInsertionIdx) {
+		t.Fatalf("Expected key to be inserted at idx %d, got %d", expectedInsertionIdx, idx)
+	}
+
+	// check upper and lower offset
+	if l := binary.LittleEndian.Uint32(node[29:33]); l != expectedLowOff {
+		t.Fatalf("Expected updated lower offset to be %d but got %d", expectedLowOff, l)
+	}
+
+	if u := binary.LittleEndian.Uint32(node[25:29]); u != expectedUpperOff {
+		t.Fatalf("Expected updated upper offset to be %d but got %d", expectedUpperOff, u)
+	}
+}
+
+func TestInsertFullLeafNode(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
 	pgr := InitPager(t)
 
 	// initialize buffer manager
@@ -712,27 +1484,30 @@ func TestInsertLeafNode(t *testing.T) {
 	}
 
 	// leaf node
-	keys := [][]byte{[]byte("age"), []byte("country"), []byte("name")}
-	vals := [][]byte{[]byte("thirty four"), []byte("united states"), []byte("leonard")}
-	node := createTestLeafNode(25, keys, vals)
+	keys := [][]byte{[]byte("user:1617d0e6434529cb3cf14b8b3731c069:profile"), []byte("user:6cd13ce83743c1f9199c14bf319d7002:profile"), []byte("user:ac16bba68f0aa11e8c6430abe706c81c:profile"), []byte("user:b328596859c34354066dcf5e4908058f:profile"), []byte("user:c8f6859380e9e97391eaa39ab98f1bb3:profile")}
+	vals := [][]byte{[]byte("{\"id\":\"1617d0e6434529cb3cf14b8b3731c069\",\"name\":\"User 0\",\"email\":\"user0@example.com\",\"active\":true}"), []byte("{\"id\":\"6cd13ce83743c1f9199c14bf319d7002\",\"name\":\"User 5\",\"email\":\"user5@example.com\",\"active\":true}"), []byte("{\"id\":\"ac16bba68f0aa11e8c6430abe706c81c\",\"name\":\"User 4\",\"email\":\"user4@example.com\",\"active\":true}"), []byte("{\"id\":\"b328596859c34354066dcf5e4908058f\",\"name\":\"User 6\",\"email\":\"user6@example.com\",\"active\":true}"), []byte("{\"id\":\"c8f6859380e9e97391eaa39ab98f1bb3\",\"name\":\"User 7\",\"email\":\"user7@example.com\",\"active\":true}")}
+	node := createTestLeafNode(25, nil, nil)
 
-	insertKey := []byte("code")
-	insertVal := []byte("US")
-	expectedInsertionIdx := 1
+	// insertKey := []byte("user:c8f6859380e9e97391eaa39ab98f1bb3:profile")
+	// insertVal := []byte("{\"id\":\"c8f6859380e9e97391eaa39ab98f1bb3\",\"name\":\"User 7\",\"email\":\"user7@example.com\",\"active\":true}")
 
-	err = bp.insertToFrame(&node, insertKey, 0, insertVal)
-	if err != nil {
-		t.Fatalf("Expected no error, got %s", err.Error())
+	for i, k := range keys {
+		expectedInsertionIdx := i
+		err = bp.insertToFrame(&node, k, 0, vals[i])
+		if err != nil {
+			t.Fatalf("Expected no error, got %s", err.Error())
+		}
+
+		idx, err := findKeyIndex(&node, k, 0, uint32(i))
+		if err != nil {
+			t.Fatalf("Expected no error, got %s", err.Error())
+		}
+
+		if idx != int32(expectedInsertionIdx) {
+			t.Fatalf("Expected key to be inserted at idx %d, got %d", expectedInsertionIdx, idx)
+		}
 	}
 
-	idx, err := findKeyIndex(&node, insertKey, 0, uint32(len(keys)))
-	if err != nil {
-		t.Fatalf("Expected no error, got %s", err.Error())
-	}
-
-	if idx != int32(expectedInsertionIdx) {
-		t.Fatalf("Expected key to be inserted at idx %d, got %d", expectedInsertionIdx, idx)
-	}
 }
 
 func TestInsertInternalNode(t *testing.T) {
@@ -1845,6 +2620,23 @@ func TestSplitLeafNode(t *testing.T) {
 				[]byte("3"),
 			},
 		},
+		{
+			name: "user data",
+			keys: [][]byte{
+				[]byte("user:22c3085845dc2cee9572fbcef3867bdb:profile"),
+				[]byte("user:631902c9da01256f9997ed768805a7e3:profile"),
+				[]byte("user:6d8a46ac289ad5fb7e48ab190480939a:profile"),
+				[]byte("user:761a8b7861c5ecee91c6132b379fef8c:profile"),
+				[]byte("user:ab0d2514b97856c9d32e1418b1072237:profile"),
+			},
+			vals: [][]byte{
+				[]byte(`{"id":"22c3085845dc2cee9572fbcef3867bdb","name":"User 2","email":"user2@example.com","active":true}`),
+				[]byte(`{"id":"631902c9da01256f9997ed768805a7e3","name":"User 0","email":"user0@example.com","active":true}`),
+				[]byte(`{"id":"6d8a46ac289ad5fb7e48ab190480939a","name":"User 1","email":"user1@example.com","active":true}`),
+				[]byte(`{"id":"761a8b7861c5ecee91c6132b379fef8c","name":"User 4","email":"user4@example.com","active":true}`),
+				[]byte(`{"id":"ab0d2514b97856c9d32e1418b1072237","name":"User 3","email":"user3@example.com","active":true}`),
+			},
+		},
 	}
 
 	// example overflown internal node with order 2
@@ -1943,6 +2735,31 @@ func TestSplitLeafNode(t *testing.T) {
 			}
 		}
 
+		// verify left node lower offset
+		expectedLeftNodeLowerOffset := pgr.HEADER_SIZE_BYTES + (leftNodeItemCount * pgr.CELL_POINTER_SIZE_BYTE)
+		if l := binary.LittleEndian.Uint32(node[29:33]); l != expectedLeftNodeLowerOffset {
+			t.Fatalf("Expected left node's lower offset to be %d but got %d", expectedLeftNodeLowerOffset, l)
+		}
+
+		// verfiy left node's upper offset
+		totLeftNodeCellSize := 0
+		for i := range pgr.ORDER {
+			kLen := len(test.keys[i])
+			vLen := len(test.vals[i])
+			totLeftNodeCellSize += 13 + kLen + vLen
+		}
+
+		expectedLeftNodeUppOff := (pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES) - (totLeftNodeCellSize)
+
+		if lUpp := binary.LittleEndian.Uint32(node[25:29]); lUpp != uint32(expectedLeftNodeUppOff) {
+			t.Fatalf("Expected left node's upper offset to be %d but got %d", expectedLeftNodeUppOff, lUpp)
+		}
+
+		fmt.Printf("(%s) PRINTING LEFT NODE's CELL AFTER UPPER OFFSET -->\n", test.name)
+		fmt.Printf("%v\n", node[expectedLeftNodeUppOff-157:expectedLeftNodeUppOff])
+		fmt.Printf("(%s) PRINTING LEFT NODE's CELL AT UPPER OFFSET -->\n", test.name)
+		fmt.Printf("%v\n", node[expectedLeftNodeUppOff:8176])
+
 		// verify right node
 		rightNode, _, err := buffManager.Get(newFramePid)
 		if err != nil {
@@ -1999,6 +2816,27 @@ func TestSplitLeafNode(t *testing.T) {
 			if !bytes.Equal(val, test.vals[i+pgr.ORDER]) {
 				t.Fatalf("Expected val at index %d to be %v, but got %v", i, test.vals[i+pgr.ORDER], val)
 			}
+		}
+
+		// verify right node lower offset
+		expectedRightNodeLowerOffset := pgr.HEADER_SIZE_BYTES + (rightNodeItemCount * pgr.CELL_POINTER_SIZE_BYTE)
+		if r := binary.LittleEndian.Uint32((*rightNodeBuff)[29:33]); r != expectedRightNodeLowerOffset {
+			t.Fatalf("Expected right node's lower offset to be %d but got %d", expectedLeftNodeLowerOffset, r)
+		}
+
+		// verfiy right node's upper offset
+		totRightNodeCellSize := 0
+		for i := pgr.ORDER; i < len(test.keys); i++ {
+			kLen := len(test.keys[i])
+			vLen := len(test.vals[i])
+			totRightNodeCellSize += 13 + kLen + vLen
+			fmt.Printf("CELL SIZE --> %d\n", (13 + kLen + vLen))
+		}
+
+		expectedRightNodeUppOff := (pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES) - (totRightNodeCellSize)
+
+		if rUpp := binary.LittleEndian.Uint32((*rightNodeBuff)[25:29]); rUpp != uint32(expectedRightNodeUppOff) {
+			t.Fatalf("Expected right node's upper offset to be %d but got %d", expectedLeftNodeUppOff, rUpp)
 		}
 	}
 }
@@ -3265,6 +4103,186 @@ func TestRebalanceLeafNode(t *testing.T) {
 	}
 }
 
+func TestInsertToBpTree(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 16 * 1024, // 16MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	// var tests []cellEntry
+	// tests, err = generateKV((pgr.ORDER * 2) * 2)
+	// if err != nil {
+	// 	panic(err.Error())
+	// }
+
+	// test cases
+	tests := []cellEntry{
+		{
+			key: []byte("user:631902c9da01256f9997ed768805a7e3:profile"),
+			val: []byte(`{"id":"631902c9da01256f9997ed768805a7e3","name":"User 0","email":"user0@example.com","active":true}`),
+		},
+		{
+			key: []byte("user:6d8a46ac289ad5fb7e48ab190480939a:profile"),
+			val: []byte(`{"id":"6d8a46ac289ad5fb7e48ab190480939a","name":"User 1","email":"user1@example.com","active":true}`),
+		},
+		{
+			key: []byte("user:22c3085845dc2cee9572fbcef3867bdb:profile"),
+			val: []byte(`{"id":"22c3085845dc2cee9572fbcef3867bdb","name":"User 2","email":"user2@example.com","active":true}`),
+		},
+		{
+			key: []byte("user:ab0d2514b97856c9d32e1418b1072237:profile"),
+			val: []byte(`{"id":"ab0d2514b97856c9d32e1418b1072237","name":"User 3","email":"user3@example.com","active":true}`),
+		},
+		{
+			key: []byte("user:761a8b7861c5ecee91c6132b379fef8c:profile"),
+			val: []byte(`{"id":"761a8b7861c5ecee91c6132b379fef8c","name":"User 4","email":"user4@example.com","active":true}`),
+		},
+		{
+			key: []byte("user:de090ef8c101605b6e5b5860d959a34e:profile"),
+			val: []byte(`{"id":"de090ef8c101605b6e5b5860d959a34e","name":"User 5","email":"user5@example.com","active":true}`),
+		},
+		{
+			key: []byte("user:2564fcd837354b19888120f0153dc6b0:profile"),
+			val: []byte(`{"id":"2564fcd837354b19888120f0153dc6b0","name":"User 6","email":"user6@example.com","active":true}`),
+		},
+		{
+			key: []byte("user:8320b34984329fcf42e3f95b1f16d4a6:profile"),
+			val: []byte(`{"id":"8320b34984329fcf42e3f95b1f16d4a6","name":"User 7","email":"user7@example.com","active":true}`),
+		},
+	}
+
+	fmt.Printf("generated keys and vals=======\n")
+	for i, k := range tests {
+		fmt.Printf("%d. %s: %s\n", i, k.key, k.val)
+	}
+
+	// add keys
+	for _, test := range tests {
+		t.Logf("Inserting key: \"%s\"\n", test.key)
+		err := bp.Insert(test.key, test.val)
+		if err != nil {
+			t.Fatalf("Error while inserting key \"%s\": %v", test.key, err.Error())
+		}
+	}
+
+	// retrieve keys
+	var retrievedVal []byte
+	for _, test := range tests {
+		retrievedVal, err = bp.Get(test.key)
+		if err != nil {
+			t.Fatalf("Error while retrieving key \"%s\": %v", test.key, err.Error())
+		}
+
+		if !bytes.Equal(retrievedVal, test.val) {
+			t.Fatalf("Expected for key \"%s\" to get value \"%s\" but instead got \"%s\"", test.key, test.val, retrievedVal)
+		}
+
+		fmt.Printf("SUCCESS: retrieved key \"%s\" successfully\n", test.key)
+	}
+}
+
+func TestDefragmentNode(t *testing.T) {
+	entries, err := generateKV(3)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	var keys [][]byte
+	var vals [][]byte
+
+	for _, e := range entries {
+		keys = append(keys, e.key)
+		vals = append(vals, e.val)
+	}
+
+	node := createTestFragmentedLeafNode(25, keys, vals)
+
+	err = defragmentNode(&node)
+	if err != nil {
+		t.Fatalf("Expected no error, intead got:: %s", err.Error())
+	}
+
+	var expectedCellOff uint32 = pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES
+
+	for i := range len(keys) {
+		cOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
+		kLen := binary.LittleEndian.Uint32(node[cOff+1 : cOff+5])
+		vLen := binary.LittleEndian.Uint32(node[cOff+5 : cOff+9])
+		cellSize := 13 + kLen + vLen
+		expectedCellOff -= cellSize
+
+		if cOff != expectedCellOff {
+			t.Fatalf("%d. Expected cell offset of %d but got %d", i, expectedCellOff, cOff)
+		}
+	}
+
+	if uOff := binary.LittleEndian.Uint32(node[25:29]); uOff != expectedCellOff {
+		t.Fatalf("Expected upperoffset to be %d but instead got %d", expectedCellOff, uOff)
+	}
+}
+
+func generateKV(count int) ([]cellEntry, error) {
+	if count < 0 {
+		return nil, fmt.Errorf("count must be non-negative")
+	}
+
+	items := make([]cellEntry, count)
+
+	for i := range count {
+		id := make([]byte, 16)
+		if _, err := rand.Read(id); err != nil {
+			return nil, err
+		}
+
+		idStr := hex.EncodeToString(id)
+
+		items[i] = cellEntry{
+			key: fmt.Appendf(nil, "user:%s:profile", idStr),
+			val: fmt.Appendf(nil,
+				`{"id":"%s","name":"User %d","email":"user%d@example.com","active":true}`,
+				idStr, i, i,
+			),
+		}
+	}
+
+	return items, nil
+}
+
 func createTestInternalNode(pid uint32, keys [][]byte, ptrs []uint32) []byte {
 	if len(keys) != len(ptrs)-1 && len(keys) != 0 {
 		panic("Invalid number of keys and pointers")
@@ -3324,6 +4342,40 @@ func createTestLeafNode(pid uint32, keys [][]byte, vals [][]byte) []byte {
 		vLen := len(vals[i])
 		cSize := 13 + kLen + vLen
 		newUpperOffset := upperOff - uint32(cSize)
+		binary.LittleEndian.PutUint32(leafNode[25:29], newUpperOffset)
+
+		binary.LittleEndian.PutUint32(leafNode[newUpperOffset+1:newUpperOffset+5], uint32(kLen))
+		binary.LittleEndian.PutUint32(leafNode[newUpperOffset+5:newUpperOffset+9], uint32(vLen))
+		copy(leafNode[newUpperOffset+13:newUpperOffset+13+uint32(kLen)], k)
+		copy(leafNode[newUpperOffset+13+uint32(kLen):newUpperOffset+13+uint32(kLen)+uint32(vLen)], vals[i])
+
+		// cell pointer
+		lowOff := binary.LittleEndian.Uint32(leafNode[29:33])
+		binary.LittleEndian.PutUint32(leafNode[lowOff+1:lowOff+5], newUpperOffset)
+		binary.LittleEndian.PutUint32(leafNode[29:33], lowOff+pgr.CELL_POINTER_SIZE_BYTE)
+	}
+
+	return leafNode
+}
+
+func createTestFragmentedLeafNode(pid uint32, keys [][]byte, vals [][]byte) []byte {
+	if len(keys) != len(vals) && len(keys) != 0 {
+		panic("Invalid number of keys and values")
+	}
+
+	leafNode := make([]byte, pgr.PAGE_SIZE_BYTES)
+
+	binary.LittleEndian.PutUint32(leafNode[1:5], pid) // pid=25
+	binary.LittleEndian.PutUint32(leafNode[17:21], uint32(len(keys)))
+	binary.LittleEndian.PutUint32(leafNode[25:29], uint32(pgr.PAGE_SIZE_BYTES-pgr.LOWER_PADDING_BYTES)) // upper offset
+	binary.LittleEndian.PutUint32(leafNode[29:33], uint32(pgr.HEADER_SIZE_BYTES))                       // lower offset
+
+	for i, k := range keys {
+		upperOff := binary.LittleEndian.Uint32(leafNode[25:29])
+		kLen := len(k)
+		vLen := len(vals[i])
+		cSize := 13 + kLen + vLen
+		newUpperOffset := upperOff - uint32(cSize) - 20 // add gaps
 		binary.LittleEndian.PutUint32(leafNode[25:29], newUpperOffset)
 
 		binary.LittleEndian.PutUint32(leafNode[newUpperOffset+1:newUpperOffset+5], uint32(kLen))
