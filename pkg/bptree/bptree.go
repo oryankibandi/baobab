@@ -9,25 +9,48 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/oryankibandi/baobab/pkg/buffermanager"
 	bm "github.com/oryankibandi/baobab/pkg/buffermanager"
 	"github.com/oryankibandi/baobab/pkg/helpers"
 	pgr "github.com/oryankibandi/baobab/pkg/pager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
 
+const (
+	// bit to set for a search that yields an exact match
+	exactMatchBitPos = 7
+)
+
 type BpTree struct {
 	meta          *bm.Frame
 	root          atomic.Uint32
 	buffermanager *bm.BufferManager
-	// a node's order represents the minimum number of keys it can have
-	// if a node has order d, it has d minimum no. of keys, a max of
-	// 2d keys and 2d+1 pointers.
-	order    uint32
-	numPages uint64
-	wal      *wal.WAL
+	numPages      uint64
+	wal           *wal.WAL
+	height        uint32
 
 	mu sync.RWMutex
+}
+
+// initTreeMetadata reads tree metadata from metadata page and sets values
+// in BpTree struct
+func (bp *BpTree) initTreeMetadata() error {
+	if bp.meta == nil {
+		return BTreeError{Message: "Meta page not initialized."}
+	}
+
+	bp.meta.Acquire(false)
+	defer bp.meta.Release(false)
+	buff, _, e := bp.meta.RawBufferSlice()
+
+	if e != nil {
+		return e
+	}
+
+	bp.root.Store(binary.LittleEndian.Uint32((*buff)[:4]))
+	bp.height = binary.LittleEndian.Uint32((*buff)[8:12])
+	fmt.Printf("Initialized tree metadata....\n")
+
+	return nil
 }
 
 func (bp *BpTree) updateRootPage(pid uint32) error {
@@ -42,30 +65,77 @@ func (bp *BpTree) updateRootPage(pid uint32) error {
 	bp.meta.MarkDirty()
 
 	// ref new root page
-	_, _, err := bp.buffermanager.Get(pid)
-	if err != nil {
-		return err
-	}
+	// _, _, err := bp.buffermanager.Get(pid)
+	// if err != nil {
+	// 	return err
+	// }
 
 	// unref old root page
-	currRoot, _, err := bp.buffermanager.Get(bp.root.Load())
-	if err != nil {
-		return err
+	// oldRoot, _, err := bp.buffermanager.Get(bp.root.Load())
+	// if err != nil {
+	// 	return err
+	// }
+
+	// oldRoot.Unreference()
+	bp.root.Store(pid)
+	return nil
+}
+
+// incrementTreeHeight increments height of the tree
+func (bp *BpTree) incrementTreeHeight() error {
+	bp.meta.Acquire(false)
+	defer bp.meta.Release(false)
+	buff, _, e := bp.meta.RawBufferSlice()
+
+	if e != nil {
+		return e
 	}
 
-	currRoot.Unreference()
-	bp.root.Store(pid)
+	bp.mu.Lock()
+	bp.height++
+	newHeight := bp.height
+	bp.mu.Unlock()
+	binary.LittleEndian.PutUint32((*buff)[8:12], newHeight)
+	bp.meta.MarkDirty()
+
+	return nil
+}
+
+// decrementTreeHeight decrements height of the tree
+func (bp *BpTree) decrementTreeHeight() error {
+	bp.meta.Acquire(false)
+	defer bp.meta.Release(false)
+	buff, _, e := bp.meta.RawBufferSlice()
+
+	if e != nil {
+		return e
+	}
+
+	bp.mu.Lock()
+	if bp.height > 0 {
+		bp.height--
+		newHeight := bp.height
+		bp.mu.Unlock()
+		binary.LittleEndian.PutUint32((*buff)[8:12], newHeight)
+		bp.meta.MarkDirty()
+	} else {
+		bp.mu.Unlock()
+		panic("Tried decrementing tree height with a height of 0")
+	}
+
 	return nil
 }
 
 // split splits an overflowed frame and redistributes the keys and values/ptrs
 // returns the promoted separator key, new right node pid and error if any
 func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error) {
+	fmt.Println("SPLIT()...")
 	isInternal := helpers.BitIsSet(&(*fr)[0], pgr.IsInternal)
 	// check if full
 	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
 	if itemCount <= 2*pgr.ORDER {
-		return nil, 0, BTreeError{Message: "provided frame has not overflown"}
+		fmt.Println(printNodeContent(fr))
+		return nil, 0, BTreeError{Message: fmt.Sprintf("provided frame has not overflown: node has %d items.", itemCount)}
 	}
 
 	// request new frame from buffermanager
@@ -127,7 +197,13 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 				newFrCellPtrIdx = i - pgr.ORDER
 			}
 		}
+
+		// add cell pointer to new frame
 		binary.LittleEndian.PutUint32((*newFrBuff)[(pgr.HEADER_SIZE_BYTES+(newFrCellPtrIdx*pgr.CELL_POINTER_SIZE_BYTE))+1:pgr.HEADER_SIZE_BYTES+(newFrCellPtrIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5], newFrCellOffset)
+		// set hasChildPtr flag
+		if isInternal {
+			helpers.SetFlag(&(*newFrBuff)[(pgr.HEADER_SIZE_BYTES+(newFrCellPtrIdx*pgr.CELL_POINTER_SIZE_BYTE))], []int{pgr.HasChildPtr})
+		}
 
 		// copy cell to new frame
 		copy((*newFrBuff)[newFrCellOffset:newFrCellOffset+cellSize], (*fr)[cellOff:cellEndOff])
@@ -223,7 +299,7 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 // Merge always merges the right node to the left node unless the
 // underflowed node has no immediate left sibling.
 // leftMerge is true if the underflown node is the left node(has no immediate left sibling).
-// reurns newSepKey if rebalanced or error if any
+// returns newSepKey if rebalanced or error if any
 func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, leftMerge bool) (newSepKey []byte, e error) {
 	if leftNode == nil {
 		return nil, BTreeError{Message: "no left node provided"}
@@ -232,6 +308,11 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 	if rightNode == nil {
 		return nil, BTreeError{Message: "no right node provided"}
 	}
+	fmt.Printf("(MERGE) SEP KEY -> %s\n", sepKey)
+	fmt.Printf("(MERGE-BEFORE) LEFT NODE -> %d\n", binary.LittleEndian.Uint32((*leftNode)[1:5]))
+	fmt.Println(printNodeContent(leftNode))
+	fmt.Printf("(MERGE-BEFORE) RIGHT NODE -> %d\n", binary.LittleEndian.Uint32((*rightNode)[1:5]))
+	fmt.Println(printNodeContent(rightNode))
 
 	if helpers.BitIsSet(&(*leftNode)[0], pgr.IsInternal) != helpers.BitIsSet(&(*rightNode)[0], pgr.IsInternal) {
 		return nil, BTreeError{Message: "different node types provided"}
@@ -274,6 +355,11 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			donorDirection = true
 			deficit = uint32(pgr.ORDER - leftNodeItemCount)
 		}
+		fmt.Println("(REBALANCE) -> NODES BEFORE REBALANCE")
+		fmt.Println("LEFT NODE")
+		fmt.Println(printNodeContent(leftNode))
+		fmt.Println("RIGHT NODE")
+		fmt.Println(printNodeContent(rightNode))
 
 		// 1. demote separator key
 		if internalNodeMerge {
@@ -283,9 +369,19 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			}
 		}
 
+		fmt.Printf("(REBALANCE) -> NODES AFTER DROPPING SEP KEY -> %s\n", sepKey)
+		fmt.Println("LEFT NODE")
+		fmt.Println(printNodeContent(leftNode))
+		fmt.Println("RIGHT NODE")
+		fmt.Println(printNodeContent(rightNode))
+
+		// FIX: REMOVE DEBUG CODE BELOW
+		fmt.Printf("first sep key hasChildPtr flag set -> %t\n", helpers.BitIsSet(&(*rightNode)[pgr.HEADER_SIZE_BYTES], pgr.HasChildPtr))
+		// FIX: =========================================================================================================================
+
 		if !donorDirection {
-			// var e error
 			// left to right
+			fmt.Println("left to right")
 			for deficit > 0 {
 				// remove last item from left node
 				lastKey, e := bp.getLastKey(leftNode)
@@ -306,6 +402,7 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			}
 		} else {
 			// right to left
+			fmt.Println("right to left")
 			for deficit > 0 {
 				// remove first item from rightNode
 				firstKey, e := bp.getFirstKey(rightNode)
@@ -332,12 +429,25 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			return nil, e
 		}
 
+		fmt.Println("(REBALANCE) -> NODES AFTER REBAL B4 NEW SEP KEY")
+		fmt.Println("LEFT NODE")
+		fmt.Println(printNodeContent(leftNode))
+		fmt.Println("RIGHT NODE")
+		fmt.Println(printNodeContent(rightNode))
+
 		if internalNodeMerge {
 			// for internal nodes we delete the first key of the right
 			// node and return it as the new seperator key
+			fmt.Println("(REBALANCE) PRINTING NODES BEFORE GETING SEP KEY...")
+			fmt.Printf("LEFT NODE ->\n")
+			fmt.Println(printNodeContent(leftNode))
+			fmt.Printf("RIGHT NODE ->\n")
+			fmt.Println(printNodeContent(rightNode))
 			var ptr uint32
+			fmt.Printf("Donor direction --> %t\n", donorDirection)
 			if !donorDirection {
-				ptr, _, e = bp.deleteFromNode(rightNode, newSeperatorKey, true)
+				// ptr, _, e = bp.deleteFromNode(rightNode, newSeperatorKey, true)
+				newSepKey, e = bp.promoteNewSeperatorKey(rightNode)
 			} else {
 				ptr, _, e = bp.deleteFromNode(rightNode, newSeperatorKey, false)
 			}
@@ -356,12 +466,15 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 		helpers.SetFlag(&(*leftNode)[0], []int{pgr.Dirty})
 		helpers.SetFlag(&(*rightNode)[0], []int{pgr.Dirty})
 
+		fmt.Printf("(MERGE-AFTER REBALANCE) LEFT NODE\n")
+		fmt.Println(printNodeContent(leftNode))
+		fmt.Printf("(MERGE-AFTER REBALANCE) RIGHT NODE\n")
+		fmt.Println(printNodeContent(rightNode))
 		return newSeperatorKey, nil
 	} else {
 		// merge
 		if leftMerge {
 			// moving items from the left node to the right node
-
 			// 1. demote separator key
 			if internalNodeMerge {
 				err := bp.insertToFrame(rightNode, sepKey, 0, nil)
@@ -389,6 +502,18 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 				if err != nil {
 					return nil, err
 				}
+			}
+
+			// move the left node's right most child ptr to the right node's first cell/slot
+			if internalNodeMerge {
+				if binary.LittleEndian.Uint32((*leftNode)[39:43]) == 0 {
+					panic("Invalid left node's child right child pointer pid \"0\"")
+				}
+
+				bp.updateFirstChildPtr(rightNode, (*leftNode)[39:43])
+
+				// set "hasChildPtr" flag
+				helpers.SetFlag(&(*rightNode)[pgr.HEADER_SIZE_BYTES+(leftNodeItemCount*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
 			}
 
 			// update sibling pointers
@@ -429,9 +554,7 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			}
 
 			printNodeContent(rightNode)
-
 			rightNodeItemCount = binary.LittleEndian.Uint32((*rightNode)[17:21])
-
 			deficit = leftNodeItemCount - rightNodeItemCount
 
 			// move keys from right node to left node
@@ -441,7 +564,7 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 					return nil, err
 				}
 
-				ptr, v, err := bp.deleteFromNode(rightNode, firstKey, false)
+				ptr, v, err := bp.deleteFromNode(rightNode, firstKey, true)
 				if err != nil {
 					return nil, err
 				}
@@ -450,7 +573,19 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 				if err != nil {
 					return nil, err
 				}
+			}
 
+			// move the right node's right most child ptr to the left node's right most child ptr
+			if internalNodeMerge {
+				if binary.LittleEndian.Uint32((*rightNode)[39:43]) == 0 {
+					panic("Invalid right node's child right child pointer pid \"0\"")
+				}
+
+				copy((*leftNode)[39:43], (*rightNode)[39:43])
+
+				// set "hasChildPtr" on the last cell of the left node
+				lastItemIdx := leftNodeItemCount + rightNodeItemCount - 1
+				helpers.SetFlag(&(*leftNode)[pgr.HEADER_SIZE_BYTES+(lastItemIdx*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
 			}
 
 			// update sibling pointers
@@ -482,6 +617,10 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			helpers.SetFlag(&(*leftNode)[0], []int{pgr.Dirty})
 		}
 
+		fmt.Printf("(MERGE-AFTER MERGE) LEFT NODE\n")
+		fmt.Println(printNodeContent(leftNode))
+		fmt.Printf("(MERGE-AFTER MERGE) RIGHT NODE\n")
+		fmt.Println(printNodeContent(rightNode))
 		//
 		return nil, nil
 	}
@@ -490,6 +629,9 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 // insertToFrame inserts key and value/childPtr to a frame and shifts
 // cellpointers if necessary.
 func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []byte) error {
+	fmt.Println("=========================================================================================================")
+	fmt.Printf("INSERTING KEY -> %s\tCHILDPTR -> %d\tVAL -> %s\n", key, childPtr, val)
+	fmt.Println("=========================================================================================================")
 	if fr == nil {
 		return BTreeError{Message: "No frame provided"}
 	}
@@ -525,18 +667,60 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 	// var cKSize uint32
 	var insertIdx uint32 = itemCount
 
-	idx, e := findInsertionIdx(fr, key, 0, itemCount-1)
+	idxArr, e := findInsertionIdx(fr, key, 0, itemCount-1)
 	if e != nil {
 		return e
 	}
 
-	if idx < 0 {
+	if idxArr == nil {
 		return BTreeError{Message: "Unable to insert index"}
 	}
 
-	insertIdx = uint32(idx)
-	ptrOff = insertIdx*pgr.CELL_POINTER_SIZE_BYTE + pgr.HEADER_SIZE_BYTES
-	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1:])
+	exactMatch := helpers.BitIsSet(&idxArr[0], exactMatchBitPos)
+	insertIdx = binary.LittleEndian.Uint32(idxArr[1:])
+
+	if exactMatch {
+		fmt.Printf("EXACT MATCH...\n")
+		// update the value/ptr
+		if internal {
+			if insertIdx == itemCount-1 {
+				fmt.Printf("insertIdx == itemCount...\n")
+				binary.LittleEndian.PutUint32((*fr)[39:43], childPtr)
+			} else {
+				fmt.Printf("insertIdx != itemCount..\n")
+				fmt.Printf("itemcount --> %d\t insertIdx --> %d\n", itemCount, insertIdx)
+				ptrOff = ((insertIdx + 1) * pgr.CELL_POINTER_SIZE_BYTE) + pgr.HEADER_SIZE_BYTES
+				cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1 : ptrOff+5])
+				binary.LittleEndian.PutUint32((*fr)[cOff+9:cOff+13], childPtr)
+			}
+		} else {
+			ptrOff = (insertIdx * pgr.CELL_POINTER_SIZE_BYTE) + pgr.HEADER_SIZE_BYTES
+			cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1 : ptrOff+5])
+			oldKeyLen := int(binary.LittleEndian.Uint32((*fr)[cOff+1 : cOff+5]))
+			oldValLen := int(binary.LittleEndian.Uint32((*fr)[cOff+5 : cOff+9]))
+
+			if oldValLen >= valLen {
+				// update in-place
+				copy((*fr)[cOff+13+uint32(oldKeyLen):cOff+13+uint32(oldKeyLen)+uint32(valLen)], val)
+				binary.LittleEndian.PutUint32((*fr)[cOff+5:cOff+9], uint32(valLen))
+			} else {
+				// write to new cell at upperoffset
+				copy((*fr)[cellStartOff:cellStartOff+13+uint32(oldKeyLen)], (*fr)[cOff:cOff+13+uint32(oldKeyLen)])
+				copy((*fr)[cellStartOff+13+uint32(oldKeyLen):cellStartOff+13+uint32(oldKeyLen)+uint32(valLen)], val)
+				binary.LittleEndian.PutUint32((*fr)[cellStartOff+5:cellStartOff+9], uint32(valLen))
+
+				// update cellOffset  and upper  offset
+				binary.LittleEndian.PutUint32((*fr)[ptrOff+1:ptrOff+5], cellStartOff)
+				binary.LittleEndian.PutUint32((*fr)[25:29], cellStartOff)
+			}
+		}
+
+		return nil
+	}
+
+	ptrOff = (insertIdx * pgr.CELL_POINTER_SIZE_BYTE) + pgr.HEADER_SIZE_BYTES
+	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1 : ptrOff+5])
+	prevCellHasChildPtr := helpers.BitIsSet(&(*fr)[ptrOff], pgr.HasChildPtr)
 	fmt.Printf("PRINTING CELL CONTENTS BEFORE UPDATE inserting -> %s -----------------------------------\n", key)
 	fmt.Printf("Insert IDX -> %d\tItem Count -> %d\n", insertIdx, itemCount)
 	printNodeContent(fr)
@@ -564,8 +748,10 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 			// This happens briefly during merging/rebalancing when the separator key is demoted.
 			// It's not permanent and the operation leaves no empty child pointers.
 			if childPtr != 0 {
-				// add child ptr at current index as pointer to our new cell
-				copy((*fr)[cellStartOff+9:cellStartOff+13], (*fr)[cOff+9:cOff+13])
+				// add child ptr at current index as pointer to our new cell if its 'HasChildPtr' flag is set
+				if prevCellHasChildPtr {
+					copy((*fr)[cellStartOff+9:cellStartOff+13], (*fr)[cOff+9:cOff+13])
+				}
 				// write new child ptr to cell at curr idx.
 				binary.LittleEndian.PutUint32((*fr)[cOff+9:cOff+13], childPtr)
 			}
@@ -575,19 +761,28 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 	}
 
 	fmt.Printf("PRINTING CELL CONTENTS BEFORE CELL POINTER INSERTION -> %s -----------------------------------\n", key)
+	fmt.Printf("PROVIDED PTR -> %d\n", childPtr)
 	printNodeContent(fr)
 	// insert cell pointer
 	lowOff := binary.LittleEndian.Uint32((*fr)[29:33])
 	fmt.Printf("LOW OFFSET --> %d\n", lowOff)
 	fmt.Printf("FIRST 100 BYTES -> %v\n", (*fr)[:100])
 	if insertIdx == itemCount {
-		fmt.Printf("insertIdx == itemCount\n")
+		fmt.Printf("(key:%s)\ninsertIdx == itemCount\n", key)
 		// add item to end of ptr list
-		if internal && childPtr != 0 {
+		//if internal && childPtr != 0 {
+		//	helpers.SetFlag(&(*fr)[lowOff], []int{pgr.HasChildPtr})
+		//}
+		binary.LittleEndian.PutUint32((*fr)[lowOff+1:lowOff+5], cellStartOff)
+		if internal && (childPtr == 0) {
+			fmt.Println("childPtr is 0")
+			helpers.UnsetFlag(&(*fr)[lowOff], []int{pgr.HasChildPtr})
+		} else if internal && childPtr != 0 {
+			fmt.Println("childPtr is not 0")
 			helpers.SetFlag(&(*fr)[lowOff], []int{pgr.HasChildPtr})
 		}
-		binary.LittleEndian.PutUint32((*fr)[lowOff+1:lowOff+5], cellStartOff)
 	} else {
+		fmt.Printf("(key:%s)\ninsertIdx != itemCount\n", key)
 		fmt.Printf("INSERT IDX --> %d\n", insertIdx)
 		fmt.Printf("ITEM COUNT --> %d\n", itemCount)
 		fmt.Printf("Copying to destination [%d:%d]\n", pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE, lowOff+pgr.CELL_POINTER_SIZE_BYTE)
@@ -596,11 +791,18 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 		// shift items to the right to create space for new cell pointer
 		copy((*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE:lowOff+pgr.CELL_POINTER_SIZE_BYTE], (*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE):lowOff])
 
-		if internal && childPtr != 0 {
-			helpers.SetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
-		}
+		// if internal && childPtr != 0 {
+		// 	helpers.SetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
+		// }
 
 		binary.LittleEndian.PutUint32((*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)+1:pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE], cellStartOff)
+		if internal && (childPtr == 0 || !prevCellHasChildPtr) {
+			fmt.Println("childPtr is 0")
+			helpers.UnsetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
+		} else if internal && childPtr != 0 {
+			helpers.SetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
+			fmt.Println("childPtr is not 0")
+		}
 	}
 	fmt.Printf("PRINTING CELL CONTENTS AFTER UPDATE-----------------------------------")
 
@@ -609,7 +811,7 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 	binary.LittleEndian.PutUint32((*fr)[29:33], lowOff+pgr.CELL_POINTER_SIZE_BYTE)
 	binary.LittleEndian.PutUint32((*fr)[25:29], cellStartOff)
 	printNodeContent(fr)
-	fmt.Printf("FRAME --> %v\n", *fr)
+	// fmt.Printf("FRAME --> %v\n", *fr)
 
 	return nil
 }
@@ -644,8 +846,9 @@ func (bp *BpTree) insertToNewRoot(rootBuff *[]byte, key []byte, leftPtr uint32, 
 	binary.LittleEndian.PutUint32((*rootBuff)[cellOff+9:cellOff+13], leftPtr)
 	copy((*rootBuff)[cellOff+13:cellOff+13+kLen], key)
 
-	// add cell pointer
+	// add cell pointer and set HasChildPtr flag
 	binary.LittleEndian.PutUint32((*rootBuff)[pgr.HEADER_SIZE_BYTES+1:pgr.HEADER_SIZE_BYTES+5], uint32(cellOff))
+	helpers.SetFlag(&(*rootBuff)[pgr.HEADER_SIZE_BYTES], []int{pgr.HasChildPtr})
 
 	// add right child pointer to header & update page metadata
 	binary.LittleEndian.PutUint32((*rootBuff)[39:43], rightPtr)
@@ -671,6 +874,8 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 
 	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
 	if itemCount == 0 {
+		fmt.Println(printNodeContent(fr))
+		fmt.Printf("Frame Deleted -> %t\n", helpers.BitIsSet(&(*fr)[0], pgr.Dead))
 		return 0, nil, BTreeError{Message: "Frame has no keys"}
 	}
 
@@ -680,6 +885,8 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 	var cOff uint32
 	var ptrOff uint32
 
+	fmt.Printf("NODE BEFORE DELETING \"%s\"...\n", key)
+	fmt.Println(printNodeContent(fr))
 	idx, e := findKeyIndex(fr, key, 0, itemCount-1)
 	if e != nil {
 		return 0, nil, e
@@ -688,6 +895,7 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 		return 0, nil, BTreeError{Message: "Could not find key to delete"}
 	}
 
+	fmt.Printf("DELETING AT IDX --> %d\n", idx)
 	delIdx = idx
 	ptrOff = (uint32(delIdx) * pgr.CELL_POINTER_SIZE_BYTE) + pgr.HEADER_SIZE_BYTES
 	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1 : ptrOff+5])
@@ -720,9 +928,10 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 	var deletedChildPtr uint32
 	hasChildPtr := helpers.BitIsSet(&(*fr)[(delIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES], pgr.HasChildPtr)
 	lowOff := binary.LittleEndian.Uint32((*fr)[29:33])
-	clear((*fr)[(delIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES : delIdx*pgr.CELL_POINTER_SIZE_BYTE+pgr.HEADER_SIZE_BYTES+pgr.CELL_POINTER_SIZE_BYTE])
+	clear((*fr)[(delIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES : (delIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.HEADER_SIZE_BYTES+pgr.CELL_POINTER_SIZE_BYTE])
 	binary.LittleEndian.PutUint32((*fr)[29:33], uint32(lowOff-pgr.CELL_POINTER_SIZE_BYTE))
 
+	fmt.Printf("delIdx -> %d\tleftMerge-> %t\titemCount -> %d\thasChildPtr -> %t\n", delIdx, leftMerge, itemCount, hasChildPtr)
 	if delIdx == int32(itemCount-1) {
 		// last item being deleted
 		// set the cell's child ptr as the right most child in header
@@ -740,6 +949,12 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 			// store cell pointer that will be deleted
 			deletedChildPtr = binary.LittleEndian.Uint32((*fr)[nextCellOff+9 : nextCellOff+13])
 			binary.LittleEndian.PutUint32((*fr)[nextCellOff+9:nextCellOff+13], currCellPtr)
+
+			if !hasChildPtr {
+				// given that we take the next cells pointer and current cell has no pointer
+				// we mark nextCell as not having a child ptr
+				helpers.UnsetFlag(&(*fr)[ptrOff+pgr.CELL_POINTER_SIZE_BYTE], []int{pgr.HasChildPtr})
+			}
 		} else {
 			deletedChildPtr = binary.LittleEndian.Uint32((*fr)[cOff+9 : cOff+13])
 		}
@@ -750,8 +965,51 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 
 	// decrement item count
 	binary.LittleEndian.PutUint32((*fr)[17:21], itemCount-1)
+	fmt.Println("Node after deletion --> ")
+	fmt.Println(printNodeContent(fr))
 
 	return deletedChildPtr, nil, nil
+}
+
+// promoteNewSeperatorKey - returns the left most key of the frame.
+// if frame is an internal frame, delete key from node
+func (bp *BpTree) promoteNewSeperatorKey(fr *[]byte) (newSepKey []byte, e error) {
+	fmt.Println("PROMOTENEWSEPKEY --> ")
+	if fr == nil {
+		return nil, BTreeError{Message: "No frame provided."}
+	}
+
+	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
+	if itemCount <= 0 {
+		return nil, BTreeError{Message: "No entries in frame."}
+	}
+
+	isInternal := helpers.BitIsSet(&(*fr)[0], pgr.IsInternal)
+	hasChildPtr := helpers.BitIsSet(&(*fr)[pgr.HEADER_SIZE_BYTES], pgr.HasChildPtr)
+
+	if isInternal && hasChildPtr {
+		fmt.Println(printNodeContent(fr))
+		panic("'hasChildPtr' flag should be unset")
+	}
+
+	lowOff := binary.LittleEndian.Uint32((*fr)[29:33])
+	cellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+1 : pgr.HEADER_SIZE_BYTES+5])
+	kLen := binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
+	sepKey := make([]byte, kLen)
+
+	copy(sepKey, (*fr)[cellOff+13:cellOff+13+kLen])
+
+	if isInternal {
+		// delete key from node. Shift ptrs to the left.
+		copy((*fr)[pgr.HEADER_SIZE_BYTES:lowOff-pgr.CELL_POINTER_SIZE_BYTE], (*fr)[pgr.HEADER_SIZE_BYTES+pgr.CELL_POINTER_SIZE_BYTE:lowOff])
+		clear((*fr)[lowOff-pgr.CELL_POINTER_SIZE_BYTE : lowOff])
+
+		// update low offset, item count
+		binary.LittleEndian.PutUint32((*fr)[29:33], lowOff-pgr.CELL_POINTER_SIZE_BYTE)
+		binary.LittleEndian.PutUint32((*fr)[17:21], itemCount-1)
+	}
+
+	return sepKey, nil
 }
 
 // getFirstKey returns the first key of the frame or error if any.
@@ -775,6 +1033,26 @@ func (bp *BpTree) getFirstKey(fr *[]byte) (k []byte, err error) {
 	return (*fr)[cellOff+13 : cellOff+13+kLen], nil
 }
 
+// getFirstChildPtr returns the first child ptr of the frame or error if any.
+// atleast a shared latch must be acquired before calling this function
+func (bp *BpTree) getFirstChildPtr(fr *[]byte) (k []byte, err error) {
+	if fr == nil {
+		return nil, BTreeError{Message: "No frame provided"}
+	}
+
+	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
+	if itemCount == 0 {
+		return nil, BTreeError{Message: "Frame has not been provided. "}
+	}
+
+	cellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+1 : pgr.HEADER_SIZE_BYTES+5])
+	if cellOff == 0 || cellOff > pgr.PAGE_SIZE_BYTES {
+		return nil, BTreeError{Message: fmt.Sprintf("(getFirstChildPtr) Invalid cell offset: %d", cellOff)}
+	}
+
+	return (*fr)[cellOff+9 : cellOff+13], nil
+}
+
 // getLastKey returns the last key of the frame or error if any.
 // atleast a shared latch must be acquired before calling this function
 func (bp *BpTree) getLastKey(fr *[]byte) (k []byte, err error) {
@@ -795,6 +1073,26 @@ func (bp *BpTree) getLastKey(fr *[]byte) (k []byte, err error) {
 
 	kLen := binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
 	return (*fr)[cellOff+13 : cellOff+13+kLen], nil
+}
+
+// updateFirstChildPtr updates the first child ptr of the frame and returns error if any.
+// X-latch on the frame must be acquired before calling this function
+func (bp *BpTree) updateFirstChildPtr(fr *[]byte, ptr []byte) error {
+	if fr == nil {
+		return BTreeError{Message: "No frame provided"}
+	}
+
+	cellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+1 : pgr.HEADER_SIZE_BYTES+5])
+	if cellOff == 0 || cellOff > pgr.PAGE_SIZE_BYTES {
+		return BTreeError{Message: fmt.Sprintf("(updateFirstChildPtr) Invalid cell offset: %d", cellOff)}
+	}
+
+	copy((*fr)[cellOff+9:cellOff+13], ptr)
+
+	// set "hasChildPtrFlag"
+	helpers.SetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES], []int{pgr.HasChildPtr})
+
+	return nil
 }
 
 // getKeyAtIdx retrieves key at provided index
@@ -845,9 +1143,9 @@ func (bp *BpTree) getPtrAtIdx(fr *[]byte, idx uint32) (ptr uint32, e error) {
 // Insert - inserts a new key and value to the index ahd performs splits incase of an overflow
 // returns error if any
 func (bp *BpTree) Insert(key []byte, val []byte) error {
-	var currNode *buffermanager.Frame
+	var currNode *bm.Frame
 	var currNodeBuff *[]byte
-	var prevNode *buffermanager.Frame
+	var prevNode *bm.Frame
 	var err error
 	var isLeaf bool
 
@@ -877,6 +1175,7 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 
 		// set node as new root
 		bp.root.Store(currNode.GetPage().PageId)
+		bp.height++
 		bp.mu.Unlock()
 		currNode.Release(false)
 		currNode.Unreference()
@@ -902,7 +1201,9 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 	}
 
 	// acquire exlusive latch
+	fmt.Printf("Acquiring root node Xlusive latch -> %d\n", rootPid)
 	currNode.Acquire(false)
+	fmt.Printf("Acquired root node Xlusive latch -> %d \n", rootPid)
 
 	currNodeBuff, _, err = currNode.RawBufferSlice()
 	if err != nil {
@@ -913,6 +1214,7 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 
 	var idx int32
 	var ptr uint32
+	var ptrArr []byte
 	for !isLeaf {
 		if prevNode != nil {
 			prevNode.Release(false)
@@ -920,14 +1222,21 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 		}
 
 		// itemCount := binary.LittleEndian.Uint32((*currNodeBuff)[17:21])
-		_, ptr, err = findKeyPath(currNodeBuff, key)
+		_, ptrArr, err = findKeyPath(currNodeBuff, key)
 		if err != nil {
 			currNode.Release(false)
 			currNode.Unreference()
 			return err
 		}
 
+		if ptrArr == nil {
+			panic("No child pointer returned.")
+		}
+
+		ptr = binary.LittleEndian.Uint32(ptrArr[4:])
+
 		if ptr == 0 {
+			fmt.Println(printNodeContent(currNodeBuff))
 			panic("retrieved invalid child ptr pid: 0")
 		}
 
@@ -976,7 +1285,7 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 		prevNode.Unreference()
 	}
 
-	insertionIdx, err := findInsertionIdx(currNodeBuff, key, 0, itemCount-1)
+	insertionIdxArr, err := findInsertionIdx(currNodeBuff, key, 0, itemCount-1)
 	if err != nil {
 		if possibleOverflow && prevNode != nil {
 			prevNode.Release(false)
@@ -988,8 +1297,22 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 		return err
 	}
 
+	if insertionIdxArr == nil {
+		if possibleOverflow && prevNode != nil {
+			prevNode.Release(false)
+			prevNode.Unreference()
+		}
+
+		currNode.Release(false)
+		currNode.Unreference()
+		return BTreeError{Message: "Unable to insert to node"}
+	}
+
+	insertionIdx := binary.LittleEndian.Uint32(insertionIdxArr[1:])
+
 	keyAtIdx, err := bp.getKeyAtIdx(currNodeBuff, uint32(insertionIdx))
 	if bytes.Equal(keyAtIdx, key) {
+		fmt.Printf("key already exists, no possible overflow...\n")
 		// key already exists, no possible overflow, release prev node latch if had not.
 		if possibleOverflow && prevNode != nil {
 			prevNode.Release(false)
@@ -1028,8 +1351,11 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 
 		return nil
 	} else {
+		fmt.Printf("key does not exist, no possible overflow...\n")
 		// no key exists
 		err = bp.insertToFrame(currNodeBuff, key, 0, val)
+		fmt.Printf("Post insert to frame. Possible Overflow --> %t...\n", possibleOverflow)
+		fmt.Printf("ERR -> %v\n", err)
 		if err != nil {
 			if possibleOverflow {
 				prevNode.Release(false)
@@ -1042,6 +1368,7 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 		}
 
 		if !possibleOverflow {
+			fmt.Printf("No possible overflow....\n")
 			currNode.Release(false)
 			currNode.Unreference()
 
@@ -1049,8 +1376,12 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 		}
 
 		// split overflown node and propagate splits
-		for possibleOverflow {
+		var i uint32 = 0
+		h := bp.height
+		fmt.Printf("i -> %d\nh -> %d\n", i, h)
+		for possibleOverflow && i < h {
 			fmt.Printf("possible overflow loop.....\n")
+
 			newSepKey, newFramePid, err := bp.split(currNodeBuff)
 			fmt.Println("split done...")
 			if err != nil {
@@ -1070,12 +1401,13 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 			fmt.Printf("Pop() result -> %v\n", parentPath)
 			if parentPath == nil || binary.LittleEndian.Uint32((*currNodeBuff)[1:5]) == parentPath.pid {
 				// no parent or only one level, create new root node
-				fmt.Printf("No parent, creating new root\nPARENT -> %d\t  rootPID -> %d\tJUST SPLIT NODE PID -> %d\n", parentPath.pid, bp.root.Load(), binary.LittleEndian.Uint32((*currNodeBuff)[1:5]))
+				fmt.Printf("No parent, creating new root\nrootPID -> %d\tJUST SPLIT NODE PID -> %d\n", bp.root.Load(), binary.LittleEndian.Uint32((*currNodeBuff)[1:5]))
 				newRoot, err := bp.buffermanager.NewFrame(true, true)
 				if err != nil {
 					panic(err)
 				}
 
+				fmt.Println("Acquiting latch for new root node...")
 				newRoot.Acquire(false)
 				newRootBuff, _, err := newRoot.RawBufferSlice()
 				if err != nil {
@@ -1090,7 +1422,12 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 				}
 
 				// set new root
-				bp.root.Store(binary.LittleEndian.Uint32((*newRootBuff)[1:5]))
+				bp.updateRootPage(binary.LittleEndian.Uint32((*newRootBuff)[1:5]))
+				err = bp.incrementTreeHeight()
+				if err != nil {
+					panic(err)
+				}
+				// bp.root.Store(binary.LittleEndian.Uint32((*newRootBuff)[1:5]))
 				fmt.Println("set new root")
 				fmt.Println("PRINTING NEW ROOT NODE AFTER SPLIT=================: ", binary.LittleEndian.Uint32((*newRootBuff)[1:5]))
 				printNodeContent(newRootBuff)
@@ -1114,26 +1451,33 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 					if err != nil {
 						panic(fmt.Sprintf("Unable to get prev Node buffer: %s", err.Error()))
 					}
+					fmt.Printf("PRINTING PREV NODE --> \n")
+					fmt.Println(printNodeContent(prevNodeBuff))
 
-					fmt.Printf("Inserting to parent")
+					fmt.Printf("Inserting to parent\n")
 					err = bp.insertToFrame(prevNodeBuff, newSepKey, newFramePid, nil)
 					if err != nil {
 						panic(fmt.Sprintf("Unable to add new separator key and child: %s", err.Error()))
 					}
 
-					fmt.Printf("Releasing \"currNode\" latches")
+					fmt.Printf("Releasing \"currNode\" latches\n")
 					// release current node latches
 					currNode.Release(false)
 					currNode.Unreference()
 
 					// check for overflow
-					if binary.LittleEndian.Uint32((*prevNodeBuff)[17:21]) <= pgr.ORDER {
-						possibleOverflow = false
+					possibleOverflow, err = nodeHasOverflown(prevNodeBuff)
+					if err != nil {
+						panic(err)
+					}
+					if !possibleOverflow {
+						// possibleOverflow = false
 						prevNode.Release(false)
 						prevNode.Unreference()
 						prevNode = nil
 					} else {
 						currNode = prevNode
+						currNodeBuff = prevNodeBuff
 						prevNode = nil
 					}
 				} else {
@@ -1144,8 +1488,8 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 					}
 
 					fmt.Printf("Acquiring lock for the parent node with pid %d...\n", parentPath.pid)
-					prevNodeBuff, _, _ := prevNode.RawBufferSlice()
-					fmt.Printf("prevNode pid => %d\n", binary.LittleEndian.Uint32((*prevNodeBuff)[1:5]))
+					// prevNodeBuff, _, _ := prevNode.RawBufferSlice()
+					// fmt.Printf("prevNode pid => %d\n", binary.LittleEndian.Uint32((*prevNodeBuff)[1:5]))
 					fmt.Printf("CurrNodePid ==> %d\n", binary.LittleEndian.Uint32((*currNodeBuff)[1:5]))
 					fmt.Printf("treeHeight: %d\n", treeHeight)
 					parentNode.Acquire(false)
@@ -1165,23 +1509,28 @@ func (bp *BpTree) Insert(key []byte, val []byte) error {
 					currNode.Unreference()
 
 					// check for overflow
-					if binary.LittleEndian.Uint32((*parentNodeBuff)[17:21]) <= pgr.ORDER {
-						possibleOverflow = false
+					possibleOverflow, err = nodeHasOverflown(parentNodeBuff)
+					if err != nil {
+						panic(err)
+					}
+					if !possibleOverflow {
 						parentNode.Release(false)
 						parentNode.Unreference()
 					} else {
 						currNode = parentNode
+						currNodeBuff = parentNodeBuff
 					}
 				}
 			}
 
+			i++
 		}
 		return nil
 	}
 }
 
 func (bp *BpTree) Get(key []byte) (val []byte, e error) {
-	var currNode *buffermanager.Frame
+	var currNode *bm.Frame
 	var currNodeBuff *[]byte
 	var err error
 	var isLeaf bool
@@ -1197,7 +1546,7 @@ func (bp *BpTree) Get(key []byte) (val []byte, e error) {
 		return nil, err
 	}
 
-	// acquire exlusive latch
+	// acquire shared latch
 	currNode.Acquire(true)
 
 	currNodeBuff, _, err = currNode.RawBufferSlice()
@@ -1214,20 +1563,32 @@ func (bp *BpTree) Get(key []byte) (val []byte, e error) {
 
 	var idx int32
 	var ptr uint32
+	var ptrArr []byte
 	for !isLeaf {
 		// itemCount := binary.LittleEndian.Uint32((*currNodeBuff)[17:21])
-		_, ptr, err = findKeyPath(currNodeBuff, key)
+		_, ptrArr, err = findKeyPath(currNodeBuff, key)
+		fmt.Println("Ptr after find Key Path -> ", ptr)
 		if err != nil {
 			currNode.Release(true)
 			currNode.Unreference()
 			return nil, err
 		}
 
+		if ptrArr == nil {
+			panic("No child pointer found.")
+		}
+
+		ptr = binary.LittleEndian.Uint32(ptrArr[4:])
+
 		if ptr == 0 {
 			currNode.Release(true)
 			currNode.Unreference()
 			return nil, nil
 		}
+
+		// release currNode's shared latch before acquiring the child's latch
+		currNode.Release(true)
+		currNode.Unreference()
 
 		currNode, _, err = bp.buffermanager.Get(ptr)
 		if err != nil {
@@ -1239,11 +1600,15 @@ func (bp *BpTree) Get(key []byte) (val []byte, e error) {
 		}
 
 		// acquire node's shared latch
+		fmt.Printf("Acquiring S-latch for next node -> %d\n", ptr)
+		fmt.Printf("Tree height -> %d\n", bp.height)
 		currNode.Acquire(true)
+		fmt.Printf("Acquired S-latch for next node...\n")
 
 		currNodeBuff, _, err = currNode.RawBufferSlice()
 		if err != nil {
 			currNode.Release(true)
+			currNode.Unreference()
 			return nil, err
 		}
 
@@ -1264,6 +1629,8 @@ func (bp *BpTree) Get(key []byte) (val []byte, e error) {
 		fmt.Printf("No key found...\n")
 		fmt.Printf("printing currnode ====== \n")
 		fmt.Println(printNodeContent(currNodeBuff))
+		currNode.Release(true)
+		currNode.Unreference()
 		return nil, nil
 	}
 	fmt.Printf("Found key at idx-> %d\n", idx)
@@ -1281,104 +1648,581 @@ func (bp *BpTree) Get(key []byte) (val []byte, e error) {
 	return value, nil
 }
 
+// Delete deletes key from node and returns the value associated with the key
+// or error if any
+func (bp *BpTree) Delete(key []byte) (val []byte, e error) {
+	fmt.Println("Delete()+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+==+=+=+=+=+=+=+==+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+")
+	var currNode *bm.Frame
+	var prevNode *bm.Frame
+	var currNodeBuff *[]byte
+	// var prevNodeBuff *[]byte
+	var err error
+	var isLeaf bool
+
+	rootPid := bp.root.Load()
+	if rootPid == 0 {
+		return nil, nil
+	}
+
+	currNode, _, err = bp.buffermanager.Get(rootPid)
+	if err != nil {
+		return nil, err
+	}
+
+	// acquire exlusive latch
+	fmt.Println("Acquiring root node latch -->")
+	currNode.Acquire(false)
+	fmt.Println("Acquired root node latch -->")
+
+	currNodeBuff, _, err = currNode.RawBufferSlice()
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("Printing root node at start of search---------------------\n")
+	printNodeContent(currNodeBuff)
+	fmt.Printf("----------------------------------------------\n")
+
+	// initialize BTStack
+	btPath, err := NewBTStack(rootPid)
+	if err != nil {
+		panic(err.Error())
+	}
+	defer btPath.Clear()
+
+	var treeHeight uint32 = 0
+	// add root node to path
+	// btPath.Add(&TraversePath{pid: rootPid, idx: 0, height: treeHeight})
+	// treeHeight++
+
+	isLeaf = !helpers.BitIsSet(&(*currNodeBuff)[0], pgr.IsInternal)
+
+	var idx int32
+	var ptr uint32
+	var ptrArr []byte
+	var sepKeys [][]byte
+	for !isLeaf {
+		if prevNode != nil {
+			prevNode.Release(false)
+			prevNode.Unreference()
+		}
+
+		// itemCount := binary.LittleEndian.Uint32((*currNodeBuff)[17:21])
+		sepKeys, ptrArr, err = findKeyPath(currNodeBuff, key)
+		if err != nil {
+			currNode.Release(false)
+			currNode.Unreference()
+			return nil, err
+		}
+
+		if ptrArr == nil {
+			panic("No  child pointer found")
+		}
+
+		ptr = binary.LittleEndian.Uint32(ptrArr[4:])
+
+		if ptr == 0 {
+			fmt.Printf("sepKeys --> %v\n", sepKeys)
+			if len(sepKeys) > 0 {
+				fmt.Printf("sepKey -> %s\n", sepKeys[0])
+			}
+			if len(sepKeys) == 2 {
+				fmt.Printf("rightKey -> %s\n", sepKeys[1])
+			}
+			fmt.Printf("searchKey -> %s\n", key)
+			fmt.Println("printing problematic node....")
+			fmt.Println(printNodeContent(currNodeBuff))
+			panic("retrieved invalid child ptr pid: 0")
+		}
+
+		idx = int32(binary.LittleEndian.Uint32(ptrArr[:4]))
+
+		fmt.Printf("PRINTING NODE (%d) BEFORE REPLACING--\n", binary.LittleEndian.Uint32((*currNodeBuff)[1:5]))
+		fmt.Println(printNodeContent(currNodeBuff))
+
+		fmt.Printf("Adding Sep Key -> %s,%s\n", sepKeys[0], sepKeys[1])
+		if len(sepKeys) > 1 {
+			btPath.Add(&TraversePath{pid: binary.LittleEndian.Uint32((*currNodeBuff)[1:5]), idx: uint32(idx), height: treeHeight, sepKey: sepKeys[0], rightKey: sepKeys[1]})
+		} else {
+			btPath.Add(&TraversePath{pid: binary.LittleEndian.Uint32((*currNodeBuff)[1:5]), idx: uint32(idx), height: treeHeight, sepKey: sepKeys[0]})
+		}
+		treeHeight++
+
+		prevNode = currNode
+		// prevNodeBuff = currNodeBuff
+		currNode, _, err = bp.buffermanager.Get(ptr)
+		if err != nil {
+			prevNode.Release(false)
+			prevNode.Unreference()
+			return nil, err
+		}
+
+		if currNode == nil {
+			panic(fmt.Sprintf("No node with pid %d retrieved", ptr))
+		}
+
+		// acquire node's exclusive latch
+		fmt.Println("ACquiring next node's xlusive latch...")
+		fmt.Printf("Tree Height -> %d\n", bp.height)
+		currNode.Acquire(false)
+		fmt.Println("ACquired next node's xlusive latch...")
+
+		currNodeBuff, _, err = currNode.RawBufferSlice()
+		if err != nil {
+			prevNode.Release(false)
+			prevNode.Unreference()
+			return nil, err
+		}
+
+		// check if is a leaf node
+		isLeaf = !helpers.BitIsSet(&(*currNodeBuff)[0], pgr.IsInternal)
+		// if !isLeaf {
+		// 	// add node to traverse path
+		// 	fmt.Printf("Adding Sep Key -> %s\n", sepKey)
+		// 	btPath.Add(&TraversePath{pid: ptr, idx: uint32(idx), height: treeHeight, sepKey: sepKey})
+		// 	treeHeight++
+		// }
+	}
+
+	// reached leaf node
+	fmt.Println("Reached leaf node -> ")
+	fmt.Printf("Leaf Node PID -> %d\n", binary.LittleEndian.Uint32((*currNodeBuff)[1:5]))
+	fmt.Println(printNodeContent(currNodeBuff))
+	itemCount := binary.LittleEndian.Uint32((*currNodeBuff)[17:21])
+	possibleUnderflow := itemCount == pgr.ORDER
+	if !possibleUnderflow && prevNode != nil {
+		// no possible underflow, release previous node's latch
+		fmt.Println("No possible underflow...")
+		prevNode.Release(false)
+		prevNode.Unreference()
+	}
+
+	_, delVal, err := bp.deleteFromNode(currNodeBuff, key, false)
+	if err != nil {
+		if possibleUnderflow {
+			prevNode.Release(false)
+			prevNode.Unreference()
+		}
+		return nil, err
+	}
+
+	itemCount = binary.LittleEndian.Uint32((*currNodeBuff)[17:21])
+	underflow := itemCount < pgr.ORDER
+	isRoot := bp.root.Load() == binary.LittleEndian.Uint32((*currNodeBuff)[1:5])
+
+	if !underflow || (underflow && isRoot) {
+		currNode.Release(false)
+		currNode.Unreference()
+		return delVal, nil
+	}
+
+	var mergeSib *bm.Frame
+	var mergeSibPid uint32
+	var mergeSibBuff *[]byte
+	var parent *bm.Frame
+	var parentBuff *[]byte
+	var newSepKey []byte
+	var parSepKey []byte
+	leftMerge := false
+	i := 0
+	for underflow && !isRoot {
+		// merge
+		// get idx of the paren't child pointer that points to curr node
+		currNodeIdx, err := btPath.parentPtrIdx()
+		if err != nil {
+			panic(err.Error())
+		}
+
+		fmt.Printf("CURRIDX -> %d\n", currNodeIdx)
+
+		if currNodeIdx < 0 {
+			panic("child pointer index not found")
+		}
+
+		if currNodeIdx > 0 {
+			// check for left sibling.
+			mergeSibPid = binary.LittleEndian.Uint32((*currNodeBuff)[47:51])
+			if mergeSibPid == 0 {
+				panic("No valid left sibling found")
+			}
+		} else {
+			// first node. No left sibling.
+			// check for right sibling
+			mergeSibPid = binary.LittleEndian.Uint32((*currNodeBuff)[43:47])
+			if mergeSibPid == 0 {
+				fmt.Printf("No sibling found\nNODE PID -> %d\n", binary.LittleEndian.Uint32((*currNodeBuff)[1:5]))
+				fmt.Printf("CURR ROOT -> %d\n", bp.root.Load())
+				fmt.Println(printNodeContent(currNodeBuff))
+				panic("No sibling found")
+			}
+			leftMerge = true
+		}
+
+		mergeSib, _, err = bp.buffermanager.Get(mergeSibPid)
+		if err != nil {
+			return nil, err
+		}
+
+		if mergeSib == nil {
+			panic(fmt.Sprintf("Unable to retrieve node with pid %d", mergeSibPid))
+		}
+
+		// acquire merge sibling X-latch
+		mergeSib.Acquire(false)
+
+		mergeSibBuff, _, err = mergeSib.RawBufferSlice()
+		if err != nil {
+			return nil, err
+		}
+
+		if mergeSibBuff == nil {
+			panic("no buffer found for sibling node.")
+		}
+
+		// retrieve the appropriate seperator key. If first iteration, the immediate sep key
+		// will be stored in "sepKey" mtherwise we retrieve it from btPath
+		fmt.Printf("i == %d\tleftMerge -> %t\n", i, leftMerge)
+		if i == 0 {
+			i++
+			if leftMerge {
+				if len(sepKeys) <= 1 {
+					panic("No right seperator key provided for the left merge")
+				}
+				parSepKey = sepKeys[1]
+			} else {
+				parSepKey = sepKeys[0]
+			}
+		} else {
+			if leftMerge {
+				parSepKey, err = btPath.parentRightSepKey()
+				if err != nil {
+					panic(fmt.Sprintf("Could not retrieve seperator key: %s", err.Error()))
+				}
+			} else {
+				parSepKey, err = btPath.parentSepKey()
+				if err != nil {
+					panic(fmt.Sprintf("Could not retrieve seperator key: %s", err.Error()))
+				}
+			}
+		}
+
+		if parSepKey == nil {
+			fmt.Printf("height -> %d\n", bp.height)
+			panic("No seperator key found in parent")
+		}
+
+		fmt.Printf("Merging and deleting node %d ,left merge -> %t\n", binary.LittleEndian.Uint32((*currNodeBuff)[1:5]), leftMerge)
+		if leftMerge {
+			newSepKey, err = bp.merge(currNodeBuff, mergeSibBuff, parSepKey, leftMerge)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			newSepKey, err = bp.merge(mergeSibBuff, currNodeBuff, parSepKey, leftMerge)
+			if err != nil {
+				return nil, err
+			}
+		}
+		// Release merge sibling's latch
+		mergeSib.Release(false)
+		mergeSib.Unreference()
+
+		// retrieve parent
+		// if at leaf node level, parent node is prevNode and is already latched
+		if !helpers.BitIsSet(&(*currNodeBuff)[0], pgr.IsInternal) {
+			fmt.Println("parent is prevNode")
+			parent = prevNode
+
+			// release prevNode in BtStack
+			path := btPath.Pop()
+			fmt.Printf("Retrieved parent SepKey --> %s\n", path.sepKey)
+			// sepKey = path.sepKey
+		} else {
+			fmt.Println("parent is not prevNode")
+			parentPath := btPath.Pop()
+			if parentPath.pid == 0 {
+				panic("No parent found")
+			}
+			fmt.Printf("Retrieving parent -> %d\troot -> %d\theight -> %d\n", parentPath.pid, bp.root.Load(), bp.height)
+			parent, _, err = bp.buffermanager.Get(parentPath.pid)
+			if err != nil {
+				return nil, err
+			}
+
+			if parent == nil {
+				panic("retrieved parent node is nil.")
+			}
+
+			fmt.Printf("Acquiring exclusive latch...\n")
+			fmt.Printf("i -> %d\n", i)
+			fmt.Printf("tree height -> %d\n", bp.height)
+			fmt.Printf("root node -> %d\n", bp.root.Load())
+			fmt.Printf("current node pid --> %d\n", binary.LittleEndian.Uint32((*currNodeBuff)[1:5]))
+			parent.Acquire(false)
+			fmt.Printf("Acquired exclusive latch!\n")
+
+			// set sepkey
+			// sepKey = parentPath.sepKey
+		}
+
+		parentBuff, _, err = parent.RawBufferSlice()
+		if err != nil {
+			parent.Release(false)
+			parent.Unreference()
+			return nil, err
+		}
+
+		if newSepKey != nil {
+			// nodes rebalanced, add the new separator key to parent node
+			fmt.Println("Nodes rebalanced...")
+			_, err = replaceSepKey(parentBuff, parSepKey, newSepKey)
+			if err != nil {
+				parent.Release(false)
+				parent.Unreference()
+				return nil, err
+			}
+
+			// release latches
+			currNode.Release(false)
+			currNode.Unreference()
+			parent.Release(false)
+			parent.Unreference()
+			underflow = false
+		} else {
+			fmt.Println("Nodes merged...")
+			// nodes merged.
+			currRoot := bp.root.Load()
+			parentPid := binary.LittleEndian.Uint32((*parentBuff)[1:5])
+			parentItemCount := binary.LittleEndian.Uint32((*parentBuff)[17:21])
+			if parentItemCount == 1 && parentPid == currRoot {
+				// parent node will have only one item left after deleting merged child node.
+				// collapse tree and set remaining child as new root
+				var newRootPid uint32
+				if leftMerge {
+					// use right child
+					newRootPid = binary.LittleEndian.Uint32((*parentBuff)[39:43])
+				} else {
+					// use first child
+					offset := binary.LittleEndian.Uint32((*parentBuff)[pgr.HEADER_SIZE_BYTES+1 : pgr.HEADER_SIZE_BYTES+5])
+					if offset == 0 {
+						panic("Invalid cell offset")
+					}
+
+					newRootPid = binary.LittleEndian.Uint32((*parentBuff)[offset+9 : offset+13])
+					if newRootPid == 0 {
+						panic("Invalid new root pid")
+					}
+				}
+
+				err = bp.updateRootPage(newRootPid)
+				if err != nil {
+					panic("Unable to update root page")
+				}
+
+				err = bp.decrementTreeHeight()
+				if err != nil {
+					currNode.Release(false)
+					currNode.Unreference()
+					parent.Release(false)
+					parent.Unreference()
+					return nil, err
+				}
+
+				parent.MarkDead()
+				parent.Release(false)
+				parent.Unreference()
+				currNode.Release(false)
+				currNode.Unreference()
+				underflow = false
+			} else if parentItemCount == 1 && parentPid != rootPid {
+				fmt.Printf("currRoot -> %d\n", rootPid)
+				fmt.Printf("loaded root -> %d\n", bp.root.Load())
+				fmt.Printf("tree height --> %d\n", bp.height)
+				fmt.Printf("NODE PID -> %d\n", binary.LittleEndian.Uint32((*parentBuff)[1:5]))
+				fmt.Println(printNodeContent(parentBuff))
+				panic("Invalid state. Internal node with only one item.")
+			} else {
+				// delete key in parent node
+				_, _, err = bp.deleteFromNode(parentBuff, parSepKey, leftMerge)
+				if err != nil {
+					currNode.Release(false)
+					currNode.Unreference()
+					parent.Release(false)
+					parent.Unreference()
+					return nil, err
+				}
+				fmt.Printf("NODE AFTER DELETION OF OLD SEP KEY...\n")
+				fmt.Println(printNodeContent(parentBuff))
+
+				itemCount = binary.LittleEndian.Uint32((*parentBuff)[17:21])
+				underflow = itemCount < pgr.ORDER
+				isRoot = bp.root.Load() == binary.LittleEndian.Uint32((*parentBuff)[1:5])
+
+				currNode.Release(false)
+				currNode.Unreference()
+
+				if underflow && !isRoot {
+					currNode = parent
+					currNodeBuff = parentBuff
+
+				} else {
+					// release parent latches
+					parent.Release(false)
+					parent.Unreference()
+				}
+			}
+		}
+
+		leftMerge = false
+
+	}
+
+	fmt.Println("DEL DONE********************************************************************************************************************************************")
+	return delVal, nil
+}
+
+// nodeHasOverflown returns true if node has overflown, else false
+func nodeHasOverflown(fr *[]byte) (overflow bool, e error) {
+	if fr == nil {
+		return false, BTreeError{Message: "No node provided"}
+	}
+	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
+	return itemCount > (pgr.ORDER * 2), nil
+}
+
 // findInsertionIdx searches the frame cell pointers using binary search to
 // find the index for 'searchKey'. It returns the index where the searchKey
 // can be inserted.
-// returns idx and error if any
-func findInsertionIdx(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint32) (idx int32, e error) {
+// returns a 5 byte array with the Most Signigicant Bit(MSB) of the first byte set to 1 if
+// exact match found else 0, and error if any
+func findInsertionIdx(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint32) (idx []byte, e error) {
 	if fr == nil {
-		return -1, BTreeError{Message: "frame not provided"}
+		return nil, BTreeError{Message: "frame not provided"}
 	}
 
 	if searchKey == nil {
-		return -1, BTreeError{Message: "No search key provided"}
+		return nil, BTreeError{Message: "No search key provided"}
 	}
 
 	if startIdx > endIdx {
-		return -1, BTreeError{Message: fmt.Sprintf("(findInsertionIdx) Invalid start: %d and end: %d index", startIdx, endIdx)}
+		return nil, BTreeError{Message: fmt.Sprintf("(findInsertionIdx) Invalid start: %d and end: %d index", startIdx, endIdx)}
 	}
 
+	var index [5]byte
 	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
 	if itemCount == 0 {
 		// empty node
-		return 0, nil
+		return index[:], nil
 	}
 
 	if endIdx > itemCount-1 {
-		return -1, BTreeError{Message: fmt.Sprintf("Invalid end index: %d, with itemcount: %d", endIdx, itemCount)}
+		return nil, BTreeError{Message: fmt.Sprintf("Invalid end index: %d, with itemcount: %d", endIdx, itemCount)}
 	}
 
 	arrLen := (endIdx - startIdx) + 1
 	midPoint := startIdx + uint32(math.Round(float64(arrLen/2)))
+	maxIter := math.Round(math.Log(float64(itemCount))/math.Log(2)) + 1
+	for i := range int(maxIter) {
+		// get key at index
+		cellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+5])
+		keyLen := binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
+		key := (*fr)[cellOff+13 : cellOff+13+keyLen]
+		fmt.Printf("\n%d. key -> %s\nArrLen -> %d\tMidPoint -> %d\tstartIdx -> %d\tendIdx -> %d\n", i, key, arrLen, midPoint, startIdx, endIdx)
 
-	// get key at index
-	cellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+5])
-	keyLen := binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
-	key := (*fr)[cellOff+13 : cellOff+13+keyLen]
+		// compare
+		s := bytes.Compare(key, searchKey)
 
-	// compare
-	s := bytes.Compare(key, searchKey)
-
-	if s == 0 {
-		// found exact key
-		return int32(midPoint), nil
-	} else if s == 1 {
-		// searchKey < key
-		if itemCount == 1 {
-			return 0, nil
-		}
-		// compare with item at previous index
-		prevCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+((midPoint-1)*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+((midPoint-1)*pgr.CELL_POINTER_SIZE_BYTE)+5])
-		prevKeyLen := binary.LittleEndian.Uint32((*fr)[prevCellOff+1 : prevCellOff+5])
-		prevKey := (*fr)[prevCellOff+13 : prevCellOff+13+prevKeyLen]
-		if n := bytes.Compare(prevKey, searchKey); n < 0 {
-			// searchKey > prevKey
-			return int32(midPoint), nil
-		} else {
-			// searchKey < prevKey
-			if arrLen == 2 {
-				// check key at previous index instead of recursing
-				midPoint--
-				cellOff = binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+5])
-				keyLen = binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
-				key = (*fr)[cellOff+13 : cellOff+13+keyLen]
-
-				if s = bytes.Compare(key, searchKey); s >= 0 {
-					return int32(midPoint), nil
-				} else {
-					return int32(midPoint + uint32(1)), nil
-				}
+		switch s {
+		case 0:
+			// found exact key
+			helpers.SetFlag(&index[0], []int{exactMatchBitPos})
+			binary.LittleEndian.PutUint32(index[1:], midPoint)
+			return index[:], nil
+		case 1:
+			// searchKey < key
+			if itemCount == 1 {
+				return index[:], nil
 			}
-			return findInsertionIdx(fr, searchKey, startIdx, midPoint)
-		}
-	} else {
-		// searchkey > key
-		if itemCount == 1 {
-			return 1, nil
-		}
-
-		if arrLen == 2 {
-			// check item at next index
-			nextCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+5])
-			nextKeyLen := binary.LittleEndian.Uint32((*fr)[nextCellOff+1 : nextCellOff+5])
-			nextKey := (*fr)[nextCellOff+13 : nextCellOff+13+nextKeyLen]
-
-			if n := bytes.Compare(nextKey, searchKey); n < 0 {
-				if midPoint == endIdx {
-					return int32(midPoint + 1), nil
-				} else {
-					return int32(midPoint + 2), nil
-				}
+			// compare with item at previous index
+			prevCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+((midPoint-1)*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+((midPoint-1)*pgr.CELL_POINTER_SIZE_BYTE)+5])
+			prevKeyLen := binary.LittleEndian.Uint32((*fr)[prevCellOff+1 : prevCellOff+5])
+			prevKey := (*fr)[prevCellOff+13 : prevCellOff+13+prevKeyLen]
+			if n := bytes.Compare(prevKey, searchKey); n < 0 {
+				// searchKey > prevKey
+				binary.LittleEndian.PutUint32(index[1:], midPoint)
+				return index[:], nil
 			} else {
+				// searchKey < prevKey
 				if arrLen == 2 {
-					panic("No suitable slot could be found")
-				}
-				return int32(midPoint + 1), nil
-			}
-		}
+					// check key at previous index instead of recursing
+					midPoint--
+					cellOff = binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+5])
+					keyLen = binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
+					key = (*fr)[cellOff+13 : cellOff+13+keyLen]
 
-		return findInsertionIdx(fr, searchKey, midPoint, endIdx)
+					if s = bytes.Compare(key, searchKey); s >= 0 {
+						binary.LittleEndian.PutUint32(index[1:], midPoint)
+						return index[:], nil
+					} else {
+						binary.LittleEndian.PutUint32(index[1:], midPoint+1)
+						return index[:], nil
+						// return int32(midPoint + uint32(1)), nil
+					}
+				}
+
+				endIdx = midPoint
+				arrLen = (endIdx - startIdx) + 1
+				midPoint = startIdx + uint32(math.Round(float64(arrLen/2)))
+				// return findInsertionIdx(fr, searchKey, startIdx, midPoint)
+			}
+		default:
+			// searchkey > key
+			if itemCount == 1 {
+				binary.LittleEndian.PutUint32(index[1:], 1)
+				return index[:], nil
+				//  return 1, nil
+			}
+
+			if midPoint == endIdx {
+				// search key is greater than the last item, return midpoint+1
+				binary.LittleEndian.PutUint32(index[1:], midPoint+1)
+				return index[:], nil
+
+			}
+
+			if arrLen == 2 {
+				// check item at next index
+				nextCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+5])
+				nextKeyLen := binary.LittleEndian.Uint32((*fr)[nextCellOff+1 : nextCellOff+5])
+				nextKey := (*fr)[nextCellOff+13 : nextCellOff+13+nextKeyLen]
+				fmt.Printf("NEXT CELL OFF -> %d\n", nextCellOff)
+				fmt.Printf("NEXT KEY -> %s\n", nextKey)
+
+				if n := bytes.Compare(nextKey, searchKey); n < 0 {
+					if midPoint == endIdx {
+						binary.LittleEndian.PutUint32(index[1:], midPoint+1)
+						return index[:], nil
+						// return int32(midPoint + 1), nil
+					} else {
+						binary.LittleEndian.PutUint32(index[1:], midPoint+2)
+						return index[:], nil
+						// return int32(midPoint + 2), nil
+					}
+				} else {
+					binary.LittleEndian.PutUint32(index[1:], midPoint+1)
+					return index[:], nil
+					//  return int32(midPoint + 1), nil
+				}
+			}
+
+			startIdx = midPoint
+			arrLen = (endIdx - startIdx) + 1
+			midPoint = startIdx + uint32(math.Round(float64(arrLen/2)))
+			// return findInsertionIdx(fr, searchKey, midPoint, endIdx)
+		}
 	}
+
+	return nil, nil
 }
 
 // findKeyIndex searches the frame cell pointers using binary search to
@@ -1465,29 +2309,42 @@ func findKeyIndex(fr *[]byte, searchKey []byte, startIdx uint32, endIdx uint32) 
 }
 
 // findKeyPath Searches for a key in an internal node and
-// returns the child pointer at which to follow to retrieve the key.
-// Used when traversing the B-Tree to find the next child pointer for a
+// returns:
+//
+//   - an array of seperator keys with the seperator key used
+//     to get the child pointer at the first index and its  right neighbour
+//     on index 1 if it exists.
+//   - the child pointer array with the first 4 bytes
+//     containing the index if the child pointer and the next 4 containing the
+//     actual uint32 child pointer at which to follow to retrieve the key.
+//   - error if any.
+//
+// Used when traversing the B+ Tree to find the next child pointer for a
 // given key.
 // returns sepKey, childPtr pid, or zero if no child found and error if any
-func findKeyPath(fr *[]byte, searchKey []byte) (sepKey []byte, child uint32, e error) {
+func findKeyPath(fr *[]byte, searchKey []byte) (sepKey [][]byte, child []byte, e error) {
 	if fr == nil {
-		return nil, 0, BTreeError{Message: "frame not provided"}
+		return nil, nil, BTreeError{Message: "frame not provided"}
 	}
+	fmt.Println("====================================================================================================================================================")
 
 	internalNode := helpers.BitIsSet(&(*fr)[0], pgr.IsInternal)
 	if !internalNode {
-		return nil, 0, BTreeError{Message: "Expected internal node, got leaf node"}
+		return nil, nil, BTreeError{Message: "Expected internal node, got leaf node"}
 	}
 
 	itemCount := binary.LittleEndian.Uint32((*fr)[17:21])
 	var startIdx uint32 = 0
 	var endIdx uint32 = itemCount - 1
+	var rightKey []byte
+	childPtrArr := make([]byte, 8)
 
 	arrLen := itemCount
 	midPoint := startIdx + uint32(math.Round(float64(arrLen/2)))
 
 	// set max iterations
 	maxIter := math.Round(math.Log(float64(itemCount))/math.Log(2)) + 1
+	fmt.Printf("MAX ITERATIONS -> %.2f\n", maxIter)
 
 	for i := range int(maxIter) {
 		fmt.Printf("%d. ITEMCOUNT -> %d\tARRLEN -> %d\tMIDPOINT -> %d\tSTARTIDX: %d\tENDIDX: %d\n", i, itemCount, arrLen, midPoint, startIdx, endIdx)
@@ -1497,31 +2354,57 @@ func findKeyPath(fr *[]byte, searchKey []byte) (sepKey []byte, child uint32, e e
 		key := (*fr)[cellOff+13 : cellOff+13+keyLen]
 
 		// compare
+		fmt.Printf("Comparing keys: %s -> %s\n", searchKey, key)
 		s := bytes.Compare(key, searchKey)
 
 		switch s {
 		case 0:
 			// get pointer at midpoint+1
 			fmt.Println("Found exact key...")
+			// get key right of current key, used in left-merges
+			if midPoint != itemCount-1 {
+				cellOff = binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5])
+				keyLen = binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
+				rightKey = (*fr)[cellOff+13 : cellOff+13+keyLen]
+			}
+
 			// check if is the last key
 			if itemCount-1 == midPoint {
-				return key, binary.LittleEndian.Uint32((*fr)[39:43]), nil
+				fmt.Printf("last item ---->\n")
+				copy(childPtrArr[:4], (*fr)[17:21]) // last pointer in the node
+				copy(childPtrArr[4:], (*fr)[39:43])
+				return [][]byte{key, rightKey}, childPtrArr, nil
 			}
 			actualCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+5])
-			ptr := binary.LittleEndian.Uint32((*fr)[actualCellOff+9 : actualCellOff+13])
-			return key, ptr, nil
+			// ptr := binary.LittleEndian.Uint32((*fr)[actualCellOff+9 : actualCellOff+13])
+			binary.LittleEndian.PutUint32(childPtrArr[:4], midPoint+1)
+			copy(childPtrArr[4:], (*fr)[actualCellOff+9:actualCellOff+13]) // copy child ptr
+			return [][]byte{key, rightKey}, childPtrArr, nil
 		case -1:
 			// key < searchKey
 			fmt.Println("key < searchKey")
 			if arrLen == 1 {
 				fmt.Println("arrLen == 1")
+				fmt.Printf("midPoint -> %d\tendIdx -> %d\n", midPoint, endIdx)
+				// get key right of current key
+				if midPoint != itemCount-1 {
+					cellOff = binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5])
+					keyLen = binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
+					rightKey = (*fr)[cellOff+13 : cellOff+13+keyLen]
+				}
+
 				if itemCount-1 == midPoint {
-					return key, binary.LittleEndian.Uint32((*fr)[39:43]), nil
+					fmt.Println("> itemCount-1 == midPoint")
+					copy(childPtrArr[:4], (*fr)[17:21]) // last pointer in the node
+					copy(childPtrArr[4:], (*fr)[39:43])
+					return [][]byte{key, rightKey}, childPtrArr, nil
 				}
 				// get pointer at midpoint+1
 				actualCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+((midPoint+1)*pgr.CELL_POINTER_SIZE_BYTE)+5])
-				ptr := binary.LittleEndian.Uint32((*fr)[actualCellOff+9 : actualCellOff+13])
-				return key, ptr, nil
+				// ptr := binary.LittleEndian.Uint32((*fr)[actualCellOff+9 : actualCellOff+13])
+				binary.LittleEndian.PutUint32(childPtrArr[:4], midPoint+1)
+				copy(childPtrArr[4:], (*fr)[actualCellOff+9:actualCellOff+13]) // copy child ptr
+				return [][]byte{key, rightKey}, childPtrArr, nil
 			}
 
 			startIdx = midPoint
@@ -1530,26 +2413,36 @@ func findKeyPath(fr *[]byte, searchKey []byte) (sepKey []byte, child uint32, e e
 		default:
 			// key > searchKey; s == 1
 			fmt.Println("key > searchKey")
-			if arrLen == 1 {
-				fmt.Println("arrLen == 1")
-				// get pointer at midpoint+1
-				actualCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+5])
-				ptr := binary.LittleEndian.Uint32((*fr)[actualCellOff+9 : actualCellOff+13])
-				return key, ptr, nil
+			// get key right of current key
+			if midPoint != itemCount-1 {
+				cellOff = binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5])
+				keyLen = binary.LittleEndian.Uint32((*fr)[cellOff+1 : cellOff+5])
+				rightKey = (*fr)[cellOff+13 : cellOff+13+keyLen]
 			}
 
-			if midPoint == endIdx {
-				endIdx = midPoint - 1
-			} else {
-				endIdx = midPoint
+			if arrLen == 1 {
+				fmt.Println("arrLen == 1")
+				fmt.Println("midpoint -> ", midPoint)
+				// get pointer at midpoint
+				actualCellOff := binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(midPoint*pgr.CELL_POINTER_SIZE_BYTE)+5])
+				//  ptr := binary.LittleEndian.Uint32((*fr)[actualCellOff+9 : actualCellOff+13])
+				binary.LittleEndian.PutUint32(childPtrArr[:4], midPoint)
+				copy(childPtrArr[4:], (*fr)[actualCellOff+9:actualCellOff+13]) // copy child ptr
+				return [][]byte{key, key}, childPtrArr, nil
 			}
+
+			endIdx = midPoint - 1
+
 			arrLen = (endIdx - startIdx) + 1
 			midPoint = startIdx + uint32(math.Round(float64(arrLen/2)))
 		}
 	}
 
 	fmt.Println("Could not find appropriate child pointer")
-	return nil, 0, nil
+	fmt.Printf("Search Key -> %s\n", searchKey)
+	fmt.Println("Node -> ")
+	fmt.Println(printNodeContent(fr))
+	return nil, nil, nil
 }
 
 // defragmentNode defragments a node by getting rid of empty spaces and arranging all cells in contiguous memory location
@@ -1628,7 +2521,9 @@ func replaceSepKey(fr *[]byte, oldKey []byte, newKey []byte) (sepKeyIdx int32, e
 	}
 
 	if idx < 0 {
-		return -1, BTreeError{Message: fmt.Sprintf("Key %v not found in node.", oldKey)}
+		fmt.Printf("Node PID: %d\n", binary.LittleEndian.Uint32((*fr)[1:5]))
+		printNodeContent(fr)
+		return -1, BTreeError{Message: fmt.Sprintf("Key %s not found in node.", oldKey)}
 	}
 
 	// if new value is larger, create new cell and update offset else perform an in-place update
@@ -1723,6 +2618,11 @@ func NewBpTree(buffMan *bm.BufferManager, wal *wal.WAL) (index *BpTree, e error)
 		meta:          meta,
 		buffermanager: buffMan,
 		wal:           wal,
+	}
+
+	err = bp.initTreeMetadata()
+	if err != nil {
+		return nil, err
 	}
 
 	return bp, nil

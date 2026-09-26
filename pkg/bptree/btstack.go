@@ -1,6 +1,7 @@
 package bptree
 
 import (
+	"fmt"
 	"log"
 )
 
@@ -16,8 +17,11 @@ type TraversePath struct {
 	idx uint32
 	// this is the height of the node. root node is 0
 	height uint32
-	// seperator key used to get to this node. Used during merges/rebalances
-	sepKey uint32
+	// seperator key used to get to this node. Used during merges/rebalances. SepKey is 0 for root node
+	sepKey []byte
+	// rightKey is the key to the right of the current sepKey used
+	// for left-merges(merging to the right node) when there's no left sibling
+	rightKey []byte
 }
 
 type BTStack struct {
@@ -93,6 +97,64 @@ func (bt *BTStack) Parent() (*TraversePath, error) {
 	}
 
 	return v, nil
+}
+
+// parentSepKey returns the seperator key in the parent that was used
+// to reach the current node.
+// if none, returns nil, or error if any
+func (bt *BTStack) parentSepKey() ([]byte, error) {
+	if bt.Count <= 0 || bt.maxId == 0 {
+		return nil, BTreeError{Message: "No items in stack"}
+	}
+
+	k := bt.maxId
+	v, ok := bt.stack[k]
+
+	if !ok {
+		return nil, BTreeError{Message: "No items in stack"}
+	}
+
+	return v.sepKey, nil
+}
+
+// parentSepKey returns the key to the right of the seperator key
+// in the parent that was used to reach the current node.
+// if none, returns nil, or error if any
+func (bt *BTStack) parentRightSepKey() ([]byte, error) {
+	if bt.Count <= 0 || bt.maxId == 0 {
+		return nil, BTreeError{Message: "No items in stack"}
+	}
+
+	k := bt.maxId
+	v, ok := bt.stack[k]
+
+	if !ok {
+		return nil, BTreeError{Message: "No items in stack"}
+	}
+
+	return v.rightKey, nil
+}
+
+// parentPtrIdx returns the idx of the child pointer used to  reach current node.
+// if none, returns -1, or error if any
+func (bt *BTStack) parentPtrIdx() (int32, error) {
+	if bt.Count <= 0 || bt.maxId == 0 {
+		return -1, BTreeError{Message: "No items in stack"}
+	}
+
+	k := bt.maxId
+	v, ok := bt.stack[k]
+
+	if !ok {
+		return -1, BTreeError{Message: "No items in stack"}
+	}
+
+	fmt.Printf("parentPtrIdx(%d))....\n", v.pid)
+	fmt.Printf("sepKey -> %s\n", v.sepKey)
+	if v.rightKey != nil {
+		fmt.Printf("rightSepKey -> %s\n", v.rightKey)
+	}
+	return int32(v.idx), nil
 }
 
 func NewBTStack(root uint32) (*BTStack, error) {

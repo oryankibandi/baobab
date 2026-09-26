@@ -28,6 +28,9 @@ import (
 )
 
 const (
+	// a node's order represents the minimum number of keys it can have
+	// if a node has order d, it has d minimum no. of keys, a max of
+	// 2d keys and 2d+1 pointers.
 	ORDER                    = 2
 	PAGE_SIZE_BYTES          = 8192
 	HEADER_SIZE_BYTES        = 51
