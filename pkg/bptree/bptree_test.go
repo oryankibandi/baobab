@@ -1597,6 +1597,23 @@ func TestInsertLeafNode(t *testing.T) {
 			expectedInsertionIdx: 1,
 			isDuplicate:          true,
 		},
+		{
+			name: "insert middle node edge case",
+			keys: [][]byte{
+				[]byte("user:017e06fe6b9cc2d148d39b0a16143dbd:profileage"),
+				[]byte("user:018a6cf8c0c5034f19720a3abe03dea4:profile"),
+				[]byte("user:01ac09b5f7eb1e04fb099ff7b449796c:profile"),
+			},
+			vals: [][]byte{
+				[]byte(`{"id":"017e06fe6b9cc2d148d39b0a16143dbd","name":"User 1725","email":"user1725@example.com","active":true}`),
+				[]byte(`{"id":"018a6cf8c0c5034f19720a3abe03dea4","name":"User 411","email":"user411@example.com","active":true}`),
+				[]byte(`{"id":"01ac09b5f7eb1e04fb099ff7b449796c","name":"User 3987","email":"user3987@example.com","active":true}`),
+			},
+			insertKey:            []byte("user:01a9eadffe16c9fcb7aa2ea5228d8ee2:profile"),
+			insertVal:            []byte(`{"id":"01a9eadffe16c9fcb7aa2ea5228d8ee2","name":"User 4035","email":"user4035@example.com","active":true}`),
+			expectedInsertionIdx: 2,
+			isDuplicate:          false,
+		},
 	}
 
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
@@ -2724,11 +2741,11 @@ func TestSplitInternalNode(t *testing.T) {
 			//			/           \
 			//                     /	     \
 			//                    /               \
-			// +--------+-------+------+    +------------------+--------+-----------+
-			// |  age   | code  |      |    |  marital status  |  name  |           |
-			// +--------+-------+  88  +<-->+------------------+--------+   250     +
-			// |  25    |  66   |	   |    |       99         |  150   |           |
-			// +--------+-------+------+    +------------------+--------+------------
+			// +--------+-------+------+    +------------------+--------+---------+
+			// |  age   | code  |      |    |  marital status  |  name  |         |
+			// +--------+-------+  88  +<-->+------------------+--------+   250   +
+			// |  25    |  66   |	   |    |       99         |  150   |         |
+			// +--------+-------+------+    +------------------+--------+----------
 
 			if newFramePid == 0 {
 				t.Fatalf("Invalid frame pid: %d", newFramePid)
@@ -2743,26 +2760,25 @@ func TestSplitInternalNode(t *testing.T) {
 				t.Fatalf("Expected separator key to be %v, but got %v", test.keys[pgr.ORDER], newSepKey)
 			}
 
+			fmt.Printf("LEFT NODE AFTER SPLIT --> \n")
+			fmt.Println(printNodeContent(&node))
 			// verify keys on the left node
 			leftNodeItemCount := binary.LittleEndian.Uint32(node[17:21])
 			if leftNodeItemCount != pgr.ORDER {
 				t.Fatalf("Expected itemcount in left node to be %d, but got %d", pgr.ORDER, leftNodeItemCount)
 			}
 
+			var leftNodeTotCellSize uint32
 			for i := range leftNodeItemCount {
 				cellOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
 				cellKeySize := binary.LittleEndian.Uint32(node[cellOff+1 : cellOff+5])
+				leftNodeTotCellSize += (13 + cellKeySize)
 				key := node[cellOff+13 : cellOff+13+cellKeySize]
 				ptr := binary.LittleEndian.Uint32(node[cellOff+9 : cellOff+13])
 
 				// check that hasChildPtr flag is set
 				if !helpers.BitIsSet(&node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)], pgr.HasChildPtr) {
-					t.Fatalf("Expected \"hasChildPtr\" flag to be set")
-				}
-
-				// ensure hasChildPtr is set
-				if hasChildPtr := helpers.BitIsSet(&node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)], pgr.HasChildPtr); !hasChildPtr {
-					t.Fatalf("Expected 'HasChildPtr' flag to be set on the left node.")
+					t.Fatalf("Expected \"hasChildPtr\" flag to be set at idx: %d", i)
 				}
 
 				if !bytes.Equal(key, test.keys[i]) {
@@ -2778,6 +2794,17 @@ func TestSplitInternalNode(t *testing.T) {
 			leftNodeRightChild := binary.LittleEndian.Uint32(node[39:43])
 			if leftNodeRightChild != test.ptrs[leftNodeItemCount] {
 				t.Fatalf("Expected left node's right child to be %d, but got %d", test.ptrs[leftNodeItemCount], leftNodeRightChild)
+			}
+
+			// verify left node's lower and upper offsets
+			expectedLeftLowOff := pgr.HEADER_SIZE_BYTES + (leftNodeItemCount * pgr.CELL_POINTER_SIZE_BYTE)
+			if lOff := binary.LittleEndian.Uint32(node[29:33]); lOff != expectedLeftLowOff {
+				t.Fatalf("Expected left node's lower offset to be %d, got %d", expectedLeftLowOff, lOff)
+			}
+
+			expectedLeftUpperOff := pgr.PAGE_SIZE_BYTES - (pgr.LOWER_PADDING_BYTES + leftNodeTotCellSize)
+			if uOff := binary.LittleEndian.Uint32(node[25:29]); uOff != expectedLeftUpperOff {
+				t.Fatalf("Expected left node's upper offset to be %d, got %d", expectedLeftUpperOff, uOff)
 			}
 
 			// verify right node
@@ -2836,20 +2863,17 @@ func TestSplitInternalNode(t *testing.T) {
 				t.Fatalf("Expected rightSibling's left sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightNodeBuff)[1:5]), binary.LittleEndian.Uint32((*rightSiblingFr)[47:51]))
 			}
 
+			var rightNodeTotCellSize uint32
 			for i := range rightNodeItemCount {
 				cellOff := binary.LittleEndian.Uint32((*rightNodeBuff)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
 				cellKeySize := binary.LittleEndian.Uint32((*rightNodeBuff)[cellOff+1 : cellOff+5])
+				rightNodeTotCellSize += (13 + cellKeySize)
 				key := (*rightNodeBuff)[cellOff+13 : cellOff+13+cellKeySize]
 				ptr := binary.LittleEndian.Uint32((*rightNodeBuff)[cellOff+9 : cellOff+13])
 
 				// check that hasChildPtr flag is set
 				if !helpers.BitIsSet(&(*rightNodeBuff)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)], pgr.HasChildPtr) {
-					t.Fatalf("Expected \"hasChildPtr\" flag to be set")
-				}
-
-				// ensure hasChildPtr is set
-				if hasChildPtr := helpers.BitIsSet(&(*rightNodeBuff)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)], pgr.HasChildPtr); !hasChildPtr {
-					t.Fatalf("%d. Expected 'HasChildPtr' flag to be set on the new node.", i)
+					t.Fatalf("Expected \"hasChildPtr\" flag to be set at idx: %d", i)
 				}
 
 				if !bytes.Equal(key, test.keys[i+1+pgr.ORDER]) {
@@ -2859,6 +2883,17 @@ func TestSplitInternalNode(t *testing.T) {
 				if ptr != test.ptrs[i+pgr.ORDER+1] {
 					t.Fatalf("Expected pointer at index %d to be %d, but got %d", i, test.ptrs[i+pgr.ORDER+i], ptr)
 				}
+			}
+
+			// verify right node's lower and upper offsets
+			expectedRightLowOff := pgr.HEADER_SIZE_BYTES + (rightNodeItemCount * pgr.CELL_POINTER_SIZE_BYTE)
+			if lOff := binary.LittleEndian.Uint32((*rightNodeBuff)[29:33]); lOff != expectedRightLowOff {
+				t.Fatalf("Expected right node's lower offset to be %d, got %d", expectedRightLowOff, lOff)
+			}
+
+			expectedRightUppOff := pgr.PAGE_SIZE_BYTES - (pgr.LOWER_PADDING_BYTES + rightNodeTotCellSize)
+			if uOff := binary.LittleEndian.Uint32((*rightNodeBuff)[25:29]); uOff != expectedRightUppOff {
+				t.Fatalf("Expected right node's upper offset to be %d, got %d", expectedRightUppOff, uOff)
 			}
 
 			rightNode.Unreference()
@@ -4185,6 +4220,37 @@ func TestRebalanceInternalNode(t *testing.T) {
 			seperatorKey:  []byte("city"),
 			leftMerge:     true,
 		},
+		{
+			name: "right_node_underflow_edge_case",
+			rightNodeKeys: [][]byte{
+				[]byte("user:3492fa9c941a17684360f1691b9e83f6:profile"),
+			},
+			rightNodePtrs: []uint32{27, 29},
+			leftNodeKeys: [][]byte{
+				[]byte("user:0bea13f848993c239eae636f630caeef:profile"),
+				[]byte("user:1023f73dc1137bba14f4a61b05536f92:profile"),
+				[]byte("user:15abbb159b0112d6b17a4f30984bce87:profile"),
+				[]byte("user:18208b6baed1be771e0f498bffaabdc5:profile"),
+			},
+			leftNodePtrs: []uint32{43, 11, 56, 16, 50},
+			seperatorKey: []byte("user:1e3189549cf15336c6cc8cc020884999:profile"),
+			leftMerge:    true,
+		},
+		{
+			name: "left_node_underflow_edge_case",
+			leftNodeKeys: [][]byte{
+				[]byte("user:72a096195421dd8d3e7ac940b0623231:profile"),
+			},
+			leftNodePtrs: []uint32{19, 34},
+			rightNodeKeys: [][]byte{
+				[]byte("user:823ba7b74c0f6687789a9a8b04bdcd54:profile"),
+				[]byte("user:888f1185deae8949e380ed925d47a7e4:profile"),
+				[]byte("user:8d82934ba30c43fc6f0edc65ab3ce23b:profile"),
+			},
+			rightNodePtrs: []uint32{6, 46, 22, 55},
+			seperatorKey:  []byte("user:7f51fcbb33d64c61c734604c935fd420:profile"),
+			leftMerge:     true,
+		},
 	}
 
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
@@ -4313,6 +4379,11 @@ func TestRebalanceInternalNode(t *testing.T) {
 		var prevKey []byte
 		// check items in left node
 		for i := range leftNodeItemCount {
+			// ensure  'hasChildPtr' flag is set
+			if fl := helpers.BitIsSet(&leftNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)], pgr.HasChildPtr); !fl {
+				t.Fatalf("(%s) Expected 'hasChildPtr' flag to be set on left node at index: %d", test.name, i)
+			}
+
 			cellOff = binary.LittleEndian.Uint32(leftNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
 			kLen := binary.LittleEndian.Uint32(leftNode[cellOff+1 : cellOff+5])
 			currKey := leftNode[cellOff+13 : cellOff+13+kLen]
@@ -4333,6 +4404,10 @@ func TestRebalanceInternalNode(t *testing.T) {
 		cellOff = 0
 		clear(prevKey)
 		for i := range rightNodeItemCount {
+			if fl := helpers.BitIsSet(&rightNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)], pgr.HasChildPtr); !fl {
+				t.Fatalf("(%s) Expected 'hasChildPtr' flag to be set on right node at index: %d", test.name, i)
+			}
+
 			cellOff = binary.LittleEndian.Uint32(rightNode[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+1 : pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*i)+5])
 			kLen := binary.LittleEndian.Uint32(rightNode[cellOff+1 : cellOff+5])
 			currKey := rightNode[cellOff+13 : cellOff+13+kLen]
@@ -4800,7 +4875,8 @@ func TestSingleDeleteFromBpTree(t *testing.T) {
 }
 
 func TestDeleteFromBpTree(t *testing.T) {
-	testIterations := 10
+	testIterations := 1
+	keysPerTest := 8192
 	for i := range testIterations {
 		ok := t.Run(fmt.Sprintf("TestDeleteFromBpTree: iteration_%d", i), func(t *testing.T) {
 			t.Logf("-------------------------------------")
@@ -4846,7 +4922,7 @@ func TestDeleteFromBpTree(t *testing.T) {
 				t.Fatalf("expected B+ index got nil")
 			}
 
-			tests, err := generateKV((pgr.ORDER * 2) * 32) // 128 values
+			tests, err := generateKV(keysPerTest)
 			if err != nil {
 				panic(err.Error())
 			}

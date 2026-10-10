@@ -127,7 +127,6 @@ func (fl *FreeList) flushFreeList(c *chan int) {
 
 	fl.dirty = false
 	*c <- written
-
 }
 
 // Called during startup to read the free list from disk

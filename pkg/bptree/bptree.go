@@ -163,7 +163,7 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 	var cellSize uint32
 	var newFrCellPtrIdx uint32
 	var newFrCellOffset uint32 = pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES
-	leftNodeUpperOffset := binary.LittleEndian.Uint32((*fr)[25:29])
+	var leftNodeUpperOffset uint32
 	for i := uint32(pgr.ORDER); i < itemCount; i++ {
 		cellOff = binary.LittleEndian.Uint32((*fr)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE+5])
 
@@ -177,6 +177,13 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 			// first sep key promoted to parent
 			seperatorKey = make([]byte, cellKeySize)
 			copy(seperatorKey, (*fr)[cellOff+13:cellOff+13+cellKeySize])
+
+			// set current cell offset as left node's upper offset after split as it will
+			// be the last item in the page after split. If node is fragmented and there's
+			// possibly other cells beyond this, the defragmentNode() fxn will handle that.
+			leftNodeUpperOffset = cellOff + cellSize
+			fmt.Printf("CELLSIZE AT i = ORDER --> %d\n", cellSize)
+			fmt.Printf("KEY TO PROMOTE ---> %s\n", seperatorKey)
 			if isInternal {
 				// store old right child metadata and update to new right child(curr cell page pointer)
 				rightNodeRightPtr = binary.LittleEndian.Uint32((*fr)[39:43])
@@ -187,7 +194,6 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 
 		// update cell offset in new frame cell pointer
 		newFrCellOffset -= cellSize
-		// binary.LittleEndian.PutUint32(cellPtr[1:], uint32(newFrCellOffset))
 		if i == pgr.ORDER {
 			newFrCellPtrIdx = 0
 		} else {
@@ -210,8 +216,8 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 
 		// update upper offset
 		binary.LittleEndian.PutUint32((*newFrBuff)[25:29], newFrCellOffset)
-		leftNodeUpperOffset += cellSize
-		binary.LittleEndian.PutUint32((*fr)[25:29], leftNodeUpperOffset)
+		// leftNodeUpperOffset += cellSize
+		// binary.LittleEndian.PutUint32((*fr)[25:29], leftNodeUpperOffset)
 
 		// update cell offset
 		// newFrCellOffset -= cellSize
@@ -220,6 +226,13 @@ func (bp *BpTree) split(fr *[]byte) (sepKey []byte, newFramePid uint32, e error)
 		clear((*fr)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE) : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE])
 		clear((*fr)[cellOff:cellEndOff])
 	}
+
+	// set left node's upper offset
+	if leftNodeUpperOffset == 0 {
+		panic("Invalid left node upper offset: 0")
+	}
+	fmt.Printf("SETTING LEFT NODE'S UPER OFFSET TO => %d\n", leftNodeUpperOffset)
+	binary.LittleEndian.PutUint32((*fr)[25:29], leftNodeUpperOffset)
 
 	// update new node's right child
 	binary.LittleEndian.PutUint32((*newFrBuff)[39:43], rightNodeRightPtr)
@@ -443,13 +456,14 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			fmt.Println(printNodeContent(leftNode))
 			fmt.Printf("RIGHT NODE ->\n")
 			fmt.Println(printNodeContent(rightNode))
-			var ptr uint32
+			// var ptr uint32
 			fmt.Printf("Donor direction --> %t\n", donorDirection)
 			if !donorDirection {
 				// ptr, _, e = bp.deleteFromNode(rightNode, newSeperatorKey, true)
 				newSepKey, e = bp.promoteNewSeperatorKey(rightNode)
 			} else {
-				ptr, _, e = bp.deleteFromNode(rightNode, newSeperatorKey, false)
+				// ptr, _, e = bp.deleteFromNode(rightNode, newSeperatorKey, false)
+				newSepKey, e = bp.promoteNewSeperatorKey(rightNode)
 			}
 
 			if e != nil {
@@ -457,9 +471,9 @@ func (bp *BpTree) merge(leftNode *[]byte, rightNode *[]byte, sepKey []byte, left
 			}
 
 			// ptr should be 0, since we demoted the seperator key without any child pointer
-			if ptr != 0 {
-				panic(fmt.Errorf("expected no pointer but got, %d", ptr))
-			}
+			// if ptr != 0 {
+			// 	panic(fmt.Errorf("expected no pointer but got, %d", ptr))
+			// }
 		}
 
 		// mark both nodes dirty
@@ -709,7 +723,7 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 				copy((*fr)[cellStartOff+13+uint32(oldKeyLen):cellStartOff+13+uint32(oldKeyLen)+uint32(valLen)], val)
 				binary.LittleEndian.PutUint32((*fr)[cellStartOff+5:cellStartOff+9], uint32(valLen))
 
-				// update cellOffset  and upper  offset
+				// update cellOffset  and upper offset
 				binary.LittleEndian.PutUint32((*fr)[ptrOff+1:ptrOff+5], cellStartOff)
 				binary.LittleEndian.PutUint32((*fr)[25:29], cellStartOff)
 			}
@@ -722,6 +736,7 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 	cOff = binary.LittleEndian.Uint32((*fr)[ptrOff+1 : ptrOff+5])
 	prevCellHasChildPtr := helpers.BitIsSet(&(*fr)[ptrOff], pgr.HasChildPtr)
 	fmt.Printf("PRINTING CELL CONTENTS BEFORE UPDATE inserting -> %s -----------------------------------\n", key)
+	fmt.Printf("WRITE CELL CONTENTS AT OFFSET --> %d\n", cellStartOff)
 	fmt.Printf("Insert IDX -> %d\tItem Count -> %d\n", insertIdx, itemCount)
 	printNodeContent(fr)
 
@@ -799,6 +814,11 @@ func (bp *BpTree) insertToFrame(fr *[]byte, key []byte, childPtr uint32, val []b
 		if internal && (childPtr == 0 || !prevCellHasChildPtr) {
 			fmt.Println("childPtr is 0")
 			helpers.UnsetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
+
+			if childPtr != 0 && !prevCellHasChildPtr {
+				// current cell pointer now has no child ptr, set the 'hasChildPtr' flag on the prev cell
+				helpers.SetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)+pgr.CELL_POINTER_SIZE_BYTE], []int{pgr.HasChildPtr})
+			}
 		} else if internal && childPtr != 0 {
 			helpers.SetFlag(&(*fr)[pgr.HEADER_SIZE_BYTES+(insertIdx*pgr.CELL_POINTER_SIZE_BYTE)], []int{pgr.HasChildPtr})
 			fmt.Println("childPtr is not 0")
@@ -956,7 +976,9 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 				helpers.UnsetFlag(&(*fr)[ptrOff+pgr.CELL_POINTER_SIZE_BYTE], []int{pgr.HasChildPtr})
 			}
 		} else {
-			deletedChildPtr = binary.LittleEndian.Uint32((*fr)[cOff+9 : cOff+13])
+			if hasChildPtr {
+				deletedChildPtr = binary.LittleEndian.Uint32((*fr)[cOff+9 : cOff+13])
+			}
 		}
 
 		// shift cell pointers
@@ -974,7 +996,6 @@ func (bp *BpTree) deleteFromNode(fr *[]byte, key []byte, leftMerge bool) (ptr ui
 // promoteNewSeperatorKey - returns the left most key of the frame.
 // if frame is an internal frame, delete key from node
 func (bp *BpTree) promoteNewSeperatorKey(fr *[]byte) (newSepKey []byte, e error) {
-	fmt.Println("PROMOTENEWSEPKEY --> ")
 	if fr == nil {
 		return nil, BTreeError{Message: "No frame provided."}
 	}
@@ -1008,6 +1029,8 @@ func (bp *BpTree) promoteNewSeperatorKey(fr *[]byte) (newSepKey []byte, e error)
 		binary.LittleEndian.PutUint32((*fr)[29:33], lowOff-pgr.CELL_POINTER_SIZE_BYTE)
 		binary.LittleEndian.PutUint32((*fr)[17:21], itemCount-1)
 	}
+
+	fmt.Printf("PROMOTENEWSEPKEY --> %s\n", sepKey)
 
 	return sepKey, nil
 }
@@ -1997,6 +2020,7 @@ func (bp *BpTree) Delete(key []byte) (val []byte, e error) {
 			if parentItemCount == 1 && parentPid == currRoot {
 				// parent node will have only one item left after deleting merged child node.
 				// collapse tree and set remaining child as new root
+				fmt.Println("collapse tree...")
 				var newRootPid uint32
 				if leftMerge {
 					// use right child
@@ -2480,6 +2504,7 @@ func defragmentNode(fr *[]byte) error {
 		// update upper offset, copy over defragmented node
 		binary.LittleEndian.PutUint32(temp[25:29], expectedCellOff)
 		copy((*fr), temp)
+		fmt.Printf("(DEFRAGMENT NODE) SETTING DEFRAGMENTED NODE UPPER OFFSET TO -> %d", expectedCellOff)
 	}
 
 	return nil
@@ -2588,6 +2613,11 @@ func printNodeContent(fr *[]byte) string {
 			ptrs = append(ptrs, binary.LittleEndian.Uint32((*fr)[cellOff+9:cellOff+13]))
 		} else {
 			vals = append(vals, (*fr)[cellOff+13+kLen:cellOff+13+kLen+valLen])
+		}
+
+		// FIX: Remove debug code below
+		if i == itemCount-1 {
+			fmt.Printf("LAST ITEM CELL OFFSET --> %d\n", cellOff)
 		}
 	}
 
