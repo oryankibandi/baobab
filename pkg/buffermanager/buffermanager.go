@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/logger"
 	pager "github.com/oryankibandi/baobab/pkg/pager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 
@@ -23,6 +24,11 @@ const (
 	LSN_SIZE = 12
 	// minimum cache size in KB
 	MIN_CACHE_SIZE_KB = 8192 // 65536 // 64MB
+)
+
+// logger metadata
+const (
+	PKG_NAME = "buffermanager"
 )
 
 type CacheConfig struct {
@@ -42,6 +48,9 @@ type BufferManager struct {
 	wg        sync.WaitGroup
 	shards    []*shard
 	numShards uint64
+
+	// logger
+	lgger *logger.BaobabLogger
 }
 
 // Delete removes the frame with pid provided.
@@ -105,6 +114,7 @@ func (c *BufferManager) GetFromShard(pid uint32, shardId uint64) (f *Frame, e er
 func (c *BufferManager) NewFrame(internal bool, setAsRoot bool) (*Frame, error) {
 	newPid := c.pager.NewPageId()
 	idx := c.getShard(newPid)
+	c.lgger.Write(PKG_NAME, "NewFrame", logger.LevelDebug, fmt.Sprintf("page ID %d assigned to shard %d\n", newPid, idx), nil)
 
 	fr, err := c.shards[idx].newFrame(internal, setAsRoot, newPid)
 
@@ -159,18 +169,19 @@ func (c *BufferManager) Close() error {
 	for _, sh := range c.shards {
 		c.wg.Add(1)
 		go func() {
-			fmt.Printf("(shard %d/%d) terminating shard...\n", sh.shardId, c.numShards)
+			c.lgger.Write(PKG_NAME, "Close", logger.LevelDebug, fmt.Sprintf("(shard %d/%d) terminating shard...\n", sh.shardId, c.numShards), nil)
 			defer c.wg.Done()
 			sh.close()
-			fmt.Printf("(shard %d) shard terminated...\n", sh.shardId)
+			c.lgger.Write(PKG_NAME, "Close", logger.LevelDebug, fmt.Sprintf("(shard %d) shard terminated...\n", sh.shardId), nil)
 		}()
 	}
 	c.wg.Wait()
+	c.lgger.Write(PKG_NAME, "Close", logger.LevelDebug, "closed buffermanager...", nil)
 
 	if c.pager != nil {
-		helpers.PrintInfoMsg("terminating pager...")
+		c.lgger.Write(PKG_NAME, "Close", logger.LevelDebug, "terminating pager...", nil)
 		c.pager.Close()
-		helpers.PrintInfoMsg("pager terminated successfully.")
+		c.lgger.Write(PKG_NAME, "Close", logger.LevelDebug, "pager terminated successfully.", nil)
 	}
 
 	return nil
@@ -186,7 +197,7 @@ func (c *BufferManager) Close() error {
 //		  to numCPU
 //
 // Returns:
-func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager, testing bool) (*BufferManager, error) {
+func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager, testing bool, lgger *logger.BaobabLogger) (*BufferManager, error) {
 	if cacheConfig.CacheSize < MIN_CACHE_SIZE_KB {
 		return nil, BufferManagerError{Message: fmt.Sprintf("Minimum cache size is %dKB", MIN_CACHE_SIZE_KB)}
 	}
@@ -197,6 +208,10 @@ func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager, t
 
 	if pgr == nil {
 		return nil, BufferManagerError{Message: "pager instance  not provided."}
+	}
+
+	if lgger == nil {
+		return nil, BufferManagerError{Message: "logger instance  not provided."}
 	}
 
 	numCPU := runtime.NumCPU()
@@ -213,12 +228,13 @@ func NewBufferManager(cacheConfig CacheConfig, wal *wal.WAL, pgr *pager.Pager, t
 		shards:    make([]*shard, cacheConfig.numShards),
 		hasher:    tiny.NewMapHash(),
 		pager:     pgr,
+		lgger:     lgger,
 	}
 
 	metadataShard := bufferMan.getShard(0)
 
 	for i := range cacheConfig.numShards {
-		sh, err := newShard(uint64(i), wal, pgr, perShardCacheSize, i == metadataShard)
+		sh, err := newShard(uint64(i), wal, pgr, perShardCacheSize, i == metadataShard, lgger)
 		if err != nil {
 			return nil, err
 		}

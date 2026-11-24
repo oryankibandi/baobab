@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/oryankibandi/baobab/pkg/buffermanager"
@@ -1626,7 +1627,7 @@ func TestInsertLeafNode(t *testing.T) {
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -1647,7 +1648,7 @@ func TestInsertLeafNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -1696,6 +1697,11 @@ func TestInsertLeafNode(t *testing.T) {
 			t.Fatalf("(%s) Expected key to be inserted at idx %d, got %d", test.name, test.expectedInsertionIdx, idx)
 		}
 
+		// check that node is marked dirty
+		if !helpers.BitIsSet(&node[0], pgr.Dirty) {
+			t.Fatalf("Expected node to be marked dirty")
+		}
+
 		// check upper and lower offset
 		if l := binary.LittleEndian.Uint32(node[29:33]); l != expectedLowOff {
 			t.Fatalf("(%s) Expected updated lower offset to be %d but got %d", test.name, expectedLowOff, l)
@@ -1721,21 +1727,21 @@ func TestInsertFullLeafNode(t *testing.T) {
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
-	pgr := InitPager(t)
+	pagr := InitPager(t)
 
 	// initialize buffer manager
 	cConfig := buffermanager.CacheConfig{
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
-		pgr.Close()
+		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
 
 	if buffManager == nil {
-		pgr.Close()
+		pagr.Close()
 		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
 	}
 
@@ -1749,7 +1755,7 @@ func TestInsertFullLeafNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -1759,8 +1765,18 @@ func TestInsertFullLeafNode(t *testing.T) {
 	}
 
 	// leaf node
-	keys := [][]byte{[]byte("user:1617d0e6434529cb3cf14b8b3731c069:profile"), []byte("user:6cd13ce83743c1f9199c14bf319d7002:profile"), []byte("user:ac16bba68f0aa11e8c6430abe706c81c:profile"), []byte("user:b328596859c34354066dcf5e4908058f:profile"), []byte("user:c8f6859380e9e97391eaa39ab98f1bb3:profile")}
-	vals := [][]byte{[]byte("{\"id\":\"1617d0e6434529cb3cf14b8b3731c069\",\"name\":\"User 0\",\"email\":\"user0@example.com\",\"active\":true}"), []byte("{\"id\":\"6cd13ce83743c1f9199c14bf319d7002\",\"name\":\"User 5\",\"email\":\"user5@example.com\",\"active\":true}"), []byte("{\"id\":\"ac16bba68f0aa11e8c6430abe706c81c\",\"name\":\"User 4\",\"email\":\"user4@example.com\",\"active\":true}"), []byte("{\"id\":\"b328596859c34354066dcf5e4908058f\",\"name\":\"User 6\",\"email\":\"user6@example.com\",\"active\":true}"), []byte("{\"id\":\"c8f6859380e9e97391eaa39ab98f1bb3\",\"name\":\"User 7\",\"email\":\"user7@example.com\",\"active\":true}")}
+	keys := [][]byte{
+		[]byte("user:1617d0e6434529cb3cf14b8b3731c069:profile"),
+		[]byte("user:6cd13ce83743c1f9199c14bf319d7002:profile"),
+		[]byte("user:ac16bba68f0aa11e8c6430abe706c81c:profile"),
+		[]byte("user:b328596859c34354066dcf5e4908058f:profile"),
+		[]byte("user:c8f6859380e9e97391eaa39ab98f1bb3:profile")}
+	vals := [][]byte{
+		[]byte(`{"id":"1617d0e6434529cb3cf14b8b3731c069","name":"User 0","email":"user0@example.com","active":true}`),
+		[]byte(`{"id":"6cd13ce83743c1f9199c14bf319d7002","name":"User 5","email":"user5@example.com","active":true}`),
+		[]byte(`{"id":"ac16bba68f0aa11e8c6430abe706c81c","name":"User 4","email":"user4@example.com","active":true}`),
+		[]byte(`{"id":"b328596859c34354066dcf5e4908058f","name":"User 6","email":"user6@example.com","active":true}`),
+		[]byte(`{"id":"c8f6859380e9e97391eaa39ab98f1bb3","name":"User 7","email":"user7@example.com","active":true}`)}
 	node := createTestLeafNode(25, nil, nil)
 
 	// insertKey := []byte("user:c8f6859380e9e97391eaa39ab98f1bb3:profile")
@@ -1780,6 +1796,11 @@ func TestInsertFullLeafNode(t *testing.T) {
 
 		if idx != int32(expectedInsertionIdx) {
 			t.Fatalf("Expected key to be inserted at idx %d, got %d", expectedInsertionIdx, idx)
+		}
+
+		// check that node is marked dirty
+		if !helpers.BitIsSet(&node[0], pgr.Dirty) {
+			t.Fatalf("Expected node to be marked dirty")
 		}
 	}
 
@@ -1894,7 +1915,7 @@ func TestInsertInternalNode(t *testing.T) {
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -1915,7 +1936,7 @@ func TestInsertInternalNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -1985,6 +2006,11 @@ func TestInsertInternalNode(t *testing.T) {
 			t.Fatalf("(%s) Expected inserted child pointer to be %d, but got %d", test.name, test.insertPtr, ptr)
 		}
 
+		// check that node is marked dirty
+		if !helpers.BitIsSet(&node[0], pgr.Dirty) {
+			t.Fatalf("Expected node to be marked dirty")
+		}
+
 		// check that all cell pointers  have 'hasChildPtr' flag set
 		for j := range itemCount {
 			if !helpers.BitIsSet(&node[pgr.HEADER_SIZE_BYTES+(pgr.CELL_POINTER_SIZE_BYTE*j)], pgr.HasChildPtr) {
@@ -2008,7 +2034,7 @@ func TestDeleteKeyInternalNode(t *testing.T) {
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -2029,7 +2055,7 @@ func TestDeleteKeyInternalNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -2178,21 +2204,21 @@ func TestDeleteKeyLeafNode(t *testing.T) {
 	lgr := logger.NewLogger("", logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
-	pgr := InitPager(t)
+	pagr := InitPager(t)
 
 	// initialize buffer manager
 	cConfig := buffermanager.CacheConfig{
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
-		pgr.Close()
+		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
 
 	if buffManager == nil {
-		pgr.Close()
+		pagr.Close()
 		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
 	}
 
@@ -2206,7 +2232,7 @@ func TestDeleteKeyLeafNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -2275,6 +2301,11 @@ func TestDeleteKeyLeafNode(t *testing.T) {
 		t.Fatalf("Expected no error, got %s", err.Error())
 	}
 
+	// ensure node is marked dirty
+	if !helpers.BitIsSet(&(node[0]), pgr.Dirty) {
+		t.Fatalf("Expected node to be marked dirty after deletion.")
+	}
+
 	if !bytes.Equal(v, deleteVal) {
 		t.Fatalf("Expected deleted value to be \"%s\" but got \"%s\"", deleteVal, v)
 	}
@@ -2301,7 +2332,7 @@ func TestGetFirstAndLastKeyInternalNode(t *testing.T) {
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -2322,7 +2353,7 @@ func TestGetFirstAndLastKeyInternalNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -2366,7 +2397,7 @@ func TestGetFirstAndLastItemLeafNode(t *testing.T) {
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -2387,7 +2418,7 @@ func TestGetFirstAndLastItemLeafNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -2430,7 +2461,7 @@ func TestSplitLeafNoUnderflow(t *testing.T) {
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -2451,7 +2482,7 @@ func TestSplitLeafNoUnderflow(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -2481,7 +2512,7 @@ func TestSplitInternalNoUnderflow(t *testing.T) {
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -2502,7 +2533,7 @@ func TestSplitInternalNoUnderflow(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -2533,7 +2564,7 @@ func TestSplitInternalNode(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -2554,7 +2585,7 @@ func TestSplitInternalNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -2678,6 +2709,17 @@ func TestSplitInternalNode(t *testing.T) {
 			},
 			ptrs: []uint32{8, 16, 32, 64, 128, 256},
 		},
+		{
+			name: "long_keys",
+			keys: [][]byte{
+				[]byte("user:367c34c436f6547a627b14793d9570ec:profile"),
+				[]byte("user:4bc06623c93ccc7801d517b535b4745f:profile"),
+				[]byte("user:84d6d51099bc3b16b0bb16bc83befdbf:profile"),
+				[]byte("user:974fbf29f6580510f1cbe0af905b031b:profile"),
+				[]byte("user:c02ccfb419d665a867e9de8ce92637b3:profile"),
+			},
+			ptrs: []uint32{1, 4, 6, 2, 7, 5},
+		},
 	}
 
 	// example overflown internal node with order 2
@@ -2772,10 +2814,16 @@ func TestSplitInternalNode(t *testing.T) {
 			for i := range leftNodeItemCount {
 				cellOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
 				cellKeySize := binary.LittleEndian.Uint32(node[cellOff+1 : cellOff+5])
-				leftNodeTotCellSize += (13 + cellKeySize)
 				key := node[cellOff+13 : cellOff+13+cellKeySize]
 				ptr := binary.LittleEndian.Uint32(node[cellOff+9 : cellOff+13])
 
+				// check cell offset
+				expectedCellOff := pgr.PAGE_SIZE_BYTES - (pgr.LOWER_PADDING_BYTES + leftNodeTotCellSize + (13 + cellKeySize))
+				if cellOff != expectedCellOff {
+					t.Fatalf("Expected cell offset at idx %d to be %d, got %d\n", i, expectedCellOff, cellOff)
+				}
+
+				leftNodeTotCellSize += (13 + cellKeySize)
 				// check that hasChildPtr flag is set
 				if !helpers.BitIsSet(&node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)], pgr.HasChildPtr) {
 					t.Fatalf("Expected \"hasChildPtr\" flag to be set at idx: %d", i)
@@ -2803,6 +2851,7 @@ func TestSplitInternalNode(t *testing.T) {
 			}
 
 			expectedLeftUpperOff := pgr.PAGE_SIZE_BYTES - (pgr.LOWER_PADDING_BYTES + leftNodeTotCellSize)
+			t.Logf("ExpectedLeftNode Upper Offset --> %d\n", expectedLeftUpperOff)
 			if uOff := binary.LittleEndian.Uint32(node[25:29]); uOff != expectedLeftUpperOff {
 				t.Fatalf("Expected left node's upper offset to be %d, got %d", expectedLeftUpperOff, uOff)
 			}
@@ -2827,12 +2876,12 @@ func TestSplitInternalNode(t *testing.T) {
 			fmt.Println("RIGHT NODE -> ")
 			fmt.Println(printNodeContent(rightNodeBuff))
 
-			// ensure node was marked as dirty
+			// ensure new node was marked as dirty
 			if !helpers.BitIsSet(&(*rightNodeBuff)[0], pgr.Dirty) {
-				// if test is ran with background writer enabled,
+				// NOTE: if test is ran with background writer enabled,
 				// the page could already be flushed and marked
 				// clean, causing this to fail
-				t.Fatalf("(%s) Expected new node to be marked as dirty.", t.Name())
+				t.Logf("(%s) WARNING Expected new node to be marked as dirty. If test is ran with background writer enabled, the page could already be flushed and marked clean, causing this warning", t.Name())
 			}
 
 			rightNodeRightChild := binary.LittleEndian.Uint32((*rightNodeBuff)[39:43])
@@ -2861,6 +2910,19 @@ func TestSplitInternalNode(t *testing.T) {
 
 			if !bytes.Equal((*rightSiblingFr)[47:51], (*rightNodeBuff)[1:5]) {
 				t.Fatalf("Expected rightSibling's left sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightNodeBuff)[1:5]), binary.LittleEndian.Uint32((*rightSiblingFr)[47:51]))
+			}
+
+			// ensure all modified nodes are marked dirty
+			if !helpers.BitIsSet(&(node[0]), pgr.Dirty) {
+				t.Fatalf("Expected leftNode to be marked dirty.")
+			}
+
+			if !helpers.BitIsSet(&(*rightNodeBuff)[0], pgr.Dirty) {
+				t.Fatalf("Expected newNode to be marked dirty.")
+			}
+
+			if !helpers.BitIsSet(&(*rightSiblingFr)[0], pgr.Dirty) {
+				t.Fatalf("Expected rightSibling to be marked dirty.")
 			}
 
 			var rightNodeTotCellSize uint32
@@ -2912,7 +2974,7 @@ func TestSplitLeafNode(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -2933,7 +2995,7 @@ func TestSplitLeafNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -3216,6 +3278,8 @@ func TestSplitLeafNode(t *testing.T) {
 			t.Fatalf("Expected itemcount in left node to be %d, but got %d", pgr.ORDER, leftNodeItemCount)
 		}
 
+		var totLeftNodeCellSize uint32 = 0
+		var lastKey []byte
 		for i := range leftNodeItemCount {
 			cellOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
 			cellKeySize := binary.LittleEndian.Uint32(node[cellOff+1 : cellOff+5])
@@ -3230,6 +3294,17 @@ func TestSplitLeafNode(t *testing.T) {
 			if !bytes.Equal(val, test.vals[i]) {
 				t.Fatalf("Expected value at index %d to be %v, but got %v", i, test.vals[i], val)
 			}
+
+			if i > 0 {
+				if bytes.Compare(lastKey, key) > -1 {
+					t.Fatalf("Expected current key: %s, to be greater than previous key: %s", key, lastKey)
+				}
+			}
+
+			lastKey = make([]byte, cellKeySize)
+			copy(lastKey, key)
+
+			totLeftNodeCellSize += 13 + cellKeySize + valLen
 		}
 
 		// verify left node lower offset
@@ -3239,15 +3314,14 @@ func TestSplitLeafNode(t *testing.T) {
 		}
 
 		// verfiy left node's upper offset
-		totLeftNodeCellSize := 0
-		for i := range pgr.ORDER {
-			kLen := len(test.keys[i])
-			vLen := len(test.vals[i])
-			totLeftNodeCellSize += 13 + kLen + vLen
-		}
+
+		// for i := range leftNodeItemCount {
+		// 	kLen := len(test.keys[i])
+		// 	vLen := len(test.vals[i])
+		// 	totLeftNodeCellSize += 13 + kLen + vLen
+		// }
 
 		expectedLeftNodeUppOff := (pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES) - (totLeftNodeCellSize)
-
 		if lUpp := binary.LittleEndian.Uint32(node[25:29]); lUpp != uint32(expectedLeftNodeUppOff) {
 			t.Fatalf("Expected left node's upper offset to be %d but got %d", expectedLeftNodeUppOff, lUpp)
 		}
@@ -3299,6 +3373,7 @@ func TestSplitLeafNode(t *testing.T) {
 			t.Fatalf("Expected rightSibling's left sibling to be %d, but got %d", binary.LittleEndian.Uint32((*rightNodeBuff)[1:5]), binary.LittleEndian.Uint32((*rightSiblingFr)[47:51]))
 		}
 
+		var totRightNodeCellSize uint32 = 0
 		for i := range rightNodeItemCount {
 			cellOff := binary.LittleEndian.Uint32((*rightNodeBuff)[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
 			cellKeySize := binary.LittleEndian.Uint32((*rightNodeBuff)[cellOff+1 : cellOff+5])
@@ -3313,6 +3388,15 @@ func TestSplitLeafNode(t *testing.T) {
 			if !bytes.Equal(val, test.vals[i+pgr.ORDER]) {
 				t.Fatalf("Expected val at index %d to be %v, but got %v", i, test.vals[i+pgr.ORDER], val)
 			}
+
+			if bytes.Compare(lastKey, key) > -1 {
+				t.Fatalf("Expected current key: %s to be greater than previous key: %s", key, lastKey)
+			}
+
+			lastKey = make([]byte, cellKeySize)
+			copy(lastKey, key)
+
+			totRightNodeCellSize += 13 + cellKeySize + valSize
 		}
 
 		// verify right node lower offset
@@ -3322,16 +3406,15 @@ func TestSplitLeafNode(t *testing.T) {
 		}
 
 		// verfiy right node's upper offset
-		totRightNodeCellSize := 0
-		for i := pgr.ORDER; i < len(test.keys); i++ {
-			kLen := len(test.keys[i])
-			vLen := len(test.vals[i])
-			totRightNodeCellSize += 13 + kLen + vLen
-			fmt.Printf("CELL SIZE --> %d\n", (13 + kLen + vLen))
-		}
+
+		// for i := pgr.ORDER; i < len(test.keys); i++ {
+		// 	kLen := len(test.keys[i])
+		// 	vLen := len(test.vals[i])
+		// 	totRightNodeCellSize += 13 + kLen + vLen
+		// 	fmt.Printf("CELL SIZE --> %d\n", (13 + kLen + vLen))
+		// }
 
 		expectedRightNodeUppOff := (pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES) - (totRightNodeCellSize)
-
 		if rUpp := binary.LittleEndian.Uint32((*rightNodeBuff)[25:29]); rUpp != uint32(expectedRightNodeUppOff) {
 			t.Fatalf("Expected right node's upper offset to be %d but got %d", expectedLeftNodeUppOff, rUpp)
 		}
@@ -3349,7 +3432,7 @@ func TestMergeNoUnderflowInternalNode(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -3370,7 +3453,7 @@ func TestMergeNoUnderflowInternalNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -3414,7 +3497,7 @@ func TestMergeNoUnderflowLeafNode(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -3435,7 +3518,7 @@ func TestMergeNoUnderflowLeafNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -3486,7 +3569,7 @@ func TestMergeInternalRightToLeft(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -3507,7 +3590,7 @@ func TestMergeInternalRightToLeft(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -3680,7 +3763,7 @@ func TestMergeLeafRightToLeft(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -3701,7 +3784,7 @@ func TestMergeLeafRightToLeft(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -3783,10 +3866,15 @@ func TestMergeLeafRightToLeft(t *testing.T) {
 	// |  twenty    |  U.S.A   |   aws    |
 	// +------------+----------+----------+
 
-	// check that right node is marked for deletion
+	// check that right node is marked for deletion and dirty
 	markedDead := helpers.BitIsSet(&rightNode[0], pgr.Dead)
 	if !markedDead {
 		t.Fatalf("Expected merged node to be marked as dead.")
+	}
+
+	rightNodeDirty := helpers.BitIsSet(&rightNode[0], pgr.Dirty)
+	if !rightNodeDirty {
+		t.Fatalf("Expected right node to be marked dirty")
 	}
 
 	leftNodeDirty := helpers.BitIsSet(&leftNode[0], pgr.Dirty)
@@ -3837,7 +3925,7 @@ func TestMergeInternalLeftToRight(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -3858,7 +3946,7 @@ func TestMergeInternalLeftToRight(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -4032,7 +4120,7 @@ func TestMergeLeafLeftToRight(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -4053,7 +4141,7 @@ func TestMergeLeafLeftToRight(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -4263,7 +4351,7 @@ func TestRebalanceInternalNode(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -4284,7 +4372,7 @@ func TestRebalanceInternalNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -4516,7 +4604,7 @@ func TestRebalanceLeafNode(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -4537,7 +4625,7 @@ func TestRebalanceLeafNode(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -4700,7 +4788,7 @@ func TestRebalanceLeafNode(t *testing.T) {
 }
 
 func TestInsertToBpTree(t *testing.T) {
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(tempLogFile(t), logger.DEBUG, 100)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pagr := InitPager(t)
@@ -4710,7 +4798,7 @@ func TestInsertToBpTree(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -4731,7 +4819,7 @@ func TestInsertToBpTree(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -4740,7 +4828,7 @@ func TestInsertToBpTree(t *testing.T) {
 		t.Fatalf("expected B+ index got nil")
 	}
 
-	tests, err := generateKV((pgr.ORDER * 2) * 256) // 128 values
+	tests, err := generateKV((pgr.ORDER * 2) * 25000) // 100k values
 	if err != nil {
 		panic(err.Error())
 	}
@@ -4787,7 +4875,7 @@ func TestSingleDeleteFromBpTree(t *testing.T) {
 		CacheSize: 16 * 1024, // 16MB
 	}
 
-	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 	if err != nil {
 		pagr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -4808,7 +4896,7 @@ func TestSingleDeleteFromBpTree(t *testing.T) {
 		}
 	})
 
-	bp, err := NewBpTree(buffManager, w)
+	bp, err := NewBpTree(buffManager, w, lgr)
 	if err != nil {
 		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 	}
@@ -4876,13 +4964,13 @@ func TestSingleDeleteFromBpTree(t *testing.T) {
 
 func TestDeleteFromBpTree(t *testing.T) {
 	testIterations := 1
-	keysPerTest := 8192
+	keysPerTest := 32768
 	for i := range testIterations {
 		ok := t.Run(fmt.Sprintf("TestDeleteFromBpTree: iteration_%d", i), func(t *testing.T) {
 			t.Logf("-------------------------------------")
 			t.Logf("Running %s", t.Name())
 			t.Logf("-------------------------------------")
-			lgr := logger.NewLogger("", logger.DEBUG, 1)
+			lgr := logger.NewLogger(tempLogFile(t), logger.DEBUG, 50)
 			w := wal.NewWal(lgr)
 			// initialize pager
 			pagr := InitPager(t)
@@ -4892,7 +4980,7 @@ func TestDeleteFromBpTree(t *testing.T) {
 				CacheSize: 16 * 1024, // 16MB
 			}
 
-			buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true)
+			buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
 			if err != nil {
 				pagr.Close()
 				helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -4913,7 +5001,7 @@ func TestDeleteFromBpTree(t *testing.T) {
 				}
 			})
 
-			bp, err := NewBpTree(buffManager, w)
+			bp, err := NewBpTree(buffManager, w, lgr)
 			if err != nil {
 				t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
 			}
@@ -4946,29 +5034,29 @@ func TestDeleteFromBpTree(t *testing.T) {
 
 			// retrieve keys and ensure they were added
 			var retrievedVal []byte
-			for _, test := range tests {
+			for i, test := range tests {
 				retrievedVal, err = bp.Get(test.key)
 				if err != nil {
 					t.Fatalf("Error while retrieving key \"%s\": %v", test.key, err.Error())
 				}
 
 				if !bytes.Equal(retrievedVal, test.val) {
-					t.Fatalf("Expected for key \"%s\" to get value \"%s\" but instead got \"%s\"", test.key, test.val, retrievedVal)
+					t.Fatalf("%d. Expected for key \"%s\" to get value \"%s\" but instead got \"%s\"", i, test.key, test.val, retrievedVal)
 				}
 			}
 
 			fmt.Println("ALL KEYS INSERTED SUCCESSFULY===================================================================================")
 
-			midPt := rand.Intn(len(tests))
+			midPt := len(tests) / 2
 
 			for i := len(tests) - 1; i > int(midPt); i-- {
 				val, err := bp.Delete(tests[i].key)
 				if err != nil {
-					t.Fatalf("Expected no error while deleting key \"%s\", got \"%s\"", tests[i].key, err.Error())
+					t.Fatalf("%d. Expected no error while deleting key \"%s\", got \"%s\"", i, tests[i].key, err.Error())
 				}
 
 				if !bytes.Equal(val, tests[i].val) {
-					t.Fatalf("Expected deleted val to be %s but got %v", tests[i].val, val)
+					t.Fatalf("%d. Expected deleted val to be %s but got %v", i, tests[i].val, val)
 				}
 
 				// try retrieving the node
@@ -4992,7 +5080,7 @@ func TestDeleteFromBpTree(t *testing.T) {
 }
 
 func TestDefragmentNode(t *testing.T) {
-	entries, err := generateKV(3)
+	entries, err := generateSortedKV(5)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
@@ -5006,14 +5094,21 @@ func TestDefragmentNode(t *testing.T) {
 	}
 
 	node := createTestFragmentedLeafNode(25, keys, vals)
+	// set left sibling, right sibling
+	leftSib := 24
+	rightSib := 27
+	binary.LittleEndian.PutUint32(node[47:51], uint32(leftSib))
+	binary.LittleEndian.PutUint32(node[43:47], uint32(rightSib))
 
 	err = defragmentNode(&node)
 	if err != nil {
 		t.Fatalf("Expected no error, intead got:: %s", err.Error())
 	}
 
-	var expectedCellOff uint32 = pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES
+	fmt.Println("PRINTING DEFRAGMENTED NODE-->")
+	fmt.Println(printNodeContent(&node))
 
+	var expectedCellOff uint32 = pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES
 	for i := range len(keys) {
 		cOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
 		kLen := binary.LittleEndian.Uint32(node[cOff+1 : cOff+5])
@@ -5029,11 +5124,193 @@ func TestDefragmentNode(t *testing.T) {
 	if uOff := binary.LittleEndian.Uint32(node[25:29]); uOff != expectedCellOff {
 		t.Fatalf("Expected upperoffset to be %d but instead got %d", expectedCellOff, uOff)
 	}
+
+	expectedLowOff := pgr.HEADER_SIZE_BYTES + (len(entries) * pgr.CELL_POINTER_SIZE_BYTE)
+	if lOff := binary.LittleEndian.Uint32(node[29:33]); lOff != uint32(expectedLowOff) {
+		t.Fatalf("Expected lowerOffset to be %d but instead got %d", expectedLowOff, lOff)
+	}
+
+	// ensure siblings are unchanged
+	if l := binary.LittleEndian.Uint32(node[47:51]); l != uint32(leftSib) {
+		t.Fatalf("Expected left sibling to be %d, got %d", leftSib, l)
+	}
+
+	if r := binary.LittleEndian.Uint32(node[43:47]); r != uint32(rightSib) {
+		t.Fatalf("Expected left sibling to be %d, got %d", rightSib, r)
+	}
 }
 
-// func TestPromoteSepKey(t *testing.T) {
-//
-// }
+func TestDefragmentNoneFragmentedNode(t *testing.T) {
+	entries, err := generateKV(3)
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	var keys [][]byte
+	var vals [][]byte
+
+	for _, e := range entries {
+		keys = append(keys, e.key)
+		vals = append(vals, e.val)
+	}
+
+	node := createTestLeafNode(25, keys, vals)
+	// set left sibling, right sibling
+	leftSib := 24
+	rightSib := 27
+	binary.LittleEndian.PutUint32(node[47:51], uint32(leftSib))
+	binary.LittleEndian.PutUint32(node[43:47], uint32(rightSib))
+
+	err = defragmentNode(&node)
+	if err != nil {
+		t.Fatalf("Expected no error, intead got:: %s", err.Error())
+	}
+
+	var expectedCellOff uint32 = pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES
+	for i := range len(keys) {
+		cOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
+		kLen := binary.LittleEndian.Uint32(node[cOff+1 : cOff+5])
+		vLen := binary.LittleEndian.Uint32(node[cOff+5 : cOff+9])
+		cellSize := 13 + kLen + vLen
+		expectedCellOff -= cellSize
+
+		if cOff != expectedCellOff {
+			t.Fatalf("%d. Expected cell offset of %d but got %d", i, expectedCellOff, cOff)
+		}
+	}
+
+	if uOff := binary.LittleEndian.Uint32(node[25:29]); uOff != expectedCellOff {
+		t.Fatalf("Expected upperoffset to be %d but instead got %d", expectedCellOff, uOff)
+	}
+
+	expectedLowOff := pgr.HEADER_SIZE_BYTES + (len(entries) * pgr.CELL_POINTER_SIZE_BYTE)
+	if lOff := binary.LittleEndian.Uint32(node[29:33]); lOff != uint32(expectedLowOff) {
+		t.Fatalf("Expected lowerOffset to be %d but instead got %d", expectedLowOff, lOff)
+	}
+
+	// ensure siblings are unchanged
+	if l := binary.LittleEndian.Uint32(node[47:51]); l != uint32(leftSib) {
+		t.Fatalf("Expected left sibling to be %d, got %d", leftSib, l)
+	}
+
+	if r := binary.LittleEndian.Uint32(node[43:47]); r != uint32(rightSib) {
+		t.Fatalf("Expected left sibling to be %d, got %d", rightSib, r)
+	}
+}
+
+func TestDefragmentInternalNode(t *testing.T) {
+	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	w := wal.NewWal(lgr)
+	// initialize pager
+	pagr := InitPager(t)
+
+	// initialize buffer manager
+	cConfig := buffermanager.CacheConfig{
+		CacheSize: 128 * 1024, // 128MB
+	}
+
+	buffManager, err := buffermanager.NewBufferManager(cConfig, w, pagr, true, lgr)
+	if err != nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
+	}
+
+	if buffManager == nil {
+		pagr.Close()
+		helpers.PrintTestErrorMsg("Expected cache, got nil", t)
+	}
+
+	t.Cleanup(func() {
+		if buffManager != nil {
+			err := buffManager.Close()
+			if err != nil {
+				helpers.PrintTestErrorMsg(fmt.Sprintf("Unable to close buffermanager: %s", err.Error()), t)
+			}
+			helpers.PrintSuccessMsg("successfully closed buffermanager")
+		}
+	})
+
+	bp, err := NewBpTree(buffManager, w, lgr)
+	if err != nil {
+		t.Fatalf("Unable to initialize b+ tree index: %s", err.Error())
+	}
+
+	if bp == nil {
+		t.Fatalf("expected B+ index got nil")
+	}
+
+	keys := [][]byte{
+		[]byte("age"),
+		[]byte("code"),
+		[]byte("country"),
+		[]byte("relation"),
+	}
+	ptrs := []uint32{5, 12, 14, 19, 23}
+
+	node := createTestInternalNode(25, keys, ptrs)
+
+	// insert key to middle of node
+	insertKey := []byte("color")
+	insertPtr := 99
+	err = bp.insertToFrame(&node, insertKey, uint32(insertPtr), nil)
+	if err != nil {
+		t.Fatalf("Unable to insert to to frame: %s", err.Error())
+	}
+
+	// set left sibling, right sibling
+	leftSib := 24
+	rightSib := 27
+	binary.LittleEndian.PutUint32(node[47:51], uint32(leftSib))
+	binary.LittleEndian.PutUint32(node[43:47], uint32(rightSib))
+
+	err = defragmentNode(&node)
+	if err != nil {
+		t.Fatalf("Expected no error, intead got: %s", err.Error())
+	}
+
+	fmt.Println("PRINTING DEFRAGMENTED NODE-->")
+	fmt.Println(printNodeContent(&node))
+
+	var expectedCellOff uint32 = pgr.PAGE_SIZE_BYTES - pgr.LOWER_PADDING_BYTES
+	var prevKey []byte
+	for i := range len(keys) + 1 {
+		cOff := binary.LittleEndian.Uint32(node[pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+1 : pgr.HEADER_SIZE_BYTES+(i*pgr.CELL_POINTER_SIZE_BYTE)+5])
+		kLen := binary.LittleEndian.Uint32(node[cOff+1 : cOff+5])
+		vLen := binary.LittleEndian.Uint32(node[cOff+5 : cOff+9])
+		cellSize := 13 + kLen + vLen
+		expectedCellOff -= cellSize
+
+		if cOff != expectedCellOff {
+			t.Fatalf("%d. Expected cell offset of %d but got %d", i, expectedCellOff, cOff)
+		}
+
+		currKey := node[13 : 13+kLen]
+		if bytes.Compare(currKey, prevKey) != 1 {
+			t.Fatalf("%d. Expected currKey: %s, to be greater than previous key: %v", i, currKey, prevKey)
+		}
+
+		prevKey = make([]byte, kLen)
+		copy(prevKey, currKey)
+	}
+
+	if uOff := binary.LittleEndian.Uint32(node[25:29]); uOff != expectedCellOff {
+		t.Fatalf("Expected upperoffset to be %d but instead got %d", expectedCellOff, uOff)
+	}
+
+	expectedLowOff := pgr.HEADER_SIZE_BYTES + ((len(keys) + 1) * pgr.CELL_POINTER_SIZE_BYTE)
+	if lOff := binary.LittleEndian.Uint32(node[29:33]); lOff != uint32(expectedLowOff) {
+		t.Fatalf("Expected lowerOffset to be %d but instead got %d", expectedLowOff, lOff)
+	}
+
+	// ensure siblings are unchanged
+	if l := binary.LittleEndian.Uint32(node[47:51]); l != uint32(leftSib) {
+		t.Fatalf("Expected left sibling to be %d, got %d", leftSib, l)
+	}
+
+	if r := binary.LittleEndian.Uint32(node[43:47]); r != uint32(rightSib) {
+		t.Fatalf("Expected left sibling to be %d, got %d", rightSib, r)
+	}
+}
 
 func generateKV(count int) ([]cellEntry, error) {
 	if count < 0 {
@@ -5058,6 +5335,19 @@ func generateKV(count int) ([]cellEntry, error) {
 			),
 		}
 	}
+
+	return items, nil
+}
+
+func generateSortedKV(count int) ([]cellEntry, error) {
+	items, err := generateKV(count)
+	if err != nil {
+		return nil, err
+	}
+
+	slices.SortFunc(items, func(a, b cellEntry) int {
+		return bytes.Compare(a.key, b.key)
+	})
 
 	return items, nil
 }
@@ -5193,4 +5483,10 @@ func InitPager(t *testing.T) *pgr.Pager {
 	}
 
 	return pgr
+}
+
+func tempLogFile(t *testing.T) string {
+	tmpDir := t.TempDir()
+	dbFile := filepath.Join(tmpDir, "baobab.log")
+	return dbFile
 }

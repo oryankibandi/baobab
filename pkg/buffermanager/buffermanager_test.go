@@ -21,7 +21,7 @@ import (
 
 func TestNewBufferManager(t *testing.T) {
 	// initialize wal, logger and pager
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 
 	tests := []struct {
@@ -93,7 +93,7 @@ func TestNewBufferManager(t *testing.T) {
 				CacheSize: test.cacheSize,
 			}
 
-			c, err := NewBufferManager(cConfig, test.w, pgr, true)
+			c, err := NewBufferManager(cConfig, test.w, pgr, true, lgr)
 			if test.valid {
 				if err != nil {
 					helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -119,7 +119,7 @@ func TestNewBufferManager(t *testing.T) {
 }
 
 func TestNewFrame(t *testing.T) {
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -129,7 +129,7 @@ func TestNewFrame(t *testing.T) {
 		CacheSize: MIN_CACHE_SIZE_KB,
 	}
 
-	cache, err := NewBufferManager(cConfig, w, pgr, true)
+	cache, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -161,7 +161,7 @@ func TestNewFrame(t *testing.T) {
 }
 
 func TestGetRootPageId(t *testing.T) {
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -171,7 +171,7 @@ func TestGetRootPageId(t *testing.T) {
 		CacheSize: MIN_CACHE_SIZE_KB,
 	}
 
-	cache, err := NewBufferManager(cConfig, w, pgr, true)
+	cache, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -210,7 +210,7 @@ func TestGetRootPageId(t *testing.T) {
 }
 
 func TestMarkFrameDirty(t *testing.T) {
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -220,7 +220,7 @@ func TestMarkFrameDirty(t *testing.T) {
 		CacheSize: MIN_CACHE_SIZE_KB,
 	}
 
-	cache, err := NewBufferManager(cConfig, w, pgr, true)
+	cache, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -265,7 +265,7 @@ func TestPutGet(t *testing.T) {
 
 	concurrGetReq := 10
 
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -276,7 +276,7 @@ func TestPutGet(t *testing.T) {
 		numShards: 1,
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -526,7 +526,7 @@ func TestNewFrameConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 
 	newFrameCount := 25000
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -537,7 +537,7 @@ func TestNewFrameConcurrent(t *testing.T) {
 		numShards: 4,
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -611,7 +611,7 @@ func TestNewFrameConcurrent(t *testing.T) {
 
 func TestNewFrameSequential(t *testing.T) {
 	newFrameCount := 30000
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -622,7 +622,7 @@ func TestNewFrameSequential(t *testing.T) {
 		numShards: 1,
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -680,7 +680,7 @@ func TestNewFrameSequential(t *testing.T) {
 
 func TestDeleteFrame(t *testing.T) {
 	newFrameCount := 30000
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -691,7 +691,7 @@ func TestDeleteFrame(t *testing.T) {
 		numShards: 16,
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -771,7 +771,7 @@ func TestDeleteFrame(t *testing.T) {
 func TestZipfianDistribution(t *testing.T) {
 	iterationCount := 100000
 	maxPages := 4600 // ~254MB
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -782,7 +782,7 @@ func TestZipfianDistribution(t *testing.T) {
 		numShards: 1,
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -877,7 +877,7 @@ func TestZipfianDistributionConcurrent(t *testing.T) {
 	warmUpIterations := int(0.05 * float64(iterationCount))
 	maxPages := 30000 // ~254MB
 
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -888,7 +888,7 @@ func TestZipfianDistributionConcurrent(t *testing.T) {
 		numShards: shards,
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -1059,7 +1059,7 @@ func TestZipfianDistributionConcurrent(t *testing.T) {
 func TestRandomDistribution(t *testing.T) {
 	iterationCount := 1000000
 	maxPages := 10000
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -1070,7 +1070,7 @@ func TestRandomDistribution(t *testing.T) {
 		numShards: 4,
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -1158,7 +1158,7 @@ func TestRandomDistribution(t *testing.T) {
 func TestSequentialDistribution(t *testing.T) {
 	iterationCount := 1000000
 	maxPages := 10000
-	lgr := logger.NewLogger("", logger.DEBUG, 1)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
 	w := wal.NewWal(lgr)
 	// initialize pager
 	pgr := InitPager(t)
@@ -1168,7 +1168,7 @@ func TestSequentialDistribution(t *testing.T) {
 		CacheSize: 128 * 1024, // 128MB
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -1267,7 +1267,7 @@ func BenchmarkBufferManager(t *testing.B) {
 		CacheSize: 256 * 1024, // 48MB
 	}
 
-	buffManager, err := NewBufferManager(cConfig, w, pgr, true)
+	buffManager, err := NewBufferManager(cConfig, w, pgr, true, lgr)
 	if err != nil {
 		pgr.Close()
 		t.Fatalf("Expected no error, got %v", err)
@@ -1333,4 +1333,10 @@ func BenchmarkBufferManager(t *testing.B) {
 		f.Release(true)
 		f.Unreference()
 	}
+}
+
+func TempLogFile(t *testing.T) string {
+	tmpDir := t.TempDir()
+	dbFile := filepath.Join(tmpDir, "baobab.log")
+	return dbFile
 }

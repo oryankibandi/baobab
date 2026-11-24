@@ -2,6 +2,7 @@ package manual
 
 /*
 #include <stdlib.h>
+#include <malloc.h>
 */
 import "C"
 
@@ -34,6 +35,7 @@ func FreeMem(d unsafe.Pointer) {
 	}
 
 	C.free(d)
+	C.malloc_trim(0)
 }
 
 // Retrieves Peak RSS

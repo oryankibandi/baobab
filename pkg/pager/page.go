@@ -50,6 +50,7 @@ func (p *Page) UpdateRightPtr(pageId int32) error {
 func (p *Page) MarkAsDead() error {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
+	fmt.Printf("(MarkAsDead) PID -> %d\n", binary.LittleEndian.Uint32((p.pgeData[1:5])))
 	helpers.SetFlag(&p.pgeData[0], []int{Dead, Dirty})
 
 	return nil
@@ -65,6 +66,13 @@ func (p *Page) MarkClean() {
 	p.rmu.Lock()
 	defer p.rmu.Unlock()
 	helpers.UnsetFlag(&p.pgeData[0], []int{Dirty})
+}
+
+// IsMarkedDirty returns true if the dirty flag is set.
+func (p *Page) IsMarkedDirty() bool {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	return helpers.BitIsSet(&p.pgeData[0], Dirty)
 }
 
 // Check if page is marked for deletion
@@ -138,9 +146,14 @@ func (p *Page) initializePage(pageId uint32, internal bool) error {
 		helpers.SetFlag(&p.pgeData[0], []int{IsInternal})
 	}
 
-	// set upperoffset and lower offset
-	binary.LittleEndian.PutUint32(p.pgeData[25:29], (PAGE_SIZE_BYTES - LOWER_PADDING_BYTES))
-	binary.LittleEndian.PutUint32(p.pgeData[29:33], HEADER_SIZE_BYTES)
+	// set upperoffset and lower offset if not already set.
+	if uOff := binary.LittleEndian.Uint32(p.pgeData[25:29]); uOff > (PAGE_SIZE_BYTES-LOWER_PADDING_BYTES) || uOff == 0 {
+		binary.LittleEndian.PutUint32(p.pgeData[25:29], (PAGE_SIZE_BYTES - LOWER_PADDING_BYTES))
+	}
+
+	if lOff := binary.LittleEndian.Uint32(p.pgeData[29:33]); lOff < HEADER_SIZE_BYTES {
+		binary.LittleEndian.PutUint32(p.pgeData[29:33], HEADER_SIZE_BYTES)
+	}
 
 	return nil
 }

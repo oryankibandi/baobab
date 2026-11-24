@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/logger"
 	pager "github.com/oryankibandi/baobab/pkg/pager"
 	"github.com/oryankibandi/baobab/pkg/wal"
 )
@@ -41,6 +42,7 @@ type bmWorkerRes struct {
 }
 
 type shard struct {
+	// uint32: *clockentry
 	CacheMap   sync.Map
 	wTinyLfu   *WTinyLfu
 	rmu        sync.RWMutex
@@ -54,15 +56,20 @@ type shard struct {
 	// workers
 	workers *bmWorkerPool
 
+	// logger
+	lgger *logger.BaobabLogger
+
 	// wait group
 	wg sync.WaitGroup
 }
 
 // Adds a page to cache, setting k as key. k is the unique page ID.
 func (sh *shard) put(k uint32, en *clockentry, dirty bool) (*Frame, error) {
+	sh.lgger.Write(PKG_NAME, "put", logger.LevelDebug, fmt.Sprintf("adding frame with ID -> %d to shard %d\n", k, sh.shardId), nil)
 	val, ok := sh.CacheMap.Load(k)
 	if ok {
 		// increment count
+		sh.lgger.Write(PKG_NAME, "put", logger.LevelDebug, "Frame already found\n", nil)
 		sh.wTinyLfu.Increment(val.(*clockentry))
 	}
 
@@ -74,6 +81,9 @@ func (sh *shard) put(k uint32, en *clockentry, dirty bool) (*Frame, error) {
 	}
 
 	val, ok = sh.CacheMap.Load(k)
+	if !ok {
+		panic("unable to add frame to cache")
+	}
 
 	return &en.entry, nil
 }
@@ -103,6 +113,7 @@ func (sh *shard) get(pageId uint32) (*Frame, bool, error) {
 
 // delete deletes the key with pid from the shard
 func (sh *shard) delete(pid uint32) error {
+	sh.lgger.Write(PKG_NAME, "delete", logger.LevelDebug, fmt.Sprintf("deleting frame with PID => %d\n", pid), nil)
 	errChan := make(chan error)
 	job := bmJob{
 		flag:    byte(0x40), // 0100 0000
@@ -237,7 +248,7 @@ func (sh *shard) close() error {
 	// terminate  workers
 	sh.workers.shutdownWorkers(sh.shardId)
 	// stop bgwriter
-	fmt.Printf("(shard %d) shutting down bgwriters....\n", sh.shardId)
+	sh.lgger.Write(PKG_NAME, "close", logger.LevelDebug, fmt.Sprintf("(shard %d) shutting down bgwriters....\n", sh.shardId), nil)
 	if sh.exitchan != nil {
 		close(*sh.exitchan)
 		sh.wg.Wait()
@@ -247,12 +258,14 @@ func (sh *shard) close() error {
 		sh.wTinyLfu.close()
 	}
 
+	sh.lgger.Write(PKG_NAME, "close", logger.LevelDebug, fmt.Sprintf("(shard %d) Done....\n", sh.shardId), nil)
 	return nil
 }
 
 func (j *bmJob) runJob(sh *shard) {
 	// bit 6 set if delete() request
 	if helpers.BitIsSet(&j.flag, DELETE) {
+		sh.lgger.Write(PKG_NAME, "runJob", logger.LevelDebug, fmt.Sprintf("DELETING page => %d\n", j.pid), nil)
 		val, ok := sh.CacheMap.Load(j.pid)
 		if ok {
 			val.(*clockentry).reference()
@@ -350,10 +363,10 @@ func (j *bmJob) runJob(sh *shard) {
 		if ok && val.(*clockentry).refIfOccupied() {
 			// check if entry is already deleted
 			if val.(*clockentry).entry.IsDead() {
+				sh.lgger.Write(PKG_NAME, "runJob", logger.LevelDebug, fmt.Sprintf("(shard %d) page %d marked dead\n", sh.shardId, j.pid), nil)
 				// frame deleted, remove from hash table, unref and return err
-				if !val.(*clockentry).entry.isDirty() {
-					sh.CacheMap.Delete(j.pid)
-				}
+				sh.lgger.Write(PKG_NAME, "runJob", logger.LevelDebug, fmt.Sprintf("(shard %d) deleting from cache page with id => %d\n", sh.shardId, j.pid), nil)
+				sh.CacheMap.Delete(j.pid)
 				val.(*clockentry).unref()
 				j.errChan <- BufferManagerError{Message: "No entry found."}
 				return
@@ -390,6 +403,7 @@ func (j *bmJob) runJob(sh *shard) {
 			}
 
 			// Create read request
+			sh.lgger.Write(PKG_NAME, "runJob", logger.LevelDebug, fmt.Sprintf("(shard.go) READING PAGE WITH Node ID => %d\n", j.pid), nil)
 			err = sh.pager.ReadPage(uint32(j.pid), frBuff)
 			if err != nil {
 				// readd frame to circular buffer pool
@@ -405,6 +419,8 @@ func (j *bmJob) runJob(sh *shard) {
 				j.errChan <- BufferManagerError{Message: fmt.Sprintf("Invalid pageId provided: %d, instead got %d\nFrame -> %v", j.pid, p, (*frBuff))}
 				return
 			}
+
+			sh.lgger.Write(PKG_NAME, "runJob", logger.LevelDebug, fmt.Sprintf("(shard.go) LOW OFF FOR Node ID => %d\tLowOff --> %d\n", j.pid, binary.LittleEndian.Uint32((*frBuff)[29:33])), nil)
 
 			// set pageID from read page
 			err = sh.pager.UpdatePageMeta(&en.entry.page, binary.LittleEndian.Uint32((*frBuff)[1:5]), helpers.BitIsSet(&((*frBuff)[0]), pager.IsInternal))
@@ -427,6 +443,7 @@ func (j *bmJob) runJob(sh *shard) {
 			}
 
 			j.resultChan <- bmWorkerRes{fr: f, cacheHit: false}
+
 			return
 		}
 	} else {
@@ -531,7 +548,7 @@ func (w *bmWorkerPool) shutdownWorkers(shardId uint64) {
 }
 
 // newShard creates a new shard
-func newShard(shardId uint64, wal *wal.WAL, pgr *pager.Pager, cacheSize uint64, reserveMetadataEntry bool) (*shard, error) {
+func newShard(shardId uint64, wal *wal.WAL, pgr *pager.Pager, cacheSize uint64, reserveMetadataEntry bool, lgger *logger.BaobabLogger) (*shard, error) {
 	if wal == nil {
 		return nil, BufferManagerError{Message: "wal instance  not provided."}
 	}
@@ -540,13 +557,17 @@ func newShard(shardId uint64, wal *wal.WAL, pgr *pager.Pager, cacheSize uint64, 
 		return nil, BufferManagerError{Message: "pager instance  not provided."}
 	}
 
+	if lgger == nil {
+		return nil, BufferManagerError{Message: "logger instance  not provided."}
+	}
+
 	totFrames := math.Round(float64(cacheSize*1024) / float64(unsafe.Sizeof(clockentry{})))
 	windSize := math.Round(totFrames * WINDOW_CACHE_RATIO)
 	mainSize := math.Round(totFrames * (1 - WINDOW_CACHE_RATIO))
 
 	workerPoolSize := 400
 
-	w, err := NewWTinylfu(uint64(windSize), uint64(mainSize), reserveMetadataEntry)
+	w, err := NewWTinylfu(uint64(windSize), uint64(mainSize), reserveMetadataEntry, lgger)
 	if err != nil {
 		panic(err)
 	}
@@ -581,6 +602,7 @@ func newShard(shardId uint64, wal *wal.WAL, pgr *pager.Pager, cacheSize uint64, 
 		workers:  &wrk,
 		exitchan: &exChan,
 		shardId:  shardId,
+		lgger:    lgger,
 	}
 
 	// start workers

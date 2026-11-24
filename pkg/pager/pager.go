@@ -156,16 +156,12 @@ func (j *IOJob) executeJob(pgr *Pager) {
 func (pgr *Pager) NewPageId() uint32 {
 	pgr.mu.Lock()
 	defer pgr.mu.Unlock()
-	// fmt.Println("acquired lock for pager...")
 
 	var newPgeId uint32
-	// fmt.Println("poping pageid from freelist...")
 	if n := pgr.freeList.pop(); n < 0 {
-		// fmt.Println("got pageId < 0...")
 		newPgeId = pgr.maxPageId + 1
 		pgr.maxPageId++
 	} else {
-		// fmt.Println("got a valid pageId...")
 		newPgeId = uint32(n)
 	}
 
@@ -178,7 +174,6 @@ func (pgr *Pager) NewPage(setAsRoot bool, isInternal bool, pge *Page, pid uint32
 	if pge == nil {
 		return 0, PagerError{Message: "No page entry provided."}
 	}
-	// fmt.Println("acquiring lock for pager...")
 	pgr.mu.Lock()
 	defer pgr.mu.Unlock()
 
@@ -271,7 +266,6 @@ func (pgr *Pager) ReadPage(pageId uint32, buff *[]byte) error {
 		return err
 	}
 
-	// fmt.Printf("Read page %d, result -> %v\n", pageId, *buff)
 	// dereference
 	workerErrChan = nil
 	ioJob.errCh = nil

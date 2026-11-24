@@ -1,12 +1,13 @@
 package buffermanager
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"sync"
 
 	tiny "github.com/oryankibandi/baobab/internal/tinylfu"
-	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/logger"
 	"github.com/oryankibandi/baobab/pkg/pager"
 )
 
@@ -42,6 +43,9 @@ type WTinyLfu struct {
 
 	mu sync.RWMutex
 	wg sync.WaitGroup
+
+	// logger
+	lgger *logger.BaobabLogger
 }
 
 type paddedFramePtr struct {
@@ -158,7 +162,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager, hashtable *sync.Map) error {
 		probationVictim.en = w.cBuffer.EvictWithoutClearing(probationSegment)
 	} else {
 		// item can be moved to probation segment without evicting probation
-		fmt.Printf("probation not full....\n")
+		w.lgger.Write(PKG_NAME, "evictWindow", logger.LevelDebug, "probation not full....", nil)
 		windVictim.en = w.cBuffer.EvictWithoutClearing(windowSegment)
 		if windVictim.en == nil {
 			return BufferManagerError{Message: "Unable to find window victim(all frames in use)."}
@@ -230,6 +234,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager, hashtable *sync.Map) error {
 
 			// create a slice around the buff
 			frSlice := buff[:]
+			w.lgger.Write(PKG_NAME, "evictWindow", logger.LevelDebug, fmt.Sprintf("flushing and evicting node with id => %d\n", binary.LittleEndian.Uint32(buff[1:5])), nil)
 			err = pgr.WritePage(mainKey, &frSlice, false)
 			if err != nil {
 				//unref
@@ -243,6 +248,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager, hashtable *sync.Map) error {
 		// always remove from hashtable before resetting to prevent other
 		// threads from accessing it after resetting metadata
 		if hashtable != nil {
+			w.lgger.Write(PKG_NAME, "evictWindow", logger.LevelDebug, fmt.Sprintf("(wtinylfu) Deleting mainKey -> %d\n", mainKey), nil)
 			hashtable.Delete(mainKey)
 		}
 		err = w.cBuffer.resetEntry(probationVictim.en)
@@ -260,7 +266,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager, hashtable *sync.Map) error {
 		w.windowCount--
 	} else {
 		// flush window cache victim
-		fmt.Printf("evicting window cache item...\n")
+		w.lgger.Write(PKG_NAME, "evictWindow", logger.LevelDebug, "evicting window cache item...", nil)
 		if windVictim.en.entry.isDirty() {
 			buff, err := windVictim.en.entry.ByteData()
 			if err != nil {
@@ -269,6 +275,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager, hashtable *sync.Map) error {
 
 			// create a slice around the buff
 			frSlice := buff[:]
+			w.lgger.Write(PKG_NAME, "evictWindow", logger.LevelDebug, fmt.Sprintf("flushing and evicting node with id => %d\n", binary.LittleEndian.Uint32(buff[1:5])), nil)
 			err = pgr.WritePage(windKey, &frSlice, false)
 			if err != nil {
 				//unref
@@ -279,6 +286,7 @@ func (w *WTinyLfu) evictWindow(pgr *pager.Pager, hashtable *sync.Map) error {
 		}
 
 		if hashtable != nil {
+			w.lgger.Write(PKG_NAME, "evictWindow", logger.LevelDebug, fmt.Sprintf("(wtinylfu) Deleting windKey -> %d\n", windKey), nil)
 			hashtable.Delete(windKey)
 		}
 		err = w.cBuffer.resetEntry(windVictim.en)
@@ -329,7 +337,7 @@ func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager, hashtable *sync.Map) (fr *cloc
 	}
 
 	// Get empty frame from cbuffer
-	en := w.cBuffer.EvictWithoutClearing(unassigned)
+	en := w.cBuffer.EvictAndClear(unassigned)
 	if en == nil {
 		return nil, BufferManagerError{Message: "Unable to add item to WtinyLFU"}
 	}
@@ -345,7 +353,7 @@ func (w *WTinyLfu) getFreeFrame(pgr *pager.Pager, hashtable *sync.Map) (fr *cloc
 func (w *WTinyLfu) readdFrameToPool(entry *clockentry) error {
 	err := w.cBuffer.clearEntry(entry)
 	if err != nil {
-		fmt.Println(helpers.BOLDRED + err.Error() + helpers.RESET)
+		w.lgger.Write(PKG_NAME, "readdFrameToPool", logger.LevelDebug, err.Error(), nil)
 	}
 
 	return err
@@ -389,7 +397,7 @@ func (w *WTinyLfu) Stat() {
 	msg += fmt.Sprintf("PROTECTED COUNT: %d - FULL %v - CAP %d - OCCUPANCY %.2f%%\n", w.protectedCount, w.protectedCount >= w.protectedCapacity, w.protectedCapacity, (float64(w.protectedCount)/float64(w.protectedCapacity))*100)
 	msg += "------------------------------------------------------------------\n"
 
-	fmt.Println(helpers.BOLDWHITE + msg + helpers.RESET)
+	w.lgger.Write(PKG_NAME, "Stat", logger.LevelDebug, msg, nil)
 }
 
 func (w *WTinyLfu) close() {
@@ -404,7 +412,7 @@ func (w *WTinyLfu) close() {
 
 // Creates new instance  of W-TinyLFU.
 // windowSize and mainCacheSize represents the number of frames for each segment
-func NewWTinylfu(windowSize uint64, mainCacheSize uint64, reserveMetadata bool) (*WTinyLfu, error) {
+func NewWTinylfu(windowSize uint64, mainCacheSize uint64, reserveMetadata bool, lgger *logger.BaobabLogger) (*WTinyLfu, error) {
 	if windowSize <= 0 {
 		return nil, WTinyLFUError{Message: "Window size must be greater than 0"}
 	}
@@ -441,6 +449,7 @@ func NewWTinylfu(windowSize uint64, mainCacheSize uint64, reserveMetadata bool) 
 		probationCapacity: probationCap,
 		protectedCapacity: protectedCap,
 		tinyFilter:        t,
+		lgger:             lgger,
 	}
 
 	return &w, nil

@@ -1,9 +1,7 @@
 package buffermanager
 
 import (
-	// "fmt"
 	"fmt"
-	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -29,7 +27,15 @@ type Frame struct {
 }
 
 func (f *Frame) isDirty() bool {
-	return f.dirty.Load()
+	if !f.dirty.Load() {
+		// if not dirty, check flag from pager incase set by bptree
+		if f.page.IsMarkedDirty() {
+			f.dirty.Store(true)
+			return true
+		}
+		return false
+	}
+	return true
 }
 
 // Mark an entry/frame as dirty
@@ -53,7 +59,17 @@ func (f *Frame) MarkDead() {
 
 // IsDead returns true if frame has been marked dead, else false
 func (f *Frame) IsDead() bool {
-	return f.isDeleted.Load()
+	if !f.isDeleted.Load() {
+		// if not marked dead, check flag from pager and update if IsDead
+		if f.page.IsDeleted() {
+			f.isDeleted.Store(true)
+			return true
+		}
+
+		return false
+	}
+
+	return true
 }
 
 func (f *Frame) getKey() uint32 {
@@ -91,8 +107,6 @@ func (f *Frame) SetData(p *pager.Page, markDirty bool) error {
 	}
 
 	f.key = uint32(p.PageId)
-	//fmt.Printf("Key after setting -> %d\nPageId: %d\n", f.key, p.PageId)
-	// fmt.Printf("SetData() setting data for key: %d  from pager on frame with key:-> %d\n", p.PageId, f.key)
 
 	return nil
 }
@@ -115,12 +129,7 @@ func (f *Frame) Clear() error {
 	if f == nil {
 		return BufferManagerError{Message: "Frame is not set"}
 	}
-	callr := ""
-	_, file, line, ok := runtime.Caller(1)
-	if ok {
-		callr = fmt.Sprintf("%s:%d", file, line)
-	}
-	fmt.Printf("(frame.clear() %s Clearing frame with pid %d\n", callr, f.key)
+
 	f.dirty.Store(false)
 	f.key = 0
 

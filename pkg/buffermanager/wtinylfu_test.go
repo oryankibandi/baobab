@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/oryankibandi/baobab/pkg/helpers"
+	"github.com/oryankibandi/baobab/pkg/logger"
 )
 
 func TestNewWTinyLFU(t *testing.T) {
@@ -26,7 +27,9 @@ func TestNewWTinyLFU(t *testing.T) {
 		t.Run(fmt.Sprintf("%d_test_newWtinylfu", i), func(t *testing.T) {
 			probCap := uint64(math.Round(float64(test.mainSize) * MAIN_CACHE_RATIO))
 			protCap := uint64(math.Round(float64(test.mainSize)*(1.0-MAIN_CACHE_RATIO))) - 1
-			w, err := NewWTinylfu(test.windowSize, test.mainSize, true)
+
+			lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
+			w, err := NewWTinylfu(test.windowSize, test.mainSize, true, lgr)
 
 			if !test.valid {
 				if err == nil {
@@ -72,7 +75,8 @@ func TestEvictWindow(t *testing.T) {
 	pgr := InitPager(t)
 	defer pgr.Close()
 
-	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity), true)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
+	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity), true, lgr)
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
@@ -122,6 +126,9 @@ func TestEvictWindow(t *testing.T) {
 			helpers.PrintTestErrorMsg("Expected frame to be evicted to be unreferenced", t)
 		}
 
+		// mark evict target dirty
+		// frameToBeEvicted.entry.MarkDirty()
+
 		en, err := w.getFreeFrame(pgr, nil)
 		if err != nil {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
@@ -136,6 +143,14 @@ func TestEvictWindow(t *testing.T) {
 		if seg := frameToBeEvicted.segtype; seg != probationSegment {
 			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected evicted frame to be in probation segment, got %v", seg), t)
 		}
+
+		if en.entry.isDirty() {
+			helpers.PrintTestErrorMsg(fmt.Sprintf("Expected new frame to be marked clean"), t)
+		}
+
+		// if frameToBeEvicted.entry.isDirty() {
+		// 	helpers.PrintTestErrorMsg(fmt.Sprintf("Expected evicted frame to be marked clean"), t)
+		// }
 
 		helpers.PrintSuccessMsg("testevict_evictwindow success")
 	})
@@ -152,7 +167,8 @@ func TestPromoteToProtected(t *testing.T) {
 	pgr := InitPager(t)
 	defer pgr.Close()
 
-	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity), true)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
+	w, err := NewWTinylfu(uint64(windowCapacity), uint64(mainCapacity), true, lgr)
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}
@@ -253,7 +269,8 @@ func TestProtectedEviction(t *testing.T) {
 	pgr := InitPager(t)
 	defer pgr.Close()
 
-	w, err := NewWTinylfu(windowFrameCount, mainItemCount, true)
+	lgr := logger.NewLogger(TempLogFile(t), logger.DEBUG, 1)
+	w, err := NewWTinylfu(windowFrameCount, mainItemCount, true, lgr)
 	if err != nil {
 		helpers.PrintTestErrorMsg(fmt.Sprintf("Expected no error, got %v", err), t)
 	}

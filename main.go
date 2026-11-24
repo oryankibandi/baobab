@@ -24,8 +24,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/oryankibandi/baobab/pkg/bp_tree"
-	buffermanager "github.com/oryankibandi/baobab/pkg/buffer_manager"
+	"github.com/oryankibandi/baobab/pkg/bptree"
+	buffermanager "github.com/oryankibandi/baobab/pkg/buffermanager"
 	"github.com/oryankibandi/baobab/pkg/logger"
 	"github.com/oryankibandi/baobab/pkg/recovery"
 	"github.com/oryankibandi/baobab/pkg/wal"
@@ -344,7 +344,7 @@ func runProfiler() {
 }
 
 // runServer starts a basic HTTP server on port 8080
-func runServer(tree *bp_tree.BTree) {
+func runServer(tree *bptree.BpTree) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "Hello, world! Server is running on port 8080.")
@@ -429,7 +429,7 @@ func main() {
 	}
 
 	l.Write("main", "main()", logger.LevelInfo, fmt.Sprintf("NEW WAL: %v", wal), nil)
-	btree, err := bp_tree.NewIndex(wal, cache, l)
+	btree, err := bptree.NewIndex(wal, cache, l)
 
 	if err != nil {
 		panic(err.Error())

@@ -117,8 +117,7 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 				continue
 			} else {
 				// both access bit and reference bit unset
-
-				// reference frame so it doesn't get evicted/accese d by other goroutines i.e. bgwriter
+				// reference frame so it doesn't get evicted/accesed by other goroutines i.e. bgwriter
 				currEntry.acc = true
 				currEntry.ref = true
 				currEntry.pinCount.Add(1)
@@ -131,6 +130,7 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 
 				currEntry.mu.Unlock()
 				clk.mu.Unlock()
+				// FIX: Remove debug code below
 				return currEntry
 			}
 		}
@@ -142,14 +142,103 @@ func (clk *clock) EvictWithoutClearing(seg SegmentType) (evicted *clockentry) {
 		time.Sleep(sleepDur)
 	}
 	// unable to find suitable entry. All entries referenced
-	fmt.Printf("(%d) Unable to find suitable entry, all entries referenced...\n", seg)
+	return nil
+}
+
+// advances the clock hand, finds a valid entry.
+// loops around the clock buffer MAX_LOOP times to find entries
+// that may have not been unpinned in the first run. If no slot is found,
+// we wait for a period of time to allow other goroutines to free some frames
+// then retry (exponential backoff). If we reach MAX_RETRIES,
+// we simply return nil.
+// Returns the entry AFTER clearing the entry, or nil if none found.
+// Each returned candidate is referenced to prevent eviction by a different
+// goroutine.
+func (clk *clock) EvictAndClear(seg SegmentType) (evicted *clockentry) {
+	for j := range MAX_RETRIES {
+		start := time.Now()
+		clk.mu.Lock()
+		clkCap := clk.capacity
+		var currEntry *clockentry
+
+		for i := 0; i < int(clkCap)*MAX_LOOP; i++ {
+			currEntry = &clk.bPool[clk.Head]
+			currEntry.mu.Lock()
+			// check if reserved
+			if clk.bPool[clk.Head].reserved {
+				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
+				continue
+			}
+
+			if clk.bPool[clk.Head].acc {
+				// access bit set, advance clock hand
+				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
+				continue
+			}
+
+			// skip if marked for eviction
+			if clk.bPool[clk.Head].markedForEviction {
+				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
+				continue
+			}
+
+			if s := clk.bPool[clk.Head].segtype; s != seg {
+				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
+				continue
+			}
+
+			if clk.bPool[clk.Head].ref {
+				// ref bit set, unset it
+				clk.bPool[clk.Head].ref = false
+
+				clk.Head = (clk.Head + 1) % int(clkCap)
+				currEntry.mu.Unlock()
+				continue
+			} else {
+				// both access bit and reference bit unset
+				// reference frame so it doesn't get evicted/accesed by other goroutines i.e. bgwriter
+				currEntry.acc = true
+				currEntry.ref = true
+				currEntry.pinCount.Add(1)
+
+				// mark for eviction
+				currEntry.markedForEviction = true
+
+				// advance clock hand
+				clk.Head = (clk.Head + 1) % int(clkCap)
+
+				currEntry.mu.Unlock()
+				clk.mu.Unlock()
+
+				// clear entry if occupied
+				if currEntry.entry.parentEntry.isOccupied {
+					err := currEntry.entry.Clear()
+					if err != nil {
+						panic(err.Error())
+					}
+				}
+
+				return currEntry
+			}
+		}
+
+		clk.mu.Unlock()
+		end := time.Since(start)
+		sleepDur := time.Millisecond * time.Duration((j+1)*10)
+		slog.Info(fmt.Sprintf("(%v) Evict failed in %v, retrying in %v..", seg, end, sleepDur))
+		time.Sleep(sleepDur)
+	}
+	// unable to find suitable entry. All entries referenced
 	return nil
 }
 
 // resets an entry after is has been evicted so it's ready
 // for the next user.
 func (clk *clock) clearEntry(e *clockentry) error {
-	// fmt.Printf("clearentry()\n")
 	if e == nil {
 		return BufferManagerError{Message: "clearentry: No entry provided"}
 	}
@@ -250,7 +339,7 @@ func (cEntry *clockentry) refIfOccupied() bool {
 		return false
 	}
 
-	// if entry is too be evicted, return false
+	// if entry is to be evicted, return false
 	if cEntry.markedForEviction {
 		return false
 	}

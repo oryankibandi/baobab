@@ -1,6 +1,7 @@
 package buffermanager
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"time"
@@ -80,6 +81,7 @@ BgWriterLoop:
 					currEntry.unref()
 					continue
 				}
+				fmt.Printf("(bgwriter) flushing page with pid => %d\n", binary.LittleEndian.Uint32((*currFrameBuff)[1:5]))
 				copy(tmp, *currFrameBuff)
 				currFrame.MarkClean()
 				currFrameBuff = nil

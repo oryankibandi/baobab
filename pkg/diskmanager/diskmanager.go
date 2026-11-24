@@ -91,6 +91,7 @@ func (d *DiskManager) loadPage(off uint32, buff *[]byte) error {
 	if buff == nil {
 		return DiskManagerError{Message: "Invalid buffer provided"}
 	}
+	fmt.Printf("Reading page  at offset -> %d\n", off)
 
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -99,16 +100,6 @@ func (d *DiskManager) loadPage(off uint32, buff *[]byte) error {
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
-
-	//bif binary.LittleEndian.Uint32((*buff)[1:5]) == 0 && off != 0 {
-	//b	// read file hole
-	//b	panic(fmt.Sprintf(
-	//b		"zero read: pageID=%d n=%d offset=%d fileSize=%d goroutine=%d",
-	//b		off/8192, n, off, currentFileSize(d.fd), runtime.NumGoroutine(),
-	//b	))
-	//b}
-
-	// fmt.Printf("(diskmanager) reading at offset %d(page %d), result -> %v\n", off, off/8192, (*buff))
 
 	return nil
 }
